@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# lsb_release - print distribution-specific information
+#
+# This is a simple implementation that reads /etc/os-release
+# and provides output similar to the real lsb_release command.
+#
+
+# Function to show usage
+usage() {
+    echo "Usage: lsb_release [options]"
+    echo
+    echo "Options:"
+    echo "  -h, --help         Show this help message and exit"
+    echo "  -v, --version      Show the LSB version of the command"
+    echo "  -i, --id           Show the distributor ID"
+    echo "  -d, --description  Show the description of the distribution"
+    echo "  -r, --release      Show the release number of the distribution"
+    echo "  -c, --codename     Show the codename of the distribution"
+    echo "  -a, --all          Show all of the above information"
+    echo "  -s, --short        Show all of the above information in short format"
+    exit 0
+}
+
+# Source the os-release file
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+else
+    echo "Error: /etc/os-release not found." >&2
+    exit 1
+fi
+
+# Default values if not set in os-release
+ID=${ID:-N/A}
+NAME=${NAME:-N/A}
+VERSION_ID=${VERSION_ID:-N/A}
+VERSION_CODENAME=${VERSION_CODENAME:-N/A}
+
+# Parse command-line options
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+output_all() {
+    echo "LSB Version:    n/a"
+    echo "Distributor ID: $ID"
+    echo "Description:    $NAME"
+    echo "Release:        $VERSION_ID"
+    echo "Codename:       $VERSION_CODENAME"
+}
+
+output_short() {
+    echo "n/a"
+    echo "$ID"
+    echo "$NAME"
+    echo "$VERSION_ID"
+    echo "$VERSION_CODENAME"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -v|--version)
+            echo "n/a"
+            exit 0
+            ;;
+        -i|--id)
+            echo "$ID"
+            exit 0
+            ;;
+        -d|--description)
+            echo "$NAME"
+            exit 0
+            ;;
+        -r|--release)
+            echo "$VERSION_ID"
+            exit 0
+            ;;
+        -c|--codename)
+            echo "$VERSION_CODENAME"
+            exit 0
+            ;;
+        -a|--all)
+            output_all
+            exit 0
+            ;;
+        -s|--short)
+            output_short
+            exit 0
+            ;;
+        *)
+            echo "Error: invalid option '$1'" >&2
+            usage
+            ;;
+    esac
+    shift
+done
