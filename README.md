@@ -1,8 +1,8 @@
-![luckfox](https://github.com/LuckfoxTECH/luckfox-pico/assets/144299491/cec5c4a5-22b9-4a9a-abb1-704b11651e88)
-# Luckfox Pico SDK
+![luxfox](assets/mascot.png)
+# Luxfox Pico SDK
 [中文版](./README_CN.md)
 * This SDK is modified based on the SDK provided by Rockchip
-* It provides a customized SDK specifically for Luckfox Pico series development boards 
+* It provides a customized SDK specifically for Luxfox Pico series development boards 
 * Aimed at providing developers with a better programming experience
 ## SDK Updatelog
 + Current Version: V1.4
@@ -20,7 +20,7 @@ sudo apt-get install -y git ssh make gcc gcc-multilib g++-multilib module-assist
 ```
 ### Get SDK
 ```
-git clone https://github.com/LuckfoxTECH/luckfox-pico.git
+git clone https://github.com/usalko/luxfox.git
 ```
 ### Environment Variables
 * The cross-compilation toolchain needs to be set Environment Variables
@@ -31,11 +31,11 @@ source env_install_toolchain.sh
 ### Get the SDK
 * GitHub
     ```
-    git clone <https://github.com/LuckfoxTECH/luckfox-pico.git>
+    git clone <https://github.com/usalko/luxfox.git>
     ```
 * Gitee
     ```
-    git clone <https://gitee.com/LuckfoxTECH/luckfox-pico.git>
+    git clone <https://gitee.com/usalko/luxfox.git>
     ```
 ### Instructions for build.sh
 * The build.sh script is used to automate the compilation process. 
@@ -85,26 +85,26 @@ kernelconfig       -config kernel and save defconfig"
 ```shell
 ./build.sh lunch
 ```
-+ Output the corresponding Luckfox-pico hardware model. Enter the corresponding number to proceed to the storage media options (press Enter to select option [0] directly).
++ Output the corresponding Luxfox-pico hardware model. Enter the corresponding number to proceed to the storage media options (press Enter to select option [0] directly).
   ```shell 
   You're building on Linux
-  Lunch menu...pick the Luckfox Pico hardware version:
-  选择 Luckfox Pico 硬件版本:
-                [0] RV1103_Luckfox_Pico
-                [1] RV1103_Luckfox_Pico_Mini
-                [2] RV1103_Luckfox_Pico_Plus
-                [3] RV1103_Luckfox_Pico_WebBee
-                [4] RV1106_Luckfox_Pico_Pro_Max
-                [5] RV1106_Luckfox_Pico_Ultra
-                [6] RV1106_Luckfox_Pico_Ultra_W
-                [7] RV1106_Luckfox_Pico_Pi
-                [8] RV1106_Luckfox_Pico_Pi_W
-                [9] RV1106_Luckfox_Pico_86Panel
-                [10] RV1106_Luckfox_Pico_86Panel_W
+  Lunch menu...pick the Luxfox Pico hardware version:
+  选择 Luxfox Pico 硬件版本:
+                [0] RV1103_Luxfox_Pico
+                [1] RV1103_Luxfox_Pico_Mini
+                [2] RV1103_Luxfox_Pico_Plus
+                [3] RV1103_Luxfox_Pico_WebBee
+                [4] RV1106_Luxfox_Pico_Pro_Max
+                [5] RV1106_Luxfox_Pico_Ultra
+                [6] RV1106_Luxfox_Pico_Ultra_W
+                [7] RV1106_Luxfox_Pico_Pi
+                [8] RV1106_Luxfox_Pico_Pi_W
+                [9] RV1106_Luxfox_Pico_86Panel
+                [10] RV1106_Luxfox_Pico_86Panel_W
                 [11] custom
   Which would you like? [0~11][default:0]:
   ```
-+ Output the supported storage media for the corresponding Luckfox-pico hardware model. Enter the corresponding number to proceed to the root filesystem options (press Enter to select option [0] directly).For example, Luckfox Pico Plus.
++ Output the supported storage media for the corresponding Luxfox-pico hardware model. Enter the corresponding number to proceed to the root filesystem options (press Enter to select option [0] directly).For example, Luxfox Pico Plus.
   ```shell
     Lunch menu...pick the boot medium:
     选择启动媒介:
@@ -113,7 +113,7 @@ kernelconfig       -config kernel and save defconfig"
 
   Which would you like? [0~1][default:0]:
   ```
-+ Output the supported root filesystem types for the corresponding Luckfox-pico hardware model. Enter the corresponding number to complete the configuration (press Enter to select option [0] directly).
++ Output the supported root filesystem types for the corresponding Luxfox-pico hardware model. Enter the corresponding number to complete the configuration (press Enter to select option [0] directly).
   ```shell
     Lunch menu...pick the system version:
     选择系统版本:
@@ -121,157 +121,157 @@ kernelconfig       -config kernel and save defconfig"
 
   Which would you like? [0~1][default:0]:
   ```
-+ If you need to use the old configuration method or a custom board support file, select the "[7]custom" option when configuring the Luckfox-pico hardware model.
++ If you need to use the old configuration method or a custom board support file, select the "[7]custom" option when configuring the Luxfox-pico hardware model.
   ```shell 
   You're building on Linux
-    Lunch menu...pick the Luckfox Pico hardware version:
-    选择 Luckfox Pico 硬件版本:
-                  [0] RV1103_Luckfox_Pico
-                  [1] RV1103_Luckfox_Pico_Mini
-                  [2] RV1103_Luckfox_Pico_Plus
-                  [3] RV1103_Luckfox_Pico_WebBee
-                  [4] RV1106_Luckfox_Pico_Pro_Max
-                  [5] RV1106_Luckfox_Pico_Ultra
-                  [6] RV1106_Luckfox_Pico_Ultra_W
-                  [7] RV1106_Luckfox_Pico_Pi
-                  [8] RV1106_Luckfox_Pico_Pi_W
-                  [9] RV1106_Luckfox_Pico_86Panel
-                  [10] RV1106_Luckfox_Pico_86Panel_W
+    Lunch menu...pick the Luxfox Pico hardware version:
+    选择 Luxfox Pico 硬件版本:
+                  [0] RV1103_Luxfox_Pico
+                  [1] RV1103_Luxfox_Pico_Mini
+                  [2] RV1103_Luxfox_Pico_Plus
+                  [3] RV1103_Luxfox_Pico_WebBee
+                  [4] RV1106_Luxfox_Pico_Pro_Max
+                  [5] RV1106_Luxfox_Pico_Ultra
+                  [6] RV1106_Luxfox_Pico_Ultra_W
+                  [7] RV1106_Luxfox_Pico_Pi
+                  [8] RV1106_Luxfox_Pico_Pi_W
+                  [9] RV1106_Luxfox_Pico_86Panel
+                  [10] RV1106_Luxfox_Pico_86Panel_W
                   [11] custom
   Which would you like? [0~11][default:0]: 11
   ----------------------------------------------------------------
-  0. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_86Panel-IPC.mk
+  0. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_86Panel-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_86Panel
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_86Panel
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  1. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_86Panel_W-IPC.mk
+  1. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_86Panel_W-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_86Panel_W
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_86Panel_W
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  2. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Pi-IPC.mk
+  2. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_Pi-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Pi
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Pi
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  3. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Pi_W-IPC.mk
+  3. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_Pi_W-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Pi_W
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Pi_W
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  4. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Ultra-IPC.mk
+  4. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_Ultra-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Ultra
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Ultra
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  5. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Ultra_W-IPC.mk
+  5. BoardConfig_IPC/BoardConfig-EMMC-Buildroot-RV1106_Luxfox_Pico_Ultra_W-IPC.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Ultra_W
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Ultra_W
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  6. BoardConfig_IPC/BoardConfig-EMMC-Busybox-RV1106_Luckfox_Pico_Ultra-IPC_FASTBOOT.mk
+  6. BoardConfig_IPC/BoardConfig-EMMC-Busybox-RV1106_Luxfox_Pico_Ultra-IPC_FASTBOOT.mk
                                boot medium(启动介质): EMMC
                             system version(系统版本): Busybox
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Ultra
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Ultra
                                application(应用场景): IPC_FASTBOOT
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  7. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luckfox_Pico-IPC.mk
+  7. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luxfox_Pico-IPC.mk
                                boot medium(启动介质): SD_CARD
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico
+                          hardware version(硬件版本): RV1103_Luxfox_Pico
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  8. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luckfox_Pico_Mini-IPC.mk
+  8. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luxfox_Pico_Mini-IPC.mk
                                boot medium(启动介质): SD_CARD
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_Mini
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_Mini
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  9. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luckfox_Pico_Plus-IPC.mk
+  9. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luxfox_Pico_Plus-IPC.mk
                                boot medium(启动介质): SD_CARD
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_Plus
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_Plus
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  10. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luckfox_Pico_WebBee-IPC.mk
+  10. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1103_Luxfox_Pico_WebBee-IPC.mk
                                boot medium(启动介质): SD_CARD
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_WebBee
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_WebBee
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  11. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk
+  11. BoardConfig_IPC/BoardConfig-SD_CARD-Buildroot-RV1106_Luxfox_Pico_Pro_Max-IPC.mk
                                boot medium(启动介质): SD_CARD
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Pro_Max
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Pro_Max
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  12. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luckfox_Pico_Mini-IPC.mk
+  12. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luxfox_Pico_Mini-IPC.mk
                                boot medium(启动介质): SPI_NAND
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_Mini
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_Mini
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  13. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luckfox_Pico_Plus-IPC.mk
+  13. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luxfox_Pico_Plus-IPC.mk
                                boot medium(启动介质): SPI_NAND
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_Plus
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_Plus
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  14. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luckfox_Pico_WebBee-IPC.mk
+  14. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1103_Luxfox_Pico_WebBee-IPC.mk
                                boot medium(启动介质): SPI_NAND
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1103_Luckfox_Pico_WebBee
+                          hardware version(硬件版本): RV1103_Luxfox_Pico_WebBee
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  15. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1106_Luckfox_Pico_Pro_Max-IPC.mk
+  15. BoardConfig_IPC/BoardConfig-SPI_NAND-Buildroot-RV1106_Luxfox_Pico_Pro_Max-IPC.mk
                                boot medium(启动介质): SPI_NAND
                             system version(系统版本): Buildroot
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Pro_Max
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Pro_Max
                                application(应用场景): IPC
   ----------------------------------------------------------------
 
   ----------------------------------------------------------------
-  16. BoardConfig_IPC/BoardConfig-SPI_NAND-Busybox-RV1106_Luckfox_Pico_Pro_Max-IPC_FASTBOOT.mk
+  16. BoardConfig_IPC/BoardConfig-SPI_NAND-Busybox-RV1106_Luxfox_Pico_Pro_Max-IPC_FASTBOOT.mk
                                boot medium(启动介质): SPI_NAND
                             system version(系统版本): Busybox
-                          hardware version(硬件版本): RV1106_Luckfox_Pico_Pro_Max
+                          hardware version(硬件版本): RV1106_Luxfox_Pico_Pro_Max
                                application(应用场景): IPC_FASTBOOT
   ----------------------------------------------------------------
   ```

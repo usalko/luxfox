@@ -130,19 +130,19 @@ post_chk() {
 		rk_mpi_ao_test -i /oem/usr/share/speaker_test.wav --sound_card_name=hw:0,0 --device_ch=2 --device_rate=8000 --input_rate=8000 --input_ch=2 --set_volume 50
 	fi
 
-	csi_unite=$(( $(luckfox-config get_csi_unite) ))
+	csi_unite=$(( $(luxfox-config get_csi_unite) ))
 	if [ -z csi_unite ]; then
 		csi_unite=0
 	fi
 	if lsmod | grep 'imx415' | awk '{print $3}' | grep -w 1; then
 		if [ $csi_unite == "0" ]; then
-			luckfox-config set_csi_unite 1
+			luxfox-config set_csi_unite 1
 			echo "[rkipc] Set rockchip,unite to 1; rkipc requires a reboot to function properly."
 			return
 		fi
 	else
 		if [ $csi_unite == "1" ]; then
-			luckfox-config set_csi_unite 0
+			luxfox-config set_csi_unite 0
 			echo "[rkipc] Set rockchip,unite to 0; rkipc requires a reboot to function properly."
 			return
 		fi
