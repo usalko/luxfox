@@ -96,7 +96,7 @@ RadioTap (TX: present=RATE|TX_FLAGS; RX: читаем dbm_signal)
      payload[]  = ULAMA L1 frame (14B header + ≤220B), как из ulama_frame_pack()
 ```
 
-- [ ] **4.1** Зафиксировать константы: `UNOW_OUI`, `UNOW_BSSID`, subtype'ы
+- [x] **4.1** Зафиксировать константы: `UNOW_OUI`, `UNOW_BSSID`, subtype'ы
   (`DATA`, опц. `BEACON/PROBE` не нужны). Документировать в `include/unow/unow_wire.h`.
 - [ ] **4.2** Помнить: `ULAMA_ESPNOW_MAX_PAYLOAD = 240` (radio_espnow.h). 802.11
   + RadioTap + action-header укладываются в ~250-байтовый «esp-now-подобный»
@@ -122,11 +122,11 @@ void unow_set_control_callback(radio_espnow_control_cb_t cb, void *ctx);
 void unow_get_stats(radio_espnow_stats_t *out);       // та же struct статистики
 ```
 
-- [ ] **5.1** Заголовок-алиас: `radio_espnow_*` → `unow_*` (макросы/обёртки), чтобы
+- [x] **5.1** Заголовок-алиас: `radio_espnow_*` → `unow_*` (макросы/обёртки), чтобы
   перенесённый `link_manager.c` собрался без правок.
-- [ ] **5.2** Сохранить семантику ESP-NOW: broadcast-MAC `ff:..:ff`, peer-таблица,
+- [~] **5.2** Сохранить семантику ESP-NOW: broadcast-MAC `ff:..:ff`, peer-таблица,
   «первый услышанный peer фиксируется» (как `s_peer_known` в radio_espnow.c).
-- [ ] **5.3** Статистика — заполнять ту же `radio_espnow_stats_t` (tx/rx/fail/rssi
+- [~] **5.3** Статистика — заполнять ту же `radio_espnow_stats_t` (tx/rx/fail/rssi
   min/max/last, queue depth), чтобы `ULAMA_STATS` работал без изменений.
 
 ---
@@ -134,16 +134,16 @@ void unow_get_stats(radio_espnow_stats_t *out);       // та же struct ста
 ## 6. Реализация на устройстве (C/libpcap) — `media/unow/src/`
 
 ### 6.1 Bring-up интерфейса
-- [ ] **6.1.1** `unow_iface.c`: программно (без скрипта) или через вызов
+- [~] **6.1.1** `unow_iface.c`: программно (без скрипта) или через вызов
   helper-скрипта поднять monitor+channel; читать self-MAC. Идемпотентность.
-- [ ] **6.1.2** Открыть `pcap` на `mon0` (`pcap_open_live`, `DLT_IEEE802_11_RADIO`),
+- [x] **6.1.2** Открыть `pcap` на `mon0` (`pcap_open_live`, `DLT_IEEE802_11_RADIO`),
   выставить `pcap_setnonblock`/таймаут, `pcap_set_immediate_mode`.
 
 ### 6.2 TX-путь (inject)
-- [ ] **6.2.1** Преаллоцированный буфер кадра: `[RadioTap][Dot11 action hdr]
+- [x] **6.2.1** Преаллоцированный буфер кадра: `[RadioTap][Dot11 action hdr]
   [OUI/subtype][payload]`. RadioTap с полем **rate** (фикс legacy) и TX_FLAGS
   (`NOACK|NOSEQ`).
-- [ ] **6.2.2** `unow_send()`: заполнить addr1=dst/bcast, addr2=self, addr3=BSSID,
+- [x] **6.2.2** `unow_send()`: заполнить addr1=dst/bcast, addr2=self, addr3=BSSID,
   вкопировать payload, `pcap_inject()`. Без аллокаций на горячем пути (важно для
   VIDEO-битрейта — фикс замечания совета о `std::vector` per-send).
 - [ ] **6.2.3** TX-воркер + очередь (как radio_espnow: ring, eviction старых,
@@ -161,8 +161,15 @@ void unow_get_stats(radio_espnow_stats_t *out);       // та же struct ста
   знает про их семантику (это L2 ULAMA).
 
 ### 6.4 RadioTap helpers
-- [ ] **6.4.1** `unow_radiotap.c`: минимальный билдер TX-RadioTap (rate, tx_flags)
+- [x] **6.4.1** `unow_radiotap.c`: минимальный билдер TX-RadioTap (rate, tx_flags)
   и парсер RX-RadioTap (present-bitmap → dbm_signal). Без внешних либ.
+
+### 6.5 Диагностика
+- [x] **6.5.1** `unow_diag`: отдельный bin/target для LuckFox, который умеет
+  инициализировать интерфейс, печатать state/stats, отправлять тестовый UNOW-кадр
+  и слушать эфир с декодированием UNOW payload + RSSI.
+- [x] **6.5.2** Базовый log layer: `UNOW_LOG_LEVEL`, уровни `error..trace`,
+  hexdump TX-пакетов и явные сообщения при ошибках bring-up/pcap/inject.
 
 ---
 
@@ -184,7 +191,7 @@ uclibc-ограничений и это быстрый способ получи
 
 ## 8. Сборка — `media/unow/Makefile`
 
-- [ ] **8.1** Makefile по образцу `media/luxfox/Makefile`: `CC :=
+- [x] **8.1** Makefile по образцу `media/luxfox/Makefile`: `CC :=
   $(RK_MEDIA_CROSS)-gcc`, собрать `libunow.a` (+ `.so`), линковка `-lpcap`.
 - [ ] **8.2** Гарантировать `BR2_PACKAGE_LIBPCAP=y` в Buildroot (сейчас приходит
   транзитивно через `tcpdump`; добавить явно, чтобы не зависеть от tcpdump).
@@ -197,9 +204,9 @@ uclibc-ограничений и это быстрый способ получи
 
 ## 9. Скрипты bring-up — `media/unow/scripts/`
 
-- [ ] **9.1** `unow-mon.sh` — обобщить `wifi_mon.sh`: параметризовать имя
+- [x] **9.1** `unow-mon.sh` — обобщить `wifi_mon.sh`: параметризовать имя
   интерфейса и канал (`$IFACE`, `$CHAN`), убрать хардкод `wlx088af1287d57`.
-- [ ] **9.2** `unow-down.sh` — на базе `wifi_up.sh` (выход из monitor, рестарт
+- [x] **9.2** `unow-down.sh` — на базе `wifi_up.sh` (выход из monitor, рестарт
   NetworkManager на desktop; на LuckFox — просто `ip link set ... down`).
 - [ ] **9.3** Документировать выбор канала/региона/мощности (совет §5: HT20,
   фикс rate, max TX-power региона, внешняя антенна на RP-SMA).
