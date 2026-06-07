@@ -29,7 +29,7 @@ int aicwf_set_rf_config_8800d80(struct rwnx_hw *rwnx_hw,
 			return -1;
 		}
 	} else if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80X2) {
-		if ((ret = rwnx_send_txpwr_lvl_v4_req(rwnx_hw))) {
+		if ((ret = rwnx_send_txpwr_lvl_v3_req(rwnx_hw))) {
 			return -1;
 		}
 		if ((ret = rwnx_send_txpwr_ofst2x_v2_req(rwnx_hw))) {
@@ -37,7 +37,7 @@ int aicwf_set_rf_config_8800d80(struct rwnx_hw *rwnx_hw,
 		}
 	}
 
-	if ((ret = rwnx_send_txpwr_lvl_adj_req(rwnx_hw))) {
+	if ((ret = rwnx_send_txpwr_lvl_v3_req(rwnx_hw))) {
 		return -1;
 	}
 

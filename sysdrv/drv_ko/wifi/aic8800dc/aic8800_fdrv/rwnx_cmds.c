@@ -617,3 +617,8 @@ void aicwf_set_cmd_tx(void *dev, struct lmac_msg *msg, uint len)
 
 	aicwf_bus_txmsg(bus, buffer, len + 8);
 }
+
+int rwnx_send_set_monitor_mode_req(struct rwnx_hw *rwnx_hw, int freq, bool fcsfail, bool control, bool other_bss, bool promisc)
+{
+	return -EOPNOTSUPP;
+}

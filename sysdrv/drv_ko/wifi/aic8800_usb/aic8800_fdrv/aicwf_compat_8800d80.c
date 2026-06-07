@@ -30,6 +30,20 @@ int aicwf_set_rf_config_8800d80(struct rwnx_hw *rwnx_hw, struct mm_set_rf_calib_
 	return 0 ;
 }
 
+void aicwf_set_mon_8800d80(struct rwnx_hw *rwnx_hw, int freq, int flags)
+{
+	struct rwnx_vif *vif = rwnx_hw->vif_table[0];
+	if (!vif)
+		return;
+
+	if (flags & MONITOR_FLAG_COOK_FRAMES) {
+		printk("AIC8800D80 not support COOK_FRAMES\n");
+		return;
+	}
+
+	rwnx_send_set_monitor_mode_req(rwnx_hw, freq, flags & MONITOR_FLAG_FCSFAIL, flags & MONITOR_FLAG_CONTROL,
+		flags & MONITOR_FLAG_OTHER_BSS, flags & MONITOR_FLAG_ACTIVE);
+}
 
 int	rwnx_plat_userconfig_load_8800d80(struct rwnx_hw *rwnx_hw){
     int size;

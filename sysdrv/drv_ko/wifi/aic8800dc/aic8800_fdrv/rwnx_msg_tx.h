@@ -213,18 +213,10 @@ int rwnx_send_txpwr_ofst2x_v2_req(struct rwnx_hw *rwnx_hw);
 int rwnx_send_set_filter(struct rwnx_hw *rwnx_hw, uint32_t filter);
 int rwnx_send_txpwr_lvl_req(struct rwnx_hw *rwnx_hw);
 int rwnx_send_txpwr_lvl_v3_req(struct rwnx_hw *rwnx_hw);
-int rwnx_send_txpwr_lvl_v4_req(struct rwnx_hw *rwnx_hw);
-int rwnx_send_txpwr_lvl_adj_req(struct rwnx_hw *rwnx_hw);
-#ifdef CONFIG_APF
-int rwnx_send_set_apf_prog_req(struct rwnx_hw *rwnx_hw, u8_l *program,
-			       u32_l program_len);
-int rwnx_send_get_apf_prog_req(struct rwnx_hw *rwnx_hw, u8_l *program,
-			       u32_l program_len);
-#endif
+int rwnx_send_set_monitor_mode_req(struct rwnx_hw *rwnx_hw, int freq, bool fcsfail, bool control, bool other_bss, bool promisc);
 
-#ifdef CONFIG_SDIO_BT
-int rwnx_sdio_bt_send_req(struct rwnx_hw *rwnx_hw, uint32_t len,
-			  struct sk_buff *skb);
+#ifdef CONFIG_USB_BT
+int rwnx_send_reboot(struct rwnx_hw *rwnx_hw);
 #endif
 
 #endif /* _RWNX_MSG_TX_H_ */

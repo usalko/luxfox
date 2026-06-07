@@ -24,6 +24,10 @@
 #else
 #include "aicwf_usb.h"
 #endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#include <net/mac80211.h>
+#endif
 /**
  *
  */
@@ -541,5 +545,29 @@ void aicwf_set_cmd_tx(void *dev, struct lmac_msg *msg, uint len)
     memcpy(&buffer[index], (u8 *)msg->param, msg->param_len);
 
     aicwf_bus_txmsg(bus, buffer, len + 8);
+}
+
+int rwnx_send_set_monitor_mode_req(struct rwnx_hw *rwnx_hw, int freq, bool fcsfail, bool control, bool other_bss, bool promisc)
+{
+	struct rwnx_cmd *cmd;
+	struct set_monitor_mode_req *req;
+	int ret;
+
+	cmd = rwnx_cmd_alloc(rwnx_hw, RWNX_CMD_FLAG_NONBLOCK, ME_SET_MONITOR_MODE_REQ,
+						 sizeof(struct set_monitor_mode_req), (void **)&req);
+	if (!cmd)
+		return -ENOMEM;
+
+	req->freq = freq;
+	req->fcsfail = fcsfail;
+	req->control = control;
+	req->other_bss = other_bss;
+	req->promisc = promisc;
+
+	ret = rwnx_hw->cmd_mgr.queue(&rwnx_hw->cmd_mgr, cmd);
+	if (ret)
+		printk("set monitor mode fail\n");
+
+	return ret;
 }
 

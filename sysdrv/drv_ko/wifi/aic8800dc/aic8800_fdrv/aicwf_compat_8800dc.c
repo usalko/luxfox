@@ -2,6 +2,9 @@
 #include "rwnx_msg_tx.h"
 #include "reg_access.h"
 #include "aic_bsp_export.h"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#include <net/mac80211.h>
+#endif
 
 #define RWNX_MAC_RF_PATCH_BASE_NAME_8800DC "fmacfw_rf_patch_8800dc"
 #define RWNX_MAC_RF_PATCH_NAME_8800DC RWNX_MAC_RF_PATCH_BASE_NAME_8800DC ".bin"
@@ -562,68 +565,39 @@ int aicwf_set_rf_config_8800dc(struct rwnx_hw *rwnx_hw,
 		if ((ret = rwnx_send_rf_calib_req(rwnx_hw, cfm))) {
 			return -1;
 		}
-	} else if (testmode == 1) {
-		if (chip_sub_id >= 1) {
-#ifdef CONFIG_DPD
-#ifndef CONFIG_FORCE_DPD_CALIB
-			if (is_file_exist(FW_DPDRESULT_NAME_8800DC) == 1) {
-				AICWFDBG(LOGINFO, "%s load dpd bin\n",
-					 __func__);
-				ret = aicwf_fdrv_dpd_result_load_8800dc(
-					rwnx_hw, &dpd_res);
-				if (ret) {
-					AICWFDBG(LOGINFO,
-						 "load dpd bin fail: %d\n",
-						 ret);
-					return ret;
-				}
-			}
-#endif
-			if (dpd_res.bit_mask[1]) {
-				ret = aicwf_fdrv_dpd_result_apply_8800dc(
-					rwnx_hw, &dpd_res);
-				if (ret) {
-					AICWFDBG(LOGINFO,
-						 "apply dpd bin fail: %d\n",
-						 ret);
-					return ret;
-				}
-			}
-#elif defined(CONFIG_LOFT_CALIB)
-			if (loft_res_local.bit_mask[1]) {
-				ret = aicwf_fdrv_loft_result_apply_8800dc(
-					rwnx_hw, &loft_res_local);
-				if (ret) {
-					AICWFDBG(LOGINFO,
-						 "apply loft res fail: %d\n",
-						 ret);
-					return ret;
-				}
-			}
-#else
-			{
-				ret = aicwf_fdrv_misc_ram_init_8800dc(rwnx_hw);
-				if (ret) {
-					AICWFDBG(LOGINFO,
-						 "misc ram init fail: %d\n",
-						 ret);
-					return ret;
-				}
-			}
-#endif
-			ret = rwnx_send_rf_calib_req(rwnx_hw, cfm);
-			if (ret) {
-				AICWFDBG(LOGINFO, "rf calib req fail: %d\n",
-					 ret);
-				return ret;
-			}
-		}
 	}
-
 	return 0;
 }
 
-int rwnx_plat_userconfig_load_8800dc(struct rwnx_hw *rwnx_hw)
+void aicwf_set_mon_8800dc(struct rwnx_hw *rwnx_hw, int freq, int flags)
+{
+	struct rwnx_vif *vif = rwnx_hw->vif_table[0];
+	struct me_config_monitor_cfm cfm;
+	struct cfg80211_chan_def chandef;
+	struct ieee80211_channel *chan = NULL;
+	if (!vif)
+		return;
+
+	if (flags & MONITOR_FLAG_COOK_FRAMES) {
+		printk("AIC8800DC not support COOK_FRAMES\n");
+		return;
+	}
+
+	if (freq > 0)
+		chan = ieee80211_get_channel(rwnx_hw->wiphy, freq);
+
+	if (chan) {
+		memset(&chandef, 0, sizeof(chandef));
+		chandef.chan = chan;
+		chandef.width = NL80211_CHAN_WIDTH_20;
+		chandef.center_freq1 = freq;
+		rwnx_send_config_monitor_req(rwnx_hw, &chandef, &cfm);
+	} else {
+		rwnx_send_config_monitor_req(rwnx_hw, NULL, &cfm);
+	}
+}
+
+int	rwnx_plat_userconfig_load_8800dc(struct rwnx_hw *rwnx_hw)
 {
 	int size;
 	u32 *dst = NULL;

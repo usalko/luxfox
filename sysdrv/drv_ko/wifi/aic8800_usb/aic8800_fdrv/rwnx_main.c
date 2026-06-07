@@ -60,6 +60,7 @@
 #define RW_DRV_DESCRIPTION  "RivieraWaves 11nac driver for Linux cfg80211"
 #define RW_DRV_COPYRIGHT    "Copyright(c) 2015-2017 RivieraWaves"
 #define RW_DRV_AUTHOR       "RivieraWaves S.A.S"
+#define AIC_DRIVER_VERSION  "AIC_DRIVER_VERSION_20240606_1"
 
 #define RWNX_PRINT_CFM_ERR(req) \
         printk(KERN_CRIT "%s: Status Error(%d)\n", #req, (&req##_cfm)->status)
@@ -375,9 +376,12 @@ static struct ieee80211_iface_limit rwnx_limits[] = {
 #ifndef CONFIG_USE_P2P0
     { .max = 1,
       .types = BIT(NL80211_IFTYPE_P2P_DEVICE),
+    },
+#endif
+#endif
+    { .max = 1,
+      .types = BIT(NL80211_IFTYPE_MONITOR),
     }
-#endif
-#endif
 };
 
 static struct ieee80211_iface_limit rwnx_limits_dfs[] = {
@@ -402,6 +406,37 @@ static const struct ieee80211_iface_combination rwnx_combinations[] = {
                                 BIT(NL80211_CHAN_WIDTH_40) |
                                 BIT(NL80211_CHAN_WIDTH_80)),
     }
+};
+
+static struct ieee80211_iface_limit rwnx_limits_monitor_sta[] = {
+    { .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
+    { .max = 1, .types = BIT(NL80211_IFTYPE_STATION) },
+};
+
+static struct ieee80211_iface_limit rwnx_limits_monitor_ap[] = {
+    { .max = 1, .types = BIT(NL80211_IFTYPE_MONITOR) },
+    { .max = 1, .types = BIT(NL80211_IFTYPE_AP) },
+};
+
+static const struct ieee80211_iface_combination rwnx_combinations_ext[] = {
+    {
+        .limits                 = rwnx_limits,
+        .n_limits               = ARRAY_SIZE(rwnx_limits),
+        .num_different_channels = NX_CHAN_CTXT_CNT,
+        .max_interfaces         = NX_VIRT_DEV_MAX,
+    },
+    {
+        .limits                 = rwnx_limits_monitor_sta,
+        .n_limits               = ARRAY_SIZE(rwnx_limits_monitor_sta),
+        .num_different_channels = 1,
+        .max_interfaces         = 2,
+    },
+    {
+        .limits                 = rwnx_limits_monitor_ap,
+        .n_limits               = ARRAY_SIZE(rwnx_limits_monitor_ap),
+        .num_different_channels = 1,
+        .max_interfaces         = 2,
+    },
 };
 
 /* There isn't a lot of sense in it, but you can transmit anything you like */
@@ -461,6 +496,10 @@ rwnx_default_mgmt_stypes[NUM_NL80211_IFTYPES] = {
         .rx = (BIT(IEEE80211_STYPE_ACTION >> 4) |
                BIT(IEEE80211_STYPE_AUTH >> 4) |
                BIT(IEEE80211_STYPE_DEAUTH >> 4)),
+    },
+    [NL80211_IFTYPE_MONITOR] = {
+        .tx = 0xffff,
+        .rx = 0xffff,
     },
 };
 
@@ -9212,12 +9251,13 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 #endif
     struct mm_set_stack_start_cfm set_start_cfm;
 #ifdef CONFIG_TEMP_COMP
-	struct mm_set_vendor_swconfig_cfm swconfig_cfm;
+    struct mm_set_vendor_swconfig_cfm swconfig_cfm;
 #endif
 
     int nx_remote_sta_max = NX_REMOTE_STA_MAX;
 
     RWNX_DBG(RWNX_FN_ENTRY_STR);
+    printk("%s\n", AIC_DRIVER_VERSION);
 
 
 if((g_rwnx_plat->usbdev->chipid == PRODUCT_ID_AIC8801) ||
@@ -9429,11 +9469,16 @@ if((g_rwnx_plat->usbdev->chipid == PRODUCT_ID_AIC8801) ||
         /* TDLS support */
         wiphy->features |= NL80211_FEATURE_TDLS_CHANNEL_SWITCH;
 
-    wiphy->iface_combinations   = rwnx_combinations;
-    /* -1 not to include combination with radar detection, will be re-added in
-       rwnx_handle_dynparams if supported */
-    wiphy->n_iface_combinations = ARRAY_SIZE(rwnx_combinations) - 1;
-    wiphy->reg_notifier = rwnx_reg_notifier;
+    #ifdef CONFIG_RWNX_MON_DATA
+        wiphy->iface_combinations   = rwnx_combinations_ext;
+        wiphy->n_iface_combinations = ARRAY_SIZE(rwnx_combinations_ext);
+    #else
+        wiphy->iface_combinations   = rwnx_combinations;
+        /* -1 not to include combination with radar detection, will be re-added in
+           rwnx_handle_dynparams if supported */
+        wiphy->n_iface_combinations = ARRAY_SIZE(rwnx_combinations) - 1;
+    #endif
+        wiphy->reg_notifier = rwnx_reg_notifier;
 
     wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 

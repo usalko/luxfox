@@ -52,10 +52,13 @@
 #include "aicwf_compat_8800dc.h"
 #include "aicwf_compat_8800d80.h"
 #include "rwnx_wakelock.h"
-#ifdef CONFIG_SDIO_BT
-#include "aic_btsdio.h"
-#endif
 #include "aic_priv_cmd.h"
+
+#define AIC_DRIVER_VERSION "v2.1.1"
+
+#if defined(CONFIG_RWNX_BF)
+#include "rwnx_bf.h"
+#endif /* CONFIG_RWNX_BF */
 
 #define RW_DRV_DESCRIPTION "RivieraWaves 11nac driver for Linux cfg80211"
 #define RW_DRV_COPYRIGHT "Copyright(c) 2015-2017 RivieraWaves"
@@ -3105,6 +3108,8 @@ void apm_staloss_work_process(struct work_struct *work)
 			break;
 		}
 	}
+	spin_unlock_bh(&rwnx_hw->cb_lock);
+
 	if (found) {
 		cur->ps.active = false;
 		cur->valid = false;
@@ -3139,8 +3144,10 @@ void apm_staloss_work_process(struct work_struct *work)
 		if ((rwnx_vif->wdev.iftype == NL80211_IFTYPE_STATION) ||
 		    (rwnx_vif->wdev.iftype == NL80211_IFTYPE_P2P_CLIENT)) {
 			BUG(); //should be other function
-		} else if ((rwnx_vif->wdev.iftype == NL80211_IFTYPE_AP) ||
-			   (rwnx_vif->wdev.iftype == NL80211_IFTYPE_P2P_GO)) {
+		} else if ((rwnx_vif->wdev.iftype ==
+			    NL80211_IFTYPE_AP) ||
+			   (rwnx_vif->wdev.iftype ==
+			    NL80211_IFTYPE_P2P_GO)) {
 			macaddr = cur->mac_addr;
 			printk("deinit:macaddr:%x,%x,%x,%x,%x,%x\r\n",
 			       macaddr[0], macaddr[1], macaddr[2], macaddr[3],
@@ -3217,6 +3224,7 @@ void apm_probe_sta_work_process(struct work_struct *work)
 		cfg80211_probe_status(rwnx_vif->ndev, mac,
 				      (u64)rwnx_vif->sta_probe.probe_id, 0, 0,
 				      false, GFP_ATOMIC);
+
 #else
 	if (found)
 		cfg80211_probe_status(rwnx_vif->ndev, mac,
@@ -3283,11 +3291,8 @@ static int rwnx_cfg80211_change_station(struct wiphy *wiphy,
 				sta->qos = (params->sta_flags_set &
 					    BIT(NL80211_STA_FLAG_WME)) != 0;
 #if LINUX_VERSION_CODE >= HIGH_KERNEL_VERSION
-				sta->ht =
-					params->link_sta_params.ht_capa ? 1 : 0;
-				sta->vht = params->link_sta_params.vht_capa ?
-						   1 :
-						   0;
+				sta->ht = params->link_sta_params.ht_capa ? 1 : 0;
+				sta->vht = params->link_sta_params.vht_capa ? 1 : 0;
 #else
 				sta->ht = params->ht_capa ? 1 : 0;
 				sta->vht = params->vht_capa ? 1 : 0;
@@ -3305,7 +3310,7 @@ static int rwnx_cfg80211_change_station(struct wiphy *wiphy,
 #ifdef CONFIG_DEBUG_FS
 				rwnx_dbgfs_register_rc_stat(rwnx_hw, sta);
 #endif
-				/* Ensure that we won't process PS change or channel switch ind*/
+				/* Ensure that we won't process PS change ind */
 				spin_lock_bh(&rwnx_hw->cb_lock);
 				rwnx_txq_sta_init(
 					rwnx_hw, sta,
@@ -4088,8 +4093,12 @@ static int rwnx_cfg80211_get_channel(struct wiphy *wiphy,
 		return -ENODATA;
 	}
 
-	if (rwnx_vif->vif_index == rwnx_hw->monitor_vif) {
-		//retrieve channel from firmware
+	if (rwnx_vif->vif_index == rwnx_hw->monitor_vif &&
+	    !rwnx_chanctx_valid(rwnx_hw, rwnx_vif->ch_index)) {
+		/* Only refresh monitor channel state from firmware when local
+		 * chanctx is missing. Querying it on every info request can drop a
+		 * valid chandef if firmware returns an incomplete monitor context.
+		 */
 		rwnx_cfg80211_set_monitor_channel(wiphy, NULL);
 	}
 
@@ -4625,7 +4634,7 @@ int rwnx_cfg80211_change_bss(struct wiphy *wiphy, struct net_device *dev,
 	int res = -EOPNOTSUPP;
 
 	if (((RWNX_VIF_TYPE(rwnx_vif) == NL80211_IFTYPE_AP) ||
-	     (RWNX_VIF_TYPE(rwnx_vif) == NL80211_IFTYPE_P2P_GO)) &&
+	    (RWNX_VIF_TYPE(rwnx_vif) == NL80211_IFTYPE_P2P_GO)) &&
 	    (params->ap_isolate > -1)) {
 		if (params->ap_isolate)
 			rwnx_vif->ap.flags |= RWNX_AP_ISOLATE;
@@ -4688,14 +4697,19 @@ static int rwnx_fill_station_info(struct rwnx_sta *sta, struct rwnx_vif *vif,
 		sinfo->txrate.nss = ((rate_info->mcsIndexTx >> 4) & 0x7) + 1;
 		break;
 #else
+	//kernel not support he
 	case FORMATMOD_HE_MU:
 	case FORMATMOD_HE_SU:
 	case FORMATMOD_HE_ER:
 		sinfo->txrate.flags = RATE_INFO_FLAGS_VHT_MCS;
-		sinfo->txrate.mcs = ((rate_info->mcsIndexTx & 0xF) > 9 ?
-					     9 :
-					     (rate_info->mcsIndexTx & 0xF));
-		sinfo->txrate.nss = ((rate_info->mcsIndexTx >> 4) & 0x7) + 1;
+		if (rate_info->mcs > 9) {
+			sinfo->txrate.mcs = 9;
+		} else {
+			sinfo->txrate.mcs = rate_info->mcs;
+		}
+		sinfo->txrate.mcs =
+			(rx_vect1->he.mcs > 9 ? 9 : rx_vect1->he.mcs);
+		sinfo->txrate.nss = rx_vect1->he.nss + 1;
 		break;
 #endif
 	default:
@@ -5292,7 +5306,7 @@ static int rwnx_cfg80211_join_mesh(struct wiphy *wiphy, struct net_device *dev,
 		   activation on MM_CHANNEL_SWITCH_IND (unless another vif use this
 		   ctxt). In anycase retest if radar detection must be activated
 		 */
-		if (rwnx_hw->cur_chanctx == mesh_start_cfm.ch_idx) {
+		if (txq_status == 0) {
 			rwnx_radar_detection_enable_on_cur_channel(rwnx_hw);
 		}
 		break;
@@ -5517,6 +5531,8 @@ static const struct wiphy_wowlan_support aic_wowlan_support = {
  */
 extern int aicwf_vendor_init(struct wiphy *wiphy);
 extern txpwr_idx_conf_t nvram_txpwr_idx;
+extern void *aicwf_prealloc_txq_alloc(size_t size);
+extern void aicwf_prealloc_txq_free(void);
 
 int rwnx_ic_system_init(struct rwnx_hw *rwnx_hw)
 {
@@ -5525,8 +5541,6 @@ int rwnx_ic_system_init(struct rwnx_hw *rwnx_hw)
 
 	mem_addr = 0x40500000;
 
-	//	if(rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DC ||
-	//		rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DW){
 	if (rwnx_send_dbg_mem_read_req(rwnx_hw, mem_addr, &rd_mem_addr_cfm)) {
 		return -1;
 	}
@@ -5547,11 +5561,11 @@ int rwnx_ic_system_init(struct rwnx_hw *rwnx_hw)
 	    rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80X2) {
 		u32 memdata_temp = 0x00000006;
 		int ret;
+
 		ret = rwnx_send_dbg_mem_block_write_req(rwnx_hw, 0x40504084, 4,
 							&memdata_temp);
 		if (ret) {
-			AICWFDBG(LOGERROR, "[0x40504084] write fail: %d\n",
-				 ret);
+			AICWFDBG(LOGERROR, "[0x40504084] write fail: %d\n", ret);
 			return -1;
 		}
 
@@ -5568,11 +5582,7 @@ int rwnx_ic_system_init(struct rwnx_hw *rwnx_hw)
 
 	if (rwnx_platform_on(rwnx_hw, NULL))
 		return -1;
-#if defined(CONFIG_START_FROM_BOOTROM)
-		//if (start_from_bootrom(rwnx_hw))
-		//	return -1;
-#endif
-	//	}
+
 	return 0;
 }
 
@@ -5608,93 +5618,6 @@ int rwnx_ic_rf_init(struct rwnx_hw *rwnx_hw)
 	return 0;
 }
 
-#ifdef CONFIG_PLATFORM_ALLWINNER
-#ifdef CONFIG_USE_CUSTOMER_MAC
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
-extern int get_custom_mac_address(int fmt, char *name, char *addr);
-#else
-extern int get_wifi_custom_mac_address(char *addr_str);
-#endif
-#endif //CONFIG_USE_CUSTOMER_MAC
-#endif //CONFIG_PLATFORM_ALLWINNER
-
-#ifdef CONFIG_PLATFORM_ROCKCHIP
-#include <linux/rfkill-wlan.h>
-#endif
-#ifdef CONFIG_PLATFORM_ROCKCHIP2
-#include <linux/rfkill-wlan.h>
-#endif
-
-#ifdef CONFIG_USE_CUSTOMER_MAC
-int rwnx_get_custom_mac_addr(u8_l *mac_addr_efuse)
-{
-	int ret = 0;
-
-#ifdef CONFIG_PLATFORM_ALLWINNER
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
-	ret = get_custom_mac_address(1, "wifi", mac_addr_efuse);
-#else
-	ret = get_wifi_custom_mac_address(addr_str);
-	if (ret >= 0) {
-		sscanf(addr_str, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
-		       &mac_addr_efuse[0], &mac_addr_efuse[1],
-		       &mac_addr_efuse[2], &mac_addr_efuse[3],
-		       &mac_addr_efuse[4], &mac_addr_efuse[5]);
-	}
-#endif
-
-#endif //CONFIG_PLATFORM_ALLWINNER
-
-#ifdef CONFIG_PLATFORM_ROCKCHIP
-	ret = rockchip_wifi_mac_addr(mac_addr_efuse);
-#endif //CONFIG_PLATFORM_ROCKCHIP
-#ifdef CONFIG_PLATFORM_ROCKCHIP2
-	ret = rockchip_wifi_mac_addr(mac_addr_efuse);
-#endif //CONFIG_PLATFORM_ROCKCHIP
-
-	if (ret == 0) {
-		AICWFDBG(LOGINFO, "%s %02x:%02x:%02x:%02x:%02x:%02x", __func__,
-			 mac_addr_efuse[0], mac_addr_efuse[1],
-			 mac_addr_efuse[2], mac_addr_efuse[3],
-			 mac_addr_efuse[4], mac_addr_efuse[5]);
-	}
-
-	return ret;
-}
-#endif
-
-#ifdef CONFIG_FOR_IPCAM
-void aic_ipc_setting(struct rwnx_vif *rwnx_vif)
-{
-	struct rwnx_hw *rwnx_hw = rwnx_vif->rwnx_hw;
-	uint32_t hw_edca = 1;
-	uint32_t hw_cca = 3;
-	int32_t param[14];
-	int32_t cca[5] = { 0x10, 0, 0, 0, 0 };
-
-	param[0] = 0xFA522;
-	param[1] = 0xFA522;
-	param[2] = 0xFA522;
-	param[3] = 0xFA522;
-	param[4] = rwnx_vif->vif_index;
-	param[5] = 0x1e;
-	param[6] = 0;
-	param[7] = 0;
-	param[8] = 0;
-	param[9] = 0x2;
-	param[10] = 0x2;
-	param[11] = 0x7;
-	param[12] = 0;
-	param[13] = 1;
-	rwnx_send_vendor_hwconfig_req(rwnx_hw, hw_edca, param, NULL);
-	rwnx_send_vendor_hwconfig_req(rwnx_hw, hw_cca, cca, NULL);
-}
-#endif
-
-extern void *aicwf_prealloc_txq_alloc(size_t size);
-#ifdef CONFIG_POWER_LIMIT
-extern char default_ccode[];
-#endif
 int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 {
 	struct rwnx_hw *rwnx_hw;
@@ -5703,18 +5626,12 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	struct wiphy *wiphy;
 	struct rwnx_vif *vif;
 	int i;
-	u8 dflt_mac[ETH_ALEN] = { 0x88, 0x00, 0x33, 0x77, 0x10, 0x99 };
-	u8 addr_str[20];
-	//struct mm_set_rf_calib_cfm cfm;
+	u8 dflt_mac[ETH_ALEN] = { 0x88, 0x00, 0x33, 0x77, 0x10, 0x99};
 	struct mm_get_fw_version_cfm fw_version;
 	u8_l mac_addr_efuse[ETH_ALEN];
 	struct aicbsp_feature_t feature;
 	struct mm_set_stack_start_cfm set_start_cfm;
-#ifdef CONFIG_TEMP_COMP
-	struct mm_set_vendor_swconfig_cfm swconfig_cfm;
-#endif
 	char fw_path[200];
-	(void)addr_str;
 
 	RWNX_DBG(RWNX_FN_ENTRY_STR);
 
@@ -5722,18 +5639,12 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	aicbsp_get_feature(&feature, fw_path);
 
 	get_random_bytes(&dflt_mac[4], 2);
-#ifdef CONFIG_POWER_LIMIT
-	memcpy(country_code, default_ccode, 4);
-#endif
 
-	/* create a new wiphy for use with cfg80211 */
-	AICWFDBG(LOGINFO, "%s sizeof(struct rwnx_hw):%d \r\n", __func__,
-		 (int)sizeof(struct rwnx_hw));
+	AICWFDBG(LOGINFO, "%s sizeof(struct rwnx_hw):%d \r\n", __func__, (int)sizeof(struct rwnx_hw));
 	wiphy = wiphy_new(&rwnx_cfg80211_ops, sizeof(struct rwnx_hw));
 
 	if (!wiphy) {
-		dev_err(rwnx_platform_get_dev(rwnx_plat),
-			"Failed to create new wiphy\n");
+		dev_err(rwnx_platform_get_dev(rwnx_plat), "Failed to create new wiphy\n");
 		ret = -ENOMEM;
 		goto err_out;
 	}
@@ -5756,14 +5667,12 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 
 #ifdef CONFIG_SCHED_SCAN
 	rwnx_hw->is_sched_scan = false;
-#endif //CONFIG_SCHED_SCAN
+#endif
 
 	aicwf_wakeup_lock_init(rwnx_hw);
 	rwnx_init_aic(rwnx_hw);
-	/* set device pointer for wiphy */
 	set_wiphy_dev(wiphy, rwnx_hw->dev);
 
-	/* Create cache to allocate sw_txhdr */
 	rwnx_hw->sw_txhdr_cache = KMEM_CACHE(rwnx_sw_txhdr, 0);
 	if (!rwnx_hw->sw_txhdr_cache) {
 		wiphy_err(wiphy, "Cannot allocate cache for sw TX header\n");
@@ -5775,15 +5684,7 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	tcp_ack_init(rwnx_hw);
 #endif
 
-#if 0
-	ret = rwnx_parse_configfile(rwnx_hw, RWNX_CONFIG_FW_NAME, &init_conf);
-	if (ret) {
-		wiphy_err(wiphy, "rwnx_parse_configfile failed\n");
-		goto err_config;
-	}
-#else
 	memcpy(init_conf.mac_addr, dflt_mac, ETH_ALEN);
-#endif
 
 	rwnx_hw->vif_started = 0;
 	rwnx_hw->monitor_vif = RWNX_INVALID_VIF;
@@ -5807,9 +5708,7 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 
 	rwnx_mu_group_init(rwnx_hw);
 
-	/* Initialize RoC element pointer to NULL, indicate that RoC can be started */
 	rwnx_hw->roc_elem = NULL;
-	/* Cookie can not be 0 */
 	rwnx_hw->roc_cookie_cnt = 1;
 
 	INIT_LIST_HEAD(&rwnx_hw->vifs);
@@ -5823,39 +5722,28 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	INIT_WORK(&rwnx_hw->apmStalossWork, apm_staloss_work_process);
 	rwnx_hw->apmStaloss_wq = create_singlethread_workqueue("apmStaloss_wq");
 	if (!rwnx_hw->apmStaloss_wq) {
-		txrx_err(
-			"insufficient memory to create apmStaloss workqueue.\n");
+		txrx_err("insufficient memory to create apmStaloss workqueue.\n");
 		goto err_cache;
 	}
 
 	wiphy->mgmt_stypes = rwnx_default_mgmt_stypes;
 	rwnx_hw->fwlog_en = feature.fwlog_en;
 
-	//init ic system
 	if ((ret = rwnx_ic_system_init(rwnx_hw))) {
 		goto err_lmac_reqs;
 	}
 
-	//ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, feature.hwinfo < 0, feature.hwinfo, 0, &set_start_cfm);
-#ifdef USE_5G
-	if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8801) {
-		ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, 0, CO_BIT(5), 0,
-						    &set_start_cfm);
-	}
-#else
 	if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8801) {
 		ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, 0, 0, 0,
 						    &set_start_cfm);
-	}
-#endif
-	else if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DC ||
-		 rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DW) {
+	} else if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DC ||
+		   rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DW) {
 		ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, 0, 0, 0,
 						    &set_start_cfm);
 		set_start_cfm.is_5g_support = false;
 	} else {
-		ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, 0, CO_BIT(5), 0,
-						    &set_start_cfm);
+		ret = rwnx_send_set_stack_start_req(rwnx_hw, 1, 0, CO_BIT(5),
+						    0, &set_start_cfm);
 	}
 
 	if (ret)
@@ -5864,9 +5752,8 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	AICWFDBG(LOGINFO, "is 5g support = %d, vendor_info = 0x%02X\n",
 		 set_start_cfm.is_5g_support, set_start_cfm.vendor_info);
 	rwnx_hw->band_5g_support = set_start_cfm.is_5g_support;
-	rwnx_hw->vendor_info = (feature.hwinfo < 0) ?
-				       set_start_cfm.vendor_info :
-				       feature.hwinfo;
+	rwnx_hw->vendor_info = (feature.hwinfo < 0) ? set_start_cfm.vendor_info :
+						       feature.hwinfo;
 
 	ret = rwnx_send_get_fw_version_req(rwnx_hw, &fw_version);
 	memcpy(wiphy->fw_version, fw_version.fw_version,
@@ -5887,7 +5774,6 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 		BIT(NL80211_IFTYPE_MONITOR);
 
 #if IS_ENABLED(CONFIG_PM)
-	/* Set WoWLAN flags */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
 	wiphy->wowlan = &aic_wowlan_support;
 #else
@@ -5896,40 +5782,34 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 #endif
 	wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL |
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0))
-			WIPHY_FLAG_HAS_CHANNEL_SWITCH |
+		WIPHY_FLAG_HAS_CHANNEL_SWITCH |
 #endif
-			WIPHY_FLAG_4ADDR_STATION | WIPHY_FLAG_4ADDR_AP;
+		WIPHY_FLAG_4ADDR_STATION | WIPHY_FLAG_4ADDR_AP;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
 	wiphy->max_num_csa_counters = BCN_MAX_CSA_CPT;
 #endif
 
-	wiphy->max_remain_on_channel_duration =
-		rwnx_hw->mod_params->roc_dur_max;
+	wiphy->max_remain_on_channel_duration = rwnx_hw->mod_params->roc_dur_max;
 
 	wiphy->features |= NL80211_FEATURE_NEED_OBSS_SCAN |
-			   NL80211_FEATURE_SK_TX_STATUS |
-			   NL80211_FEATURE_VIF_TXPOWER |
+		NL80211_FEATURE_SK_TX_STATUS | NL80211_FEATURE_VIF_TXPOWER |
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0)
-			   NL80211_FEATURE_ACTIVE_MONITOR |
+		NL80211_FEATURE_ACTIVE_MONITOR |
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
-			   NL80211_FEATURE_AP_MODE_CHAN_WIDTH_CHANGE |
+		NL80211_FEATURE_AP_MODE_CHAN_WIDTH_CHANGE |
 #endif
-			   0;
+		0;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0) ||                          \
-	defined(CONFIG_WPA3_FOR_OLD_KERNEL)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0) || defined(CONFIG_WPA3_FOR_OLD_KERNEL)
 	wiphy->features |= NL80211_FEATURE_SAE;
 #endif
 
 	if (rwnx_mod_params.tdls)
-		/* TDLS support */
 		wiphy->features |= NL80211_FEATURE_TDLS_CHANNEL_SWITCH;
 
 	wiphy->iface_combinations = rwnx_combinations;
-	/* -1 not to include combination with radar detection, will be re-added in
-	   rwnx_handle_dynparams if supported */
 	wiphy->n_iface_combinations = ARRAY_SIZE(rwnx_combinations) - 1;
 	wiphy->reg_notifier = rwnx_reg_notifier;
 
@@ -5951,31 +5831,21 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 	wiphy->max_sched_scan_reqs = 1;
 #endif
-	wiphy->max_sched_scan_ssids = SCAN_SSID_MAX; //16;
-	wiphy->max_match_sets = SCAN_SSID_MAX; //16;
+	wiphy->max_sched_scan_ssids = SCAN_SSID_MAX;
+	wiphy->max_match_sets = SCAN_SSID_MAX;
 	wiphy->max_sched_scan_ie_len = 2048;
-#endif //CONFIG_SCHED_SCAN
+#endif
 
 	tasklet_init(&rwnx_hw->task, rwnx_task, (unsigned long)rwnx_hw);
 
-	//init ic rf
 	if ((ret = rwnx_ic_rf_init(rwnx_hw))) {
 		goto err_lmac_reqs;
 	}
 
-#ifdef CONFIG_USE_CUSTOMER_MAC
-	ret = rwnx_get_custom_mac_addr(mac_addr_efuse);
-	if (ret) {
-		AICWFDBG(LOGERROR, "%s read mac fail use default mac\r\n",
-			 __func__);
-		memcpy(init_conf.mac_addr, dflt_mac, ETH_ALEN);
-	}
-#else
-	ret = rwnx_send_get_macaddr_req(
-		rwnx_hw, (struct mm_get_mac_addr_cfm *)mac_addr_efuse);
+	ret = rwnx_send_get_macaddr_req(rwnx_hw,
+					(struct mm_get_mac_addr_cfm *)mac_addr_efuse);
 	if (ret)
 		goto err_lmac_reqs;
-#endif
 
 	if (mac_addr_efuse[0] | mac_addr_efuse[1] | mac_addr_efuse[2] |
 	    mac_addr_efuse[3]) {
@@ -5984,19 +5854,15 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 		memcpy(init_conf.mac_addr, dflt_mac, ETH_ALEN);
 	}
 
-	AICWFDBG(LOGINFO, "get macaddr: %02x:%02x:%02x:%02x:%02x:%02x\r\n",
+	AICWFDBG(LOGINFO,
+		 "get macaddr: %02x:%02x:%02x:%02x:%02x:%02x\r\n",
 		 mac_addr_efuse[0], mac_addr_efuse[1], mac_addr_efuse[2],
 		 mac_addr_efuse[3], mac_addr_efuse[4], mac_addr_efuse[5]);
 	memcpy(wiphy->perm_addr, init_conf.mac_addr, ETH_ALEN);
 
-	/* Reset FW */
 	ret = rwnx_send_reset(rwnx_hw);
 	if (ret)
 		goto err_lmac_reqs;
-
-#ifdef CONFIG_TEMP_COMP
-	rwnx_send_set_temp_comp_req(rwnx_hw, &swconfig_cfm);
-#endif
 
 	ret = rwnx_send_version_req(rwnx_hw, &rwnx_hw->version_cfm);
 	if (ret)
@@ -6010,21 +5876,14 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	rwnx_enable_mesh(rwnx_hw);
 	rwnx_radar_detection_init(&rwnx_hw->radar);
 
-#ifdef CONFIG_RADAR_OR_IR_DETECT
-	rwnx_radar_set_domain(&rwnx_hw->radar, NL80211_DFS_FCC);
-#endif
-
-	/* Set parameters to firmware */
 	if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8801 ||
 	    ((rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DC ||
 	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DW ||
-	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80 ||
-	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80X2) &&
+	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80) &&
 	     testmode == 0)) {
 		rwnx_send_me_config_req(rwnx_hw);
 	}
 
-	/* Only monitor mode supported when custom channels are enabled */
 	if (rwnx_mod_params.custchan) {
 		rwnx_limits[0].types = BIT(NL80211_IFTYPE_MONITOR);
 		rwnx_limits_dfs[0].types = BIT(NL80211_IFTYPE_MONITOR);
@@ -6038,17 +5897,14 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 		goto err_register_wiphy;
 	}
 
-	/* Update regulatory (if needed) and set channel parameters to firmware
-	   (must be done after WiPHY registration) */
 	rwnx_custregd(rwnx_hw, wiphy);
 
 	if (rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8801 ||
 	    ((rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DC ||
 	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800DW ||
-	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80 ||
-	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80X2) &&
+	      rwnx_hw->sdiodev->chipid == PRODUCT_ID_AIC8800D80) &&
 	     testmode == 0)) {
-		rwnx_send_me_chan_config_req(rwnx_hw, "00");
+		rwnx_send_me_chan_config_req(rwnx_hw, country_code);
 	}
 
 	*platform_data = rwnx_hw;
@@ -6062,14 +5918,12 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 #endif
 	rtnl_lock();
 
-	/* Add an initial station interface */
 	vif = rwnx_interface_add(rwnx_hw, "wlan%d", NET_NAME_UNKNOWN,
 				 NL80211_IFTYPE_STATION, NULL);
 
 #ifdef CONFIG_RWNX_MON_DATA
-	/* Add an initial station interface */
-	vif = rwnx_interface_add(rwnx_hw, "wlan%d", 1, NL80211_IFTYPE_MONITOR,
-				 NULL);
+	vif = rwnx_interface_add(rwnx_hw, "wlan%d", 1,
+				 NL80211_IFTYPE_MONITOR, NULL);
 #endif
 
 	rtnl_unlock();
@@ -6080,22 +5934,10 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 		goto err_add_interface;
 	}
 
-	//wiphy_info(wiphy, "New interface create %s", vif->ndev->name);
 	AICWFDBG(LOGINFO, "New interface create %s \r\n", vif->ndev->name);
 
-#ifdef CONFIG_SDIO_BT
-#if CONFIG_BLUEDROID
-	btchr_init();
-	hdev_init();
-#else
-	btsdio_init();
-#endif
-#endif
-
 #ifdef CONFIG_USE_P2P0
-
 	rtnl_lock();
-	/* Add an initial p2p0 interface */
 	vif = rwnx_interface_add(rwnx_hw, "p2p%d", NET_NAME_UNKNOWN,
 				 NL80211_IFTYPE_STATION, NULL);
 	vif->is_p2p_vif = 1;
@@ -6107,7 +5949,6 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 		goto err_add_interface;
 	}
 
-	//wiphy_info(wiphy, "New interface create %s", vif->ndev->name);
 	AICWFDBG(LOGINFO, "New interface create %s \r\n", vif->ndev->name);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
@@ -6122,12 +5963,6 @@ int rwnx_cfg80211_init(struct rwnx_plat *rwnx_plat, void **platform_data)
 	atomic_set(&rwnx_hw->p2p_alive_timer_count, 0);
 #endif
 
-#ifdef CONFIG_FOR_IPCAM
-	if (!testmode && !adap_test) {
-		aic_ipc_setting(vif);
-	}
-#endif
-
 	return 0;
 
 err_add_interface:
@@ -6140,8 +5975,6 @@ err_register_wiphy:
 err_lmac_reqs:
 	printk("err_lmac_reqs\n");
 	rwnx_platform_off(rwnx_hw, NULL);
-	//err_platon:
-	//err_config:
 	kmem_cache_destroy(rwnx_hw->sw_txhdr_cache);
 err_cache:
 	aicwf_wakeup_lock_deinit(rwnx_hw);
@@ -6149,10 +5982,6 @@ err_cache:
 err_out:
 	return ret;
 }
-
-/**
- *
- */
 void rwnx_cfg80211_deinit(struct rwnx_hw *rwnx_hw)
 {
 	struct mm_set_stack_start_cfm set_start_cfm;
@@ -6189,7 +6018,7 @@ void rwnx_cfg80211_deinit(struct rwnx_hw *rwnx_hw)
 	btchr_exit();
 	hdev_exit();
 #else
-	btsdio_remove();
+	btsdio_exit();
 #endif
 #endif
 
@@ -6207,6 +6036,7 @@ void rwnx_cfg80211_deinit(struct rwnx_hw *rwnx_hw)
 	aicwf_wakeup_lock_deinit(rwnx_hw);
 	wiphy_free(rwnx_hw->wiphy);
 }
+
 
 static void aicsmac_driver_register(void)
 {

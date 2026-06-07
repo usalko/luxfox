@@ -1429,7 +1429,7 @@ static int aic_priv_cmd_set_txpwr_loss(struct rwnx_hw *rwnx_hw, int argc,
 		} else if (g_rwnx_plat->sdiodev->chipid ==
 			   PRODUCT_ID_AIC8800D80X2) {
 			set_txpwr_loss_ofst(func);
-			rwnx_send_txpwr_lvl_v4_req(
+			rwnx_send_txpwr_lvl_v3_req(
 				g_rwnx_plat->sdiodev->rwnx_hw);
 		} else if (g_rwnx_plat->sdiodev->chipid ==
 				   PRODUCT_ID_AIC8800DC ||
