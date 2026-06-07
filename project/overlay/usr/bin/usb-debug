@@ -1,0 +1,87 @@
+#!/bin/sh
+
+set -eu
+
+DEBUGFS=/sys/kernel/debug
+DYNDBG_CONTROL=$DEBUGFS/dynamic_debug/control
+
+mount_debugfs() {
+	if ! grep -qs ' /sys/kernel/debug debugfs ' /proc/mounts; then
+		mount -t debugfs none /sys/kernel/debug
+	fi
+}
+
+set_dynamic_debug() {
+	action="$1"
+	if [ ! -e "$DYNDBG_CONTROL" ]; then
+		echo "dynamic_debug control is unavailable; continuing without runtime pr_debug"
+		return 0
+	fi
+
+	for query in \
+		'file drivers/usb/core/* '"$action" \
+		'file drivers/usb/host/xhci* '"$action" \
+		'file drivers/usb/dwc3/* '"$action" \
+		'file drivers/phy/rockchip/*usb* '"$action"; do
+		printf '%s\n' "$query" > "$DYNDBG_CONTROL"
+		done
+}
+
+dump_usb_state() {
+	echo '=== lsusb ==='
+	lsusb 2>/dev/null || true
+	echo
+	echo '=== /sys/bus/usb/devices ==='
+	ls /sys/bus/usb/devices
+	echo
+	if [ -e "$DEBUGFS/usb/devices" ]; then
+		echo '=== /sys/kernel/debug/usb/devices ==='
+		cat "$DEBUGFS/usb/devices"
+		echo
+	fi
+	echo '=== dmesg (usb-related tail) ==='
+	dmesg | grep -i -E 'usb|hub|dwc3|xhci|phy' | tail -n 200 || true
+}
+
+show_usage() {
+	cat <<'EOF'
+Usage: usb-debug <enable|disable|dump|monitor> [usbmon-node]
+
+	enable   Mount debugfs and enable dynamic debug when the kernel supports it
+	disable  Disable dynamic debug when the kernel supports it
+  dump     Print current USB topology and recent kernel messages
+  monitor  Stream usbmon text output (default node: 0u)
+
+Examples:
+  usb-debug enable
+  usb-debug dump
+  usb-debug monitor 0u
+EOF
+}
+
+cmd="${1:-dump}"
+
+case "$cmd" in
+	enable)
+		mount_debugfs
+		set_dynamic_debug +p
+		dump_usb_state
+		;;
+	disable)
+		mount_debugfs
+		set_dynamic_debug -p
+		;;
+	dump)
+		mount_debugfs
+		dump_usb_state
+		;;
+	monitor)
+		mount_debugfs
+		node="${2:-0u}"
+		exec cat "$DEBUGFS/usb/usbmon/$node"
+		;;
+	*)
+		show_usage
+		exit 1
+		;;
+esac
