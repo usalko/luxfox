@@ -10,7 +10,7 @@
 
 / {
 	chosen {
-		bootargs = "earlycon=uart8250,mmio32,0xff4c0000 console=ttyFIQ0 root=/dev/mmcblk0p7 rootwait snd_soc_core.prealloc_buffer_size_kbytes=16 coherent_pool=0 usbcore.old_scheme_first=1";
+		bootargs = "earlycon=uart8250,mmio32,0xff4c0000 console=ttyFIQ0 root=/dev/mmcblk0p7 rootwait snd_soc_core.prealloc_buffer_size_kbytes=16 coherent_pool=0 usbcore.old_scheme_first=1 usbcore.autosuspend=-1 usbcore.initial_descriptor_timeout=10000";
 	};
 
 	backlight: backlight {

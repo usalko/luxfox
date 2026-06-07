@@ -1,0 +1,7 @@
+config BR2_PACKAGE_UHUBCTL
+	bool "uhubctl"
+	depends on BR2_PACKAGE_LIBUSB
+	help
+	  uhubctl is a utility to control USB power per-port on smart USB hubs.
+
+	  https://github.com/mvp/uhubctl
