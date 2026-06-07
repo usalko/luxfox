@@ -150,11 +150,11 @@ void unow_get_stats(radio_espnow_stats_t *out);       // та же struct ста
   pacing) — переиспользовать `ulama_queue` из проекта 1 или локальный.
 
 ### 6.3 RX-путь (sniff)
-- [ ] **6.3.1** BPF-prefilter: компилировать фильтр «management/action + наш OUI»
+- [x] **6.3.1** BPF-prefilter: компилировать фильтр «management/action + наш OUI»
   (`pcap_compile`+`pcap_setfilter`) — отсечь чужой эфир (фикс §1.8).
-- [ ] **6.3.2** RX-воркер: `pcap_loop`/`pcap_next_ex`; распарсить RadioTap →
+- [~] **6.3.2** RX-воркер: `pcap_loop`/`pcap_next_ex`; распарсить RadioTap →
   `rssi`; проверить addr3==BSSID, category==127, OUI==UNOW; `src=addr2`.
-- [ ] **6.3.3** Self-reception dedup: `addr2==self` → drop (фикс §1.10).
+- [~] **6.3.3** Self-reception dedup: `addr2==self` → drop (фикс §1.10).
 - [ ] **6.3.4** Отдать `radio_espnow_frame_t{src_mac, data=ULAMA-L1, len, rssi}`
   в rx-callback link_manager'а.
 - [ ] **6.3.5** Control-frames (HELLO/OGM) ULAMA проходят тем же путём — UNOW не

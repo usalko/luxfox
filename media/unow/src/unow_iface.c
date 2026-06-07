@@ -30,6 +30,45 @@ static bool unow_copy_iface_name(const char *iface, char *buffer, size_t buffer_
 	return true;
 }
 
+int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_len)
+{
+	struct bpf_program program = {0};
+	char filter_expr[256];
+	int status;
+
+	if (handle == NULL) {
+		unow_set_error(error_buf, error_buf_len, "%s", "invalid pcap handle");
+		return -1;
+	}
+	snprintf(filter_expr,
+		 sizeof(filter_expr),
+		 "wlan type mgt subtype action and wlan addr3 %02x:%02x:%02x:%02x:%02x:%02x and wlan[24] = %u and wlan[25] = 0x%02x and wlan[26] = 0x%02x and wlan[27] = 0x%02x and wlan[28] = %u",
+		 k_unow_bssid[0],
+		 k_unow_bssid[1],
+		 k_unow_bssid[2],
+		 k_unow_bssid[3],
+		 k_unow_bssid[4],
+		 k_unow_bssid[5],
+		 UNOW_VENDOR_CATEGORY,
+		 k_unow_oui[0],
+		 k_unow_oui[1],
+		 k_unow_oui[2],
+		 UNOW_VENDOR_SUBTYPE_DATA);
+	status = pcap_compile(handle, &program, filter_expr, 1, PCAP_NETMASK_UNKNOWN);
+	if (status < 0) {
+		unow_set_error(error_buf, error_buf_len, "pcap_compile failed: %s", pcap_geterr(handle));
+		return -1;
+	}
+	status = pcap_setfilter(handle, &program);
+	pcap_freecode(&program);
+	if (status < 0) {
+		unow_set_error(error_buf, error_buf_len, "pcap_setfilter failed: %s", pcap_geterr(handle));
+		return -1;
+	}
+	UNOW_LOGD("applied BPF filter: %s", filter_expr);
+	return 0;
+}
+
 int unow_iface_query(const char *iface, unow_iface_info_t *out, char *error_buf, size_t error_buf_len)
 {
 	int sockfd;
@@ -118,6 +157,16 @@ int unow_iface_open_pcap(const char *iface, pcap_t **out_handle, int *out_datali
 	}
 	if (status > 0) {
 		UNOW_LOGW("pcap_activate warning on %s: %s", iface, pcap_statustostr(status));
+	}
+	status = pcap_setnonblock(handle, 1, pcap_error);
+	if (status < 0) {
+		unow_set_error(error_buf, error_buf_len, "pcap_setnonblock failed: %s", pcap_error);
+		pcap_close(handle);
+		return -1;
+	}
+	if (unow_iface_apply_filter(handle, error_buf, error_buf_len) != 0) {
+		pcap_close(handle);
+		return -1;
 	}
 	*out_handle = handle;
 	if (out_datalink != NULL) {

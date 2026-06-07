@@ -46,6 +46,7 @@ extern unow_context_t g_unow;
 
 int unow_iface_query(const char *iface, unow_iface_info_t *out, char *error_buf, size_t error_buf_len);
 int unow_iface_open_pcap(const char *iface, pcap_t **out_handle, int *out_datalink, char *error_buf, size_t error_buf_len);
+int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_len);
 void unow_iface_close_pcap(pcap_t **handle);
 
 bool unow_parse_mac(const char *text, uint8_t mac[6]);

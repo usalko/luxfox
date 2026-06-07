@@ -5,6 +5,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 static unow_log_level_t g_unow_log_level = UNOW_LOG_INFO;
 
@@ -175,6 +176,10 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 			if (!unow_parse_action_frame(packet, header->caplen, frame)) {
 				continue;
 			}
+			if (memcmp(frame->src_mac, g_unow.iface.mac, sizeof(frame->src_mac)) == 0) {
+				UNOW_LOGT("dropping self-received frame on %s", g_unow.iface.name);
+				continue;
+			}
 			pthread_mutex_lock(&g_unow.lock);
 			if (!g_unow.peer_known && memcmp(frame->src_mac, g_unow.iface.mac, sizeof(frame->src_mac)) != 0) {
 				memcpy(g_unow.peer_mac, frame->src_mac, sizeof(g_unow.peer_mac));
@@ -204,6 +209,7 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 			if (deadline_ms >= 0 && unow_diag_now_ms() >= deadline_ms) {
 				return ESP_ERR_NOT_FOUND;
 			}
+			usleep(1000);
 			continue;
 		}
 		if (status == -2) {
