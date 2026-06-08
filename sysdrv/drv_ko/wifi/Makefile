@@ -43,49 +43,56 @@ endif
 ifneq ($(RK_ENABLE_WIFI_CHIP),)
 
 build-usb:
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"RTL8188FTV"),)
+ifneq ($(findstring RTL8188FTV,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C rtl8188ftv/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"SSV6X5X"),)
+ifneq ($(findstring RTL8192EU,$(RK_ENABLE_WIFI_CHIP)),)
+	@make -C rtl8188ftv/ clean
+	@make -C rtl8188ftv/ \
+		CONFIG_RTL8188F=n CONFIG_RTL8192E=y \
+		CONFIG_USB_HCI=y CONFIG_SDIO_HCI=n
+endif
+
+ifneq ($(findstring SSV6X5X,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C ssv6x5x/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"SSV6115"),)
+ifneq ($(findstring SSV6115,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C ssv6115/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"AIC8800DW_USB"),)
+ifneq ($(findstring AIC8800DW_USB,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C aic8800_usb/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"AIC8800MC"),)
+ifneq ($(findstring AIC8800MC,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C aic8800_netdrv/
 endif
 
 build-sdio:
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"RTL8189FS"),)
+ifneq ($(findstring RTL8189FS,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C rtl8189fs/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"HI3861L"),)
+ifneq ($(findstring HI3861L,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C hichannel/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"ATBM603X"),)
+ifneq ($(findstring ATBM603X,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C atbm/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"ATBM6441"),)
+ifneq ($(findstring ATBM6441,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C atbm6441/
 endif
 
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"AIC8800DC"),)
+ifneq ($(findstring AIC8800DC,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C aic8800dc/
 endif
 
 ifneq ($(WIFI_RFKILL),)
-ifneq ($(findstring $(RK_ENABLE_WIFI_CHIP),"AP6XXX"),)
+ifneq ($(findstring AP6XXX,$(RK_ENABLE_WIFI_CHIP)),)
 	@make -C bcmdhd/
 endif
 endif

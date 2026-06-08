@@ -226,6 +226,9 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 #ifdef CONFIG_RTL8188F
 	/*=== Realtek demoboard ===*/
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xF179, 0xff, 0xff, 0xff), .driver_info = RTL8188F}, /* 8188FU 1*1 */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x0bda, 0x8179, 0xff, 0xff, 0xff), .driver_info = RTL8188F_DRIVER_INFO},//8188FU
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2c4e, 0x0104, 0xff, 0xff, 0xff), .driver_info = RTL8188F_DRIVER_INFO},
+	{USB_DEVICE_AND_INTERFACE_INFO(0x0bda, 0xf179, 0xff, 0xff, 0xff), .driver_info = RTL8188F_DRIVER_INFO},// 8188FU
 #endif
 
 #ifdef CONFIG_RTL8188GTV
@@ -1388,147 +1391,6 @@ _adapter *rtw_usb_primary_adapter_init(struct dvobj_priv *dvobj,
 		 , padapter->bup
 		 , rtw_get_hw_init_completed(padapter)
 		);
-
-	status = _SUCCESS;
-
-free_hal_data:
-	if (status != _SUCCESS && padapter->HalData)
-		rtw_hal_free_data(padapter);
-free_adapter:
-	if (status != _SUCCESS && padapter) {
-		#ifdef RTW_HALMAC
-		rtw_halmac_deinit_adapter(dvobj);
-		#endif
-		rtw_vmfree((u8 *)padapter, sizeof(*padapter));
-		padapter = NULL;
-	}
-exit:
-	return padapter;
-}
-
-static void rtw_usb_primary_adapter_deinit(_adapter *padapter)
-{
-#if defined(CONFIG_WOWLAN) || defined(CONFIG_BT_COEXIST)
-	struct pwrctrl_priv *pwrctl = adapter_to_pwrctl(padapter);
-#endif
-	struct mlme_priv *pmlmepriv = &padapter->mlmepriv;
-
-	RTW_INFO(FUNC_ADPT_FMT"\n", FUNC_ADPT_ARG(padapter));
-
-	if (check_fwstate(pmlmepriv, _FW_LINKED))
-		rtw_disassoc_cmd(padapter, 0, RTW_CMDF_DIRECTLY);
-
-#ifdef CONFIG_AP_MODE
-	if (MLME_IS_AP(padapter) || MLME_IS_MESH(padapter)) {
-		free_mlme_ap_info(padapter);
-		#ifdef CONFIG_HOSTAPD_MLME
-		hostapd_mode_unload(padapter);
-		#endif
-	}
-#endif
-
-	/*rtw_cancel_all_timer(if1);*/
-
-#ifdef CONFIG_WOWLAN
-	pwrctl->wowlan_mode = _FALSE;
-#endif /* CONFIG_WOWLAN */
-
-	rtw_dev_unload(padapter);
-
-	RTW_INFO("+r871xu_dev_remove, hw_init_completed=%d\n", rtw_get_hw_init_completed(padapter));
-
-#ifdef CONFIG_BT_COEXIST
-	if (1 == pwrctl->autopm_cnt) {
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33))
-		usb_autopm_put_interface(adapter_to_dvobj(padapter)->pusbintf);
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 20))
-		usb_autopm_enable(adapter_to_dvobj(padapter)->pusbintf);
-#else
-		usb_autosuspend_device(adapter_to_dvobj(padapter)->pusbdev, 1);
-#endif
-		pwrctl->autopm_cnt--;
-	}
-#endif
-
-	rtw_free_drv_sw(padapter);
-
-	/* TODO: use rtw_os_ndevs_deinit instead at the first stage of driver's dev deinit function */
-	rtw_os_ndev_free(padapter);
-
-#ifdef RTW_HALMAC
-	rtw_halmac_deinit_adapter(adapter_to_dvobj(padapter));
-#endif /* RTW_HALMAC */
-
-	rtw_vmfree((u8 *)padapter, sizeof(_adapter));
-
-#ifdef CONFIG_PLATFORM_RTD2880B
-	RTW_INFO("wlan link down\n");
-	rtd2885_wlan_netlink_sendMsg("linkdown", "8712");
-#endif
-
-}
-
-static int rtw_drv_init(struct usb_interface *pusb_intf, const struct usb_device_id *pdid)
-{
-	_adapter *padapter = NULL;
-	int status = _FAIL;
-	struct dvobj_priv *dvobj;
-#ifdef CONFIG_CONCURRENT_MODE
-	int i;
-#endif
-
-	/* RTW_INFO("+rtw_drv_init\n"); */
-
-	/* step 0. */
-	process_spec_devid(pdid);
-
-	/* Initialize dvobj_priv */
-	dvobj = usb_dvobj_init(pusb_intf, pdid);
-	if (dvobj == NULL) {
-		goto exit;
-	}
-
-	padapter = rtw_usb_primary_adapter_init(dvobj, pusb_intf);
-	if (padapter == NULL) {
-		RTW_INFO("rtw_usb_primary_adapter_init Failed!\n");
-		goto free_dvobj;
-	}
-
-	if (usb_reprobe_switch_usb_mode(padapter) == _TRUE)
-		goto free_if_prim;
-
-#ifdef CONFIG_CONCURRENT_MODE
-	if (padapter->registrypriv.virtual_iface_num > (CONFIG_IFACE_NUMBER - 1))
-		padapter->registrypriv.virtual_iface_num = (CONFIG_IFACE_NUMBER - 1);
-
-	for (i = 0; i < padapter->registrypriv.virtual_iface_num; i++) {
-		if (rtw_drv_add_vir_if(padapter, usb_set_intf_ops) == NULL) {
-			RTW_INFO("rtw_drv_add_iface failed! (%d)\n", i);
-			goto free_if_vir;
-		}
-	}
-#endif
-
-#ifdef CONFIG_GLOBAL_UI_PID
-	if (ui_pid[1] != 0) {
-		RTW_INFO("ui_pid[1]:%d\n", ui_pid[1]);
-		rtw_signal_process(ui_pid[1], SIGUSR2);
-	}
-#endif
-
-	/* dev_alloc_name && register_netdev */
-	if (rtw_os_ndevs_init(dvobj) != _SUCCESS)
-		goto free_if_vir;
-
-#ifdef CONFIG_HOSTAPD_MLME
-	hostapd_mode_init(padapter);
-#endif
-
-#ifdef CONFIG_PLATFORM_RTD2880B
-	RTW_INFO("wlan link up\n");
-	rtd2885_wlan_netlink_sendMsg("linkup", "8712");
-#endif
-
 
 	status = _SUCCESS;
 

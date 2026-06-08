@@ -14,6 +14,7 @@ EXTRA_CFLAGS += -Wno-unused-variable
 #EXTRA_CFLAGS += -Wno-unused-parameter
 EXTRA_CFLAGS += -Wno-unused-function
 EXTRA_CFLAGS += -Wno-unused
+EXTRA_CFLAGS += -Wno-implicit-fallthrough
 #EXTRA_CFLAGS += -Wno-uninitialized
 
 GCC_VER_49 := $(shell echo `$(CC) -dumpversion | cut -f1-2 -d.` \>= 4.9 | bc )
@@ -21,7 +22,11 @@ ifeq ($(GCC_VER_49),1)
 EXTRA_CFLAGS += -Wno-date-time	# Fix compile error && warning on gcc 4.9 and later
 endif
 
-EXTRA_CFLAGS += -I$(src)/include
+RTW_SRC_PATH := $(srctree)/$(src)
+
+EXTRA_CFLAGS += -I$(RTW_SRC_PATH)/include
+ccflags-y += -I$(RTW_SRC_PATH)/include -I$(RTW_SRC_PATH)/platform -I$(RTW_SRC_PATH)/hal/btc -I$(RTW_SRC_PATH)/hal/phydm
+subdir-ccflags-y += -I$(RTW_SRC_PATH)/include -I$(RTW_SRC_PATH)/platform -I$(RTW_SRC_PATH)/hal/btc -I$(RTW_SRC_PATH)/hal/phydm
 
 EXTRA_LDFLAGS += --strip-debug
 
@@ -50,7 +55,7 @@ CONFIG_PCI_HCI = n
 CONFIG_SDIO_HCI = n
 CONFIG_GSPI_HCI = n
 ########################## Features ###########################
-CONFIG_MP_INCLUDED = y
+CONFIG_MP_INCLUDED = n
 CONFIG_POWER_SAVING = y
 CONFIG_IPS_MODE = default
 CONFIG_LPS_MODE = default
@@ -243,10 +248,10 @@ _HAL_INTFS_FILES :=	hal/hal_intf.o \
 			hal/led/hal_$(HCI_NAME)_led.o
 
 
-EXTRA_CFLAGS += -I$(src)/platform
+EXTRA_CFLAGS += -I$(RTW_SRC_PATH)/platform
 _PLATFORM_FILES := platform/platform_ops.o
 
-EXTRA_CFLAGS += -I$(src)/hal/btc
+EXTRA_CFLAGS += -I$(RTW_SRC_PATH)/hal/btc
 
 ########### HAL_RTL8188E #################################
 ifeq ($(CONFIG_RTL8188E), y)

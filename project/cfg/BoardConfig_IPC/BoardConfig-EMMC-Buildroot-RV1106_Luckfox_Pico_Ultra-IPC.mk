@@ -108,6 +108,7 @@ export RK_ENABLE_ROCKCHIP_TEST=y
 
 # enable rockchip wifi
 export RK_ENABLE_WIFI=y
+# USB RTL8192EU is built via Buildroot package rtl8192eu.
 export RK_ENABLE_WIFI_CHIP=AIC8800DC
 
 # config wifi ssid and passwd

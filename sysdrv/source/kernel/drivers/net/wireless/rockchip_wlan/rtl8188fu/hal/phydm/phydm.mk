@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-EXTRA_CFLAGS += -I$(src)/hal/phydm
+EXTRA_CFLAGS += -I$(RTW_SRC_PATH)/hal/phydm
 
 _PHYDM_FILES := hal/phydm/phydm_debug.o	\
 								hal/phydm/phydm_antdiv.o\

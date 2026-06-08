@@ -147,6 +147,7 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 	{USB_DEVICE(USB_VENDER_ID_REALTEK, 0x0179), .driver_info = RTL8188E}, /* 8188ETV */
 	/*=== Customer ID ===*/
 	/****** 8188EUS ********/
+	{USB_DEVICE(0x2c4e, 0x0104), .driver_info = RTL8188E}, /* Mercusys MW300UH clone VID/PID */
 	{USB_DEVICE(0x07B8, 0x8179), .driver_info = RTL8188E}, /* Abocom - Abocom */
 #endif
 
@@ -226,6 +227,7 @@ static struct usb_device_id rtw_usb_id_tbl[] = {
 #ifdef CONFIG_RTL8188F
 	/*=== Realtek demoboard ===*/
 	{USB_DEVICE_AND_INTERFACE_INFO(USB_VENDER_ID_REALTEK, 0xF179, 0xff, 0xff, 0xff), .driver_info = RTL8188F}, /* 8188FU 1*1 */
+	{USB_DEVICE_AND_INTERFACE_INFO(0x2c4e, 0x0104, 0xff, 0xff, 0xff), .driver_info = RTL8188F}, /* Mercusys MW300UH clone VID/PID */
 #endif
 
 #ifdef CONFIG_RTL8188GTV
@@ -1478,6 +1480,11 @@ static int rtw_drv_init(struct usb_interface *pusb_intf, const struct usb_device
 #endif
 
 	/* RTW_INFO("+rtw_drv_init\n"); */
+	RTW_INFO("rtw_drv_init: probe USB %04x:%04x bcd=%04x drvinfo=0x%lx\n",
+		(unsigned int)pdid->idVendor,
+		(unsigned int)pdid->idProduct,
+		(unsigned int)pdid->bcdDevice_lo,
+		(unsigned long)pdid->driver_info);
 
 	/* step 0. */
 	process_spec_devid(pdid);
@@ -1553,6 +1560,10 @@ free_dvobj:
 	if (status != _SUCCESS)
 		usb_dvobj_deinit(pusb_intf);
 exit:
+	if (status != _SUCCESS)
+		RTW_INFO("rtw_drv_init: failed for USB %04x:%04x\n",
+			(unsigned int)pdid->idVendor,
+			(unsigned int)pdid->idProduct);
 	return status == _SUCCESS ? 0 : -ENODEV;
 }
 

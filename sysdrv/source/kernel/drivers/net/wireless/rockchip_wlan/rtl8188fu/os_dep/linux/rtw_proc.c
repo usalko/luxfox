@@ -46,6 +46,24 @@ inline struct proc_dir_entry *get_rtw_drv_proc(void)
 #define get_proc_net init_net.proc_net
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
+#define RTW_PROC_FOPS_TYPE struct proc_ops
+#define RTW_PROC_OWNER_FIELD
+#define RTW_PROC_OPEN_FIELD .proc_open
+#define RTW_PROC_READ_FIELD .proc_read
+#define RTW_PROC_LLSEEK_FIELD .proc_lseek
+#define RTW_PROC_RELEASE_FIELD .proc_release
+#define RTW_PROC_WRITE_FIELD .proc_write
+#else
+#define RTW_PROC_FOPS_TYPE struct file_operations
+#define RTW_PROC_OWNER_FIELD .owner = THIS_MODULE,
+#define RTW_PROC_OPEN_FIELD .open
+#define RTW_PROC_READ_FIELD .read
+#define RTW_PROC_LLSEEK_FIELD .llseek
+#define RTW_PROC_RELEASE_FIELD .release
+#define RTW_PROC_WRITE_FIELD .write
+#endif
+
 inline struct proc_dir_entry *rtw_proc_create_dir(const char *name, struct proc_dir_entry *parent, void *data)
 {
 	struct proc_dir_entry *entry;
@@ -63,7 +81,7 @@ inline struct proc_dir_entry *rtw_proc_create_dir(const char *name, struct proc_
 }
 
 inline struct proc_dir_entry *rtw_proc_create_entry(const char *name, struct proc_dir_entry *parent,
-	const struct file_operations *fops, void * data)
+	const RTW_PROC_FOPS_TYPE *fops, void * data)
 {
 	struct proc_dir_entry *entry;
 
@@ -239,22 +257,22 @@ static ssize_t rtw_drv_proc_write(struct file *file, const char __user *buffer, 
 	return -EROFS;
 }
 
-static const struct file_operations rtw_drv_proc_seq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_drv_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = seq_release,
-	.write = rtw_drv_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_drv_proc_seq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_drv_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = seq_release,
+	RTW_PROC_WRITE_FIELD = rtw_drv_proc_write,
 };
 
-static const struct file_operations rtw_drv_proc_sseq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_drv_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-	.write = rtw_drv_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_drv_proc_sseq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_drv_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = single_release,
+	RTW_PROC_WRITE_FIELD = rtw_drv_proc_write,
 };
 
 int rtw_drv_proc_init(void)
@@ -4378,22 +4396,22 @@ static ssize_t rtw_adapter_proc_write(struct file *file, const char __user *buff
 	return -EROFS;
 }
 
-static const struct file_operations rtw_adapter_proc_seq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_adapter_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = seq_release,
-	.write = rtw_adapter_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_adapter_proc_seq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_adapter_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = seq_release,
+	RTW_PROC_WRITE_FIELD = rtw_adapter_proc_write,
 };
 
-static const struct file_operations rtw_adapter_proc_sseq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_adapter_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-	.write = rtw_adapter_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_adapter_proc_sseq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_adapter_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = single_release,
+	RTW_PROC_WRITE_FIELD = rtw_adapter_proc_write,
 };
 
 int proc_get_odm_adaptivity(struct seq_file *m, void *v)
@@ -4547,22 +4565,22 @@ static ssize_t rtw_odm_proc_write(struct file *file, const char __user *buffer, 
 	return -EROFS;
 }
 
-static const struct file_operations rtw_odm_proc_seq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_odm_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = seq_release,
-	.write = rtw_odm_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_odm_proc_seq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_odm_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = seq_release,
+	RTW_PROC_WRITE_FIELD = rtw_odm_proc_write,
 };
 
-static const struct file_operations rtw_odm_proc_sseq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_odm_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-	.write = rtw_odm_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_odm_proc_sseq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_odm_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = single_release,
+	RTW_PROC_WRITE_FIELD = rtw_odm_proc_write,
 };
 
 struct proc_dir_entry *rtw_odm_proc_init(struct net_device *dev)
@@ -4691,22 +4709,22 @@ static ssize_t rtw_mcc_proc_write(struct file *file, const char __user *buffer, 
 	return -EROFS;
 }
 
-static const struct file_operations rtw_mcc_proc_seq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_mcc_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = seq_release,
-	.write = rtw_mcc_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_mcc_proc_seq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_mcc_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = seq_release,
+	RTW_PROC_WRITE_FIELD = rtw_mcc_proc_write,
 };
 
-static const struct file_operations rtw_mcc_proc_sseq_fops = {
-	.owner = THIS_MODULE,
-	.open = rtw_mcc_proc_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-	.write = rtw_mcc_proc_write,
+static const RTW_PROC_FOPS_TYPE rtw_mcc_proc_sseq_fops = {
+	RTW_PROC_OWNER_FIELD
+	RTW_PROC_OPEN_FIELD = rtw_mcc_proc_open,
+	RTW_PROC_READ_FIELD = seq_read,
+	RTW_PROC_LLSEEK_FIELD = seq_lseek,
+	RTW_PROC_RELEASE_FIELD = single_release,
+	RTW_PROC_WRITE_FIELD = rtw_mcc_proc_write,
 };
 
 struct proc_dir_entry *rtw_mcc_proc_init(struct net_device *dev)
