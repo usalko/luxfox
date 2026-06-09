@@ -7,9 +7,6 @@ export LF_ORIGIN_BOARD_CONFIG=BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Ult
 # Target CHIP
 export RK_CHIP=rv1106
 
-# Disable internal WiFi by default cause AIC8800 does not support monitor mode and wifi frame injection.
-export RK_ENABLE_WIFI=n
-
 # app config
 export RK_APP_TYPE=RKIPC_RV1106
 
@@ -109,14 +106,14 @@ export RK_BUILD_APP_TO_OEM_PARTITION=y
 # enable rockchip test
 export RK_ENABLE_ROCKCHIP_TEST=y
 
-# enable rockchip wifi
-export RK_ENABLE_WIFI=y
+# Disable internal wifi by default cause not support injection+ monitoring.
+export RK_ENABLE_WIFI=n
 # USB RTL8192EU is built via Buildroot package rtl8192eu.
-export RK_ENABLE_WIFI_CHIP=AIC8800DC
+# export RK_ENABLE_WIFI_CHIP=AIC8800DC
 
 # config wifi ssid and passwd
-export LF_WIFI_SSID="Your wifi ssid"
-export LF_WIFI_PSK="Your wifi password"
+# export LF_WIFI_SSID="Your wifi ssid"
+# export LF_WIFI_PSK="Your wifi password"
 
 #################################################
 #  PRE and POST
