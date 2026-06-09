@@ -9,23 +9,23 @@ CHAN="${3:-${CHAN:-6}}"
 echo "[unow-mon] base iface=${IFACE} monitor=${MON_IFACE} channel=${CHAN}"
 
 if command -v airmon-ng >/dev/null 2>&1; then
-	sudo airmon-ng check kill || true
+	airmon-ng check kill || true
 fi
 
-sudo ip link set "${IFACE}" down || true
+ip link set "${IFACE}" down || true
 
 if ! iw dev "${MON_IFACE}" info >/dev/null 2>&1; then
-	sudo iw dev "${IFACE}" interface add "${MON_IFACE}" type monitor || true
+	iw dev "${IFACE}" interface add "${MON_IFACE}" type monitor || true
 fi
 
 if iw dev "${MON_IFACE}" info >/dev/null 2>&1; then
-	sudo ip link set "${MON_IFACE}" up
-	sudo iw dev "${MON_IFACE}" set channel "${CHAN}"
+	ip link set "${MON_IFACE}" up
+	iw dev "${MON_IFACE}" set channel "${CHAN}"
 	echo "[unow-mon] ready on ${MON_IFACE}"
 	exit 0
 fi
 
-sudo iw dev "${IFACE}" set monitor control otherbss
-sudo ip link set "${IFACE}" up
-sudo iw dev "${IFACE}" set channel "${CHAN}"
+iw dev "${IFACE}" set monitor control otherbss
+ip link set "${IFACE}" up
+iw dev "${IFACE}" set channel "${CHAN}"
 	echo "[unow-mon] ready on ${IFACE}"

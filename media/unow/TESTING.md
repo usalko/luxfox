@@ -40,11 +40,11 @@ Identify the MW300UH adapter, e.g., `wlx00e04c123456`.
 ```bash
 # Option A: If using external MW300UH adapter
 IFACE=wlx088af1287d57  # Replace with your adapter
-./media/unow/scripts/unow-mon.sh "$IFACE" mon0 6
+unow-mon.sh "$IFACE" mon0 6
 
 # Verify
 iw dev mon0 info
-sudo ip link show mon0
+ip link show mon0
 ```
 
 **On Desktop:**
