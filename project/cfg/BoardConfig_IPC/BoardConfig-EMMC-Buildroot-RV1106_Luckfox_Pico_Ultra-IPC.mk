@@ -7,6 +7,9 @@ export LF_ORIGIN_BOARD_CONFIG=BoardConfig-EMMC-Buildroot-RV1106_Luckfox_Pico_Ult
 # Target CHIP
 export RK_CHIP=rv1106
 
+# Disable internal WiFi by default cause AIC8800 does not support monitor mode and wifi frame injection.
+export RK_ENABLE_WIFI=n
+
 # app config
 export RK_APP_TYPE=RKIPC_RV1106
 

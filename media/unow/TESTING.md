@@ -39,7 +39,7 @@ Identify the MW300UH adapter, e.g., `wlx00e04c123456`.
 **On LuckFox:**
 ```bash
 # Option A: If using external MW300UH adapter
-IFACE=wlx088af1287d57  # Replace with your adapter
+IFACE=wlan1  # Replace with your adapter
 unow-mon.sh "$IFACE" mon0 6
 
 # Verify
