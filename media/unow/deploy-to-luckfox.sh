@@ -235,6 +235,44 @@ transfer_scripts() {
 }
 
 ##############################################################################
+# TRANSFER INIT.D SERVICE
+##############################################################################
+transfer_init_service() {
+    local init_dest="/etc/init.d"
+    local default_dest="/etc/default"
+
+    log_info "Installing init.d service on LuckFox..."
+
+    ssh -p "$SSH_PORT" "$SSH_USER@$LUCKFOX_HOST" \
+        "mkdir -p '$init_dest' '$default_dest'" || {
+        log_warn "Could not create init.d/default directories on LuckFox"
+        return 0
+    }
+
+    ssh -p "$SSH_PORT" "$SSH_USER@$LUCKFOX_HOST" "cat > '$default_dest/unow-signal-diag' <<EOF
+UNOW_SIGNAL_DIAG_SCRIPT=$DEST_DIR/scripts/unow-signal-diag.sh
+UNOW_SIGNAL_DIAG_IFACE=wlan0
+UNOW_SIGNAL_DIAG_BSSID=55:4E:4F:57:00:01
+UNOW_SIGNAL_DIAG_LOG_DIR=/var/log/unow
+UNOW_SIGNAL_DIAG_PIDFILE=/var/run/unow-signal-diag.pid
+EOF
+chmod 644 '$default_dest/unow-signal-diag'" || {
+        log_warn "Could not install /etc/default/unow-signal-diag"
+    }
+
+    scp -P "$SSH_PORT" "$UNOW_ROOT/scripts/S99unow-signal-diag" \
+        "$SSH_USER@$LUCKFOX_HOST:$init_dest/S99unow-signal-diag" || {
+        log_warn "Failed to transfer init.d service"
+        return 0
+    }
+
+    ssh -p "$SSH_PORT" "$SSH_USER@$LUCKFOX_HOST" \
+        "chmod 755 '$init_dest/S99unow-signal-diag'" || true
+
+    log_info "✓ Init.d service installed"
+}
+
+##############################################################################
 # VERIFY DEPLOYMENT
 ##############################################################################
 verify_deployment() {
@@ -278,10 +316,16 @@ ${GREEN}Next Steps:${NC}
 3. Set up monitor mode on channel 6:
    $ bash $DEST_DIR/scripts/unow-mon.sh <wifi-adapter> mon0 6
 
-4. Run G0 smoke test (receiver):
+4. Start the diagnostic daemon on LuckFox:
+   $ /etc/init.d/S99unow-signal-diag start
+
+5. Watch logs at:
+   $ tail -f /var/log/unow/wifi_signal_diag.log
+
+6. Run G0 smoke test (receiver):
    $ $DEST_DIR/unow_diag --iface mon0 --node-id 1 --listen 10
 
-5. On your Desktop (another terminal):
+7. On your Desktop (another terminal):
    $ bash media/unow/RUNME_G0_TEST.sh desktop tx
 
 See media/unow/TESTING.md for full test guide.
@@ -307,7 +351,8 @@ main() {
     transfer_binary "$UNOW_ROOT/out/arm/bin/unow_diag"
     transfer_libraries
     transfer_scripts
-    
+    transfer_init_service
+
     verify_deployment
     print_next_steps
     

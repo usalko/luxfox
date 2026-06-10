@@ -219,6 +219,14 @@ uclibc-ограничений и это быстрый способ получи
   NetworkManager на desktop; на LuckFox — просто `ip link set ... down`).
 - [ ] **9.3** Документировать выбор канала/региона/мощности (совет §5: HT20,
   фикс rate, max TX-power региона, внешняя антенна на RP-SMA).
+- [x] **9.4** Создать `scripts/unow-signal-diag.sh` — периодический diagnostic
+  скрипт с фиксированным кастомным BSSID, измерением RSSI/доступности второго
+  дрона и ротацией логов до 500 MiB.
+- [x] **9.5** Поднять `unow-signal-diag.sh` из `/etc/init.d` как сервис с
+  запуском каждые 1 с, логами в `/var/log/unow/wifi_signal_diag.log` и
+  безопасной очисткой/rotating-переименованием.
+- [ ] **9.6** Проверить на железе, что `iw dev wlan0 set bssid <BSSID>` и
+  `iw dev wlan0 scan dump` дают стабильный `peer_mac/rssi` для «дрон еще в сети».
 
 ---
 

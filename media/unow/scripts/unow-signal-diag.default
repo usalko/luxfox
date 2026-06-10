@@ -1,0 +1,7 @@
+# Default environment for /etc/init.d/S99unow-signal-diag
+# Copy this to /etc/default/unow-signal-diag on the target LuckFox.
+UNOW_SIGNAL_DIAG_SCRIPT=/usr/bin/scripts/unow-signal-diag.sh
+UNOW_SIGNAL_DIAG_IFACE=wlan0
+UNOW_SIGNAL_DIAG_BSSID=55:4E:4F:57:00:01
+UNOW_SIGNAL_DIAG_LOG_DIR=/var/log/unow
+UNOW_SIGNAL_DIAG_PIDFILE=/var/run/unow-signal-diag.pid
