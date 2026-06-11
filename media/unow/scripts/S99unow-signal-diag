@@ -10,7 +10,7 @@
 
 set -eu
 
-SCRIPT="${UNOW_SIGNAL_DIAG_SCRIPT:-/usr/bin/scripts/unow-signal-diag.sh}"
+SCRIPT="${UNOW_SIGNAL_DIAG_SCRIPT:-/oem/usr/bin/unow-signal-diag.sh}"
 PIDFILE="${UNOW_SIGNAL_DIAG_PIDFILE:-/var/run/unow-signal-diag.pid}"
 LOG_DIR="${UNOW_SIGNAL_DIAG_LOG_DIR:-/var/log/unow}"
 

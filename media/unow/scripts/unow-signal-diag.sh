@@ -41,11 +41,14 @@ EOF
 }
 
 log() {
-    printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+    msg="[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    printf '%s\n' "$msg"
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    printf '%s\n' "$msg" >> "$LOG_FILE"
 }
 
 rotate_log_if_needed() {
-    mkdir -p "$(dirname "$LOG_FILE")"
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
     if [ ! -f "$LOG_FILE" ]; then
         return 0
@@ -66,27 +69,45 @@ collect_sample() {
     fi
 
     if ! ip link show "$BASE_IFACE" >/dev/null 2>&1; then
-        log "ERROR: interface '$BASE_IFACE' is not present"
-        return 1
+        detected_iface=$(iw dev 2>/dev/null | awk '/Interface/ {print $2}' | head -n 1 || true)
+        if [ -n "$detected_iface" ]; then
+            BASE_IFACE="$detected_iface"
+            log "INFO: interface '$BASE_IFACE' auto-selected from iw dev"
+        else
+            log "ERROR: interface '$BASE_IFACE' is not present"
+            return 1
+        fi
     fi
 
-    # Make sure the interface is up and uses the custom BSSID we want to observe.
+    # Bring the interface up. We do not force mode/BSSID here because the
+    # diagnostic path should work with the current Wi-Fi stack state.
     ip link set "$BASE_IFACE" up 2>/dev/null || true
-    iw dev "$BASE_IFACE" set type managed 2>/dev/null || true
-    iw dev "$BASE_IFACE" set bssid "$CUSTOM_BSSID" 2>/dev/null || true
 
     scan_output=$(iw dev "$BASE_IFACE" scan dump 2>/dev/null || true)
-    if [ -z "$scan_output" ]; then
-        log "WARN: no scan output available from '$BASE_IFACE'"
-        return 0
-    fi
-
     sample=$(printf '%s\n' "$scan_output" | awk -v target="$CUSTOM_BSSID" '
         BEGIN { mac=""; rssi="" }
         $1 == "BSSID:" { mac = $2 }
         $1 == "signal:" { rssi = $2 }
         (mac == target && rssi != "") { print mac, rssi; exit }
     ')
+
+    if [ -z "$sample" ]; then
+        link_output=$(iw dev "$BASE_IFACE" link 2>/dev/null || true)
+        if [ -n "$link_output" ]; then
+            sample=$(printf '%s\n' "$link_output" | awk '
+                /Connected to/ { mac = $3 }
+                /signal:/ { rssi = $2 }
+                END { if (mac != "" && rssi != "") print mac, rssi }
+            ')
+        fi
+    fi
+
+    if [ -z "$sample" ]; then
+        printf '%s peer_mac=none rssi=unknown custom_bssid=%s\n' \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CUSTOM_BSSID" >> "$LOG_FILE"
+        log "INFO: no scan output available from '$BASE_IFACE' (peer not visible yet or driver returned no scan results)"
+        return 0
+    fi
 
     if [ -n "$sample" ]; then
         peer_mac=$(printf '%s\n' "$sample" | awk '{print $1}')

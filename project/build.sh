@@ -1404,6 +1404,18 @@ function __PACKAGE_RESOURCES() {
 	__COPY_FILES $RK_PROJECT_PATH_MEDIA/share $_install_dir/share/
 	__COPY_FILES $RK_PROJECT_PATH_MEDIA/usr $_install_dir/
 
+	mkdir -p $_target_dir/etc/init.d $_target_dir/etc/default $_install_dir/bin/scripts
+	if [ -f "$RK_PROJECT_PATH_MEDIA/bin/S99unow-signal-diag" ]; then
+		cp -f "$RK_PROJECT_PATH_MEDIA/bin/S99unow-signal-diag" $_target_dir/etc/init.d/
+	fi
+	if [ -f "$RK_PROJECT_PATH_MEDIA/bin/unow-signal-diag.sh" ]; then
+		mkdir -p $_install_dir/bin/scripts
+		cp -f "$RK_PROJECT_PATH_MEDIA/bin/unow-signal-diag.sh" $_install_dir/bin/scripts/
+	fi
+	if [ -f "$RK_PROJECT_PATH_MEDIA/bin/unow-signal-diag.default" ]; then
+		cp -f "$RK_PROJECT_PATH_MEDIA/bin/unow-signal-diag.default" $_target_dir/etc/default/unow-signal-diag
+	fi
+
 	_avs_calib_install_dir=$_install_dir/share/avs_calib
 	mkdir -p $_avs_calib_install_dir
 	if [ -n "$RK_AVS_CALIB" ]; then
