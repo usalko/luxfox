@@ -5,6 +5,7 @@
 
 DAEMON="/oem/usr/bin/buildspot-recv.sh"
 PIDFILE="/var/run/buildspot-recv.pid"
+LOGFILE="/var/log/buildspot-recv.log"
 
 start() {
     printf "Starting buildspot-recv: "
@@ -12,7 +13,8 @@ start() {
         echo "FAIL (daemon not found)"
         exit 1
     fi
-    start-stop-daemon -S -b -p "$PIDFILE" -m --exec "$DAEMON"
+    # Use /bin/sh instead of /bin/bash for better compatibility
+    start-stop-daemon -S -b -p "$PIDFILE" -m --exec /bin/sh -- "$DAEMON"
     [ $? = 0 ] && echo "OK" || echo "FAIL"
 }
 
@@ -29,6 +31,18 @@ restart() {
     start
 }
 
+status() {
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if [ -d "/proc/$PID" ]; then
+            echo "buildspot-recv is running (pid $PID)"
+            return 0
+        fi
+    fi
+    echo "buildspot-recv is NOT running"
+    return 3
+}
+
 case "$1" in
     start)
         start
@@ -39,8 +53,11 @@ case "$1" in
     restart|reload)
         restart
         ;;
+    status)
+        status
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart}"
+        echo "Usage: $0 {start|stop|restart|status}"
         exit 1
 esac
 

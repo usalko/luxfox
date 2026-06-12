@@ -786,7 +786,7 @@ function build_media() {
 function build_sync() {
 	echo "============Start buildspot sync via UART============"
 	if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" ]; then
-		bash "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" "$@"
+		"${SDK_MEDIA_DIR}/buildspot/buildspot.sh" "$@"
 	else
 		msg_error "buildspot.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
 		exit 1
@@ -2820,6 +2820,19 @@ export RK_PROJECT_BOARD_DIR=$(dirname $(realpath $BOARD_CONFIG))
 export RK_PROJECT_TOOLCHAIN_CROSS=$RK_TOOLCHAIN_CROSS
 export PATH="${SDK_ROOT_DIR}/tools/linux/toolchain/${RK_PROJECT_TOOLCHAIN_CROSS}/bin":$PATH
 
+if [ "$1" = "sync" ]; then
+	for arg in "$@"; do
+		if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+			if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" ]; then
+				"${SDK_MEDIA_DIR}/buildspot/buildspot.sh" --help
+			else
+				usage
+			fi
+			exit 0
+		fi
+	done
+fi
+
 if echo $@ | grep -wqE "help|-h"; then
 	if [ -n "$2" -a "$(type -t usage$2)" == function ]; then
 		echo "###Current Configure [ $2 ] Build Command###"
@@ -2887,7 +2900,7 @@ while [ $# -ne 0 ]; do
 	rootfs) option=build_rootfs ;;
 	media) option=build_media ;;
 	sync)
-		option="build_sync $2 $3 $4"
+		option='build_sync "${@:2}"'
 		break
 		;;
 	app) option=build_app ;;

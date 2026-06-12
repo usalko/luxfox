@@ -1,21 +1,51 @@
-#!/bin/bash
+#!/bin/sh
 
 ##############################################################################
 # buildspot-recv.sh — Device-side helper for receiving OEM files via UART
-#
-# Deployment path: /oem/usr/bin/buildspot-recv.sh
-# Service script:   /etc/init.d/S99buildspot-recv
-#
-# This script:
-#   1. Waits to receive files from PC via rz (lrzsz)
-#   2. Stores files in /oem directory
-#   3. Updates index
 ##############################################################################
+
+# Redirect everything to the log file immediately
+LOGFILE="/var/log/buildspot-recv.log"
+exec >> "$LOGFILE" 2>&1
 
 set -e
 
 OEM_DIR="/oem"
-UART_DEVICE="/dev/ttyUSB0"
+
+# Smart UART detection
+detect_smart_uart() {
+    # 1. Check if we have USB-UART
+    local dev=$(ls /dev/ttyUSB0 2>/dev/null || true)
+    [ -n "$dev" ] && echo "$dev" && return
+
+    # 2. Check for FIQ debugger (Common console on Luckfox/Rockchip)
+    dev=$(ls /dev/ttyFIQ0 2>/dev/null || true)
+    [ -n "$dev" ] && echo "$dev" && return
+    
+    # 3. Check for standard UARTs (S1 usually available on Luckfox Ultra)
+    dev=$(ls /dev/ttyS1 2>/dev/null || true)
+    [ -n "$dev" ] && echo "$dev" && return
+
+    # 4. Global fallback
+    echo "/dev/ttyS0"
+}
+
+UART_DEVICE=$(detect_smart_uart)
+
+# Ensure we have a sane PATH
+export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+
+# Helper to run with timeout if available, else run directly
+run_with_timeout() {
+    local t=$1
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$t" "$@"
+    else
+        # Fallback: run without timeout if utility is missing
+        "$@"
+    fi
+}
 
 # Colors
 RED='\033[0;31m'
@@ -92,33 +122,35 @@ validate_setup() {
 receive_loop() {
     cd "$OEM_DIR"
     
-    log_info ""
-    log_info "═════════════════════════════════════════════════════"
-    log_info "Waiting to receive files from PC..."
-    log_info "═════════════════════════════════════════════════════"
-    log_info ""
-    log_info "On PC, run:"
-    log_info "  ./buildspot.sh --device /dev/ttyUSB0"
-    log_info ""
-    log_info "Press Ctrl+C to stop waiting"
-    log_info ""
+    log_info "Buildspot receiver started at $(date)"
+    log_info "Current OEM_DIR: $OEM_DIR"
+    log_info "Using UART_DEVICE: $UART_DEVICE"
     
     # Start receiving in loop
     while true; do
-        log_info "Ready to receive files via rz..."
+        log_info "Ready to receive files via rz... (waiting for PC sz command)"
         
         # Use timeout to avoid hanging indefinitely
         # rz will wait for incoming files
-        timeout 600 rz -b -E < "$UART_DEVICE" > "$UART_DEVICE" 2>&1 || {
+        # STTY settings to ensure UART is in raw mode for binary transfer
+        stty -F "$UART_DEVICE" raw speed 115200 -echo -echoe -echok 2>/dev/null || true
+        
+        # Capture stderr of rz to see serial protocol errors
+        if run_with_timeout 600 rz -b -E < "$UART_DEVICE" > "$UART_DEVICE" 2>/tmp/rz_error.log; then
+            log_info "rz command finished successfully or received files"
+            [ -f /tmp/rz_error.log ] && log_debug "rz output: $(cat /tmp/rz_error.log)"
+        else
             local exit_code=$?
             if [ $exit_code -eq 124 ]; then
-                # Timeout - just continue
-                log_warn "Timeout waiting for files (10 min), waiting again..."
+                log_warn "Session timeout (600s), no files received. Restarting loop..."
                 continue
-            elif [ $exit_code -ne 0 ]; then
-                log_warn "rz error (exit code: $exit_code)"
+            else
+                log_error "rz error (exit code: $exit_code)"
+                [ -f /tmp/rz_error.log ] && log_error "rz details: $(cat /tmp/rz_error.log)"
+                # Brief sleep to avoid rapid restart on persistent serial errors
+                sleep 2
             fi
-        }
+        fi
         
         # Check if index file was received
         if [ -f ".buildspot.index.gz" ]; then
