@@ -69,6 +69,8 @@ payload ≤ 220 Б). Это уже ровно то, что просил зака
 - [~] Добавлен host-side regression для joystick mapping: вынесена логика
   `js_event -> CRSF channels`, есть unit-test без железа и проверено, что
   `ulama_js_tx --joystick ... --count 1` корректно завершает one-shot прогон.
+- [~] Добавлен host-side regression `tests/e2e_udp_crsf_uart_pty.sh`: путь
+  `ulamad -> serial_uart -> pseudo-TTY` проходит end-to-end без настоящего `ttyS3`.
 - [ ] Следующий аппаратный smoke: `UNOW RX on LuckFox -> /dev/ttyS3 @ 420000 -> Betaflight CRSF RX`.
 - [ ] Следующий end-to-end smoke: живой `--joystick /dev/input/js0` на хосте +
   реальный радиоканал `UNOW` между двумя USB-адаптерами.
@@ -79,6 +81,7 @@ payload ≤ 220 Б). Это уже ровно то, что просил зака
 - [x] `make -C media/ulama test`
 - [x] `cd media/ulama && ./tests/e2e_udp_crsf.sh`
 - [x] `cd media/ulama && ./tests/e2e_udp_crsf_config.sh`
+- [x] `cd media/ulama && ./tests/e2e_udp_crsf_uart_pty.sh`
 
 ---
 
