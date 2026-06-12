@@ -110,9 +110,11 @@ apt install lrzsz
 Теперь `buildspot-recv` работает как системный сервис.
 
 #### Скрипт сборки
-В корне `media/buildspot` есть `build.sh`, который копирует необходимые файлы в сборочную директорию `output/out`:
-- `buildspot-recv.sh` → `/oem/usr/bin/`
-- `S99buildspot-recv` → `/etc/init.d/`
+В корне `media/buildspot` есть `build.sh`, который кладет файлы в те staging-пути, которые реально подхватывает `./build.sh firmware`:
+- `output/out/oem/usr/bin/buildspot-recv.sh` → попадет в `/oem/usr/bin/`
+- `output/out/media_out/root/etc/init.d/S99buildspot-recv` → попадет в `/etc/init.d/`
+
+Это важно: `./flash.sh` прошивает не каталоги напрямую, а пересобранные `oem.img` и `rootfs.img`. Поэтому `buildspot/build.sh` готовит именно эти staging-деревья, а затем `./flash.sh` вызывает `./build.sh firmware`, который уже пакует их в образы.
 
 Запуск сборки (из корня проекта):
 ```bash
