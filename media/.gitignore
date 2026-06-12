@@ -34,3 +34,9 @@ out
 #security/librkcrypto
 #security/rk_tee_user/
 #sysutils
+
+
+__pycache__
+*.a
+*.so
+ulamad
