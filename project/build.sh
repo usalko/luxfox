@@ -448,6 +448,7 @@ function usage() {
 	echo "driver             -build kernel's drivers"
 	echo "sysdrv             -build uboot, kernel, rootfs"
 	echo "media              -build rockchip media libraries"
+	echo "sync               -sync files via UART (buildspot)"
 	echo "app                -build app"
 	echo "recovery           -build recovery"
 	echo "tool               -build tool"
@@ -779,6 +780,17 @@ function build_media() {
 
 	make -C ${SDK_MEDIA_DIR}
 
+	finish_build
+}
+
+function build_sync() {
+	echo "============Start buildspot sync via UART============"
+	if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" ]; then
+		bash "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" "$@"
+	else
+		msg_error "buildspot.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
+		exit 1
+	fi
 	finish_build
 }
 
@@ -2874,6 +2886,10 @@ while [ $# -ne 0 ]; do
 	kernel) option=build_kernel ;;
 	rootfs) option=build_rootfs ;;
 	media) option=build_media ;;
+	sync)
+		option="build_sync $2 $3 $4"
+		break
+		;;
 	app) option=build_app ;;
 	info) option=build_info ;;
 	tool) option=build_tool ;;

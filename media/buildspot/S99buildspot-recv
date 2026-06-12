@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# buildspot-recv: Start buildspot receiver service
+#
+
+DAEMON="/oem/usr/bin/buildspot-recv.sh"
+PIDFILE="/var/run/buildspot-recv.pid"
+
+start() {
+    printf "Starting buildspot-recv: "
+    if [ ! -x "$DAEMON" ]; then
+        echo "FAIL (daemon not found)"
+        exit 1
+    fi
+    start-stop-daemon -S -b -p "$PIDFILE" -m --exec "$DAEMON"
+    [ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+
+stop() {
+    printf "Stopping buildspot-recv: "
+    start-stop-daemon -K -p "$PIDFILE"
+    [ $? = 0 ] && echo "OK" || echo "FAIL"
+    rm -f "$PIDFILE"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        restart
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+esac
+
+exit $?
