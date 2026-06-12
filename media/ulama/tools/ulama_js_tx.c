@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "ulama/crsf.h"
+#include "ulama/input_joystick.h"
 #include "ulama/transport.h"
 #include "ulama/ulama_frame.h"
 
@@ -31,6 +32,7 @@ typedef struct {
 	uint8_t ttl;
 	unsigned int rate_hz;
 	unsigned int frame_count;
+	bool count_explicit;
 	bool arm;
 	bool verbose;
 } app_config_t;
@@ -159,43 +161,6 @@ static int write_blob(FILE *file, const uint8_t *data, size_t len)
 	return fwrite(data, 1, len, file) == len ? 0 : -1;
 }
 
-static void apply_joystick_event(struct js_event event,
-	uint16_t channels[ULAMA_CRSF_NUM_CHANNELS],
-	int button_state[ULAMA_CRSF_NUM_CHANNELS],
-	bool *arm_state)
-{
-	event.type &= (uint8_t)~JS_EVENT_INIT;
-	if (event.type == JS_EVENT_AXIS) {
-		switch (event.number) {
-		case 0:
-			channels[0] = ulama_crsf_axis_to_bipolar(event.value, false);
-			break;
-		case 1:
-			channels[1] = ulama_crsf_axis_to_bipolar(event.value, true);
-			break;
-		case 2:
-			channels[2] = ulama_crsf_axis_to_throttle(event.value, true);
-			break;
-		case 3:
-			channels[3] = ulama_crsf_axis_to_bipolar(event.value, false);
-			break;
-		default:
-			break;
-		}
-		return;
-	}
-	if (event.type == JS_EVENT_BUTTON && event.number < ULAMA_CRSF_NUM_CHANNELS) {
-		if (event.number == 0 && event.value != 0 && button_state[0] == 0) {
-			*arm_state = !*arm_state;
-			channels[4] = *arm_state ? ULAMA_CRSF_VALUE_MAX : ULAMA_CRSF_VALUE_MIN;
-		}
-		button_state[event.number] = event.value;
-		if (event.number > 0 && (size_t)(4 + event.number) < ULAMA_CRSF_NUM_CHANNELS) {
-			channels[4 + event.number] = event.value != 0 ? ULAMA_CRSF_VALUE_MAX : ULAMA_CRSF_VALUE_MIN;
-		}
-	}
-}
-
 static int parse_args(int argc, char **argv, app_config_t *cfg)
 {
 	static const struct option options[] = {
@@ -262,7 +227,6 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 			break;
 		case 'j':
 			cfg->joystick_path = optarg;
-			cfg->frame_count = 0U;
 			break;
 		case 'c':
 			cfg->channels_text = optarg;
@@ -279,6 +243,7 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 			if (parse_uint(optarg, &cfg->frame_count) != 0) {
 				return -1;
 			}
+			cfg->count_explicit = true;
 			break;
 		case 'o':
 			cfg->crsf_out_path = optarg;
@@ -293,6 +258,9 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 			return -1;
 		}
 	}
+	if (cfg->joystick_path != NULL && !cfg->count_explicit) {
+		cfg->frame_count = 0U;
+	}
 	return 0;
 }
 
@@ -301,8 +269,7 @@ int main(int argc, char **argv)
 	app_config_t cfg;
 	ulama_tx_transport_t transport;
 	uint16_t channels[ULAMA_CRSF_NUM_CHANNELS];
-	int button_state[ULAMA_CRSF_NUM_CHANNELS] = {0};
-	bool arm_state = false;
+	ulama_joystick_state_t joystick_state;
 	uint16_t seq = 0;
 	FILE *crsf_out = NULL;
 	int joystick_fd = -1;
@@ -317,12 +284,13 @@ int main(int argc, char **argv)
 	memset(&transport, 0, sizeof(transport));
 	transport.fd = -1;
 	ulama_crsf_channels_init(channels);
+	ulama_joystick_init_state(&joystick_state);
 	if (cfg.channels_text != NULL && parse_channels_csv(cfg.channels_text, channels) != 0) {
 		fprintf(stderr, "failed to parse channels csv\n");
 		goto cleanup;
 	}
 	if (cfg.arm) {
-		arm_state = true;
+		joystick_state.arm_state = true;
 		channels[4] = ULAMA_CRSF_VALUE_MAX;
 	}
 
@@ -399,7 +367,7 @@ int main(int argc, char **argv)
 					struct js_event event;
 					ssize_t rc = read(joystick_fd, &event, sizeof(event));
 					if (rc == (ssize_t)sizeof(event)) {
-						apply_joystick_event(event, channels, button_state, &arm_state);
+						ulama_joystick_apply_event(event, channels, &joystick_state);
 						continue;
 					}
 					if (rc < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {

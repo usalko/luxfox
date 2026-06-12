@@ -66,6 +66,9 @@ payload ≤ 220 Б). Это уже ровно то, что просил зака
   `ARM EABI uclibc` и кладёт артефакты в `media/out`.
 - [x] Добавлены дефолтный `defaults/ulama.conf`, support `--config` в `ulamad` и
   init-скрипт `scripts/S99ulama` для Buildroot/rootfs-интеграции.
+- [~] Добавлен host-side regression для joystick mapping: вынесена логика
+  `js_event -> CRSF channels`, есть unit-test без железа и проверено, что
+  `ulama_js_tx --joystick ... --count 1` корректно завершает one-shot прогон.
 - [ ] Следующий аппаратный smoke: `UNOW RX on LuckFox -> /dev/ttyS3 @ 420000 -> Betaflight CRSF RX`.
 - [ ] Следующий end-to-end smoke: живой `--joystick /dev/input/js0` на хосте +
   реальный радиоканал `UNOW` между двумя USB-адаптерами.
