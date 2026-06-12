@@ -3,7 +3,7 @@
 > Цель: перенести **всё, что переносимо**, из `../ULAMA` (ESP-IDF/FreeRTOS,
 > ESP32 + LilyGo T3) в нативный Linux/Buildroot OEM-демон на LuckFox Pico Ultra.
 > Радио-транспорт ESP-NOW заменяется на **UNOW** (см. отдельный проект
-> [`media/unow/TODO.md`](../unow/TODO.md)). Стек L1/L2/L3 (кадр, link-manager,
+> [`media/unow/README.md`](../unow/README.md)). Стек L1/L2/L3 (кадр, link_manager,
 > mesh, resilience, фрагментация) переносится с тонким POSIX-шимом.
 
 Статусы: `[ ]` не начато, `[~]` в работе, `[x]` готово, `[!]` риск/требует решения.

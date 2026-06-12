@@ -328,7 +328,7 @@ ${GREEN}Next Steps:${NC}
 7. On your Desktop (another terminal):
    $ bash media/unow/RUNME_G0_TEST.sh desktop tx
 
-See media/unow/TESTING.md for full test guide.
+See media/unow/README.md for the full build, deploy, and test guide.
 
 ${BLUE}════════════════════════════════════════════════════${NC}
 

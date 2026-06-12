@@ -283,8 +283,8 @@ print_next_steps() {
     echo "2. On your Desktop (in another terminal):"
     echo "   $ bash media/unow/RUNME_G0_TEST.sh desktop tx"
     echo ""
-    echo "3. Run full test suite:"
-    echo "   $ bash media/unow/TESTING.md"
+    echo "3. Open the full UNOW guide:"
+    echo "   $ less media/unow/README.md"
     echo ""
 }
 

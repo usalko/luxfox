@@ -205,7 +205,7 @@ main() {
 ║  • Both sides must be on the same Wi-Fi channel (e.g., 6)         ║
 ║  • Keep adapters ~1m apart                                       ║
 ║  • Log output goes to stderr (redirect with 2>&1)                ║
-║  • For more details, see media/unow/TESTING.md                   ║
+║  • For more details, see media/unow/README.md                    ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
 EOF
