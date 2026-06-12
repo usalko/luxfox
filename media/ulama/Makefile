@@ -15,6 +15,8 @@ AR := $(RK_MEDIA_CROSS)-ar
 PKG_NAME := ulama
 PKG_OUT := $(CURRENT_DIR)/out
 PKG_BUILD := $(CURRENT_DIR)/build
+PKG_SCRIPT_DIR := $(CURRENT_DIR)/scripts
+PKG_CONFIG_DIR := $(CURRENT_DIR)/defaults
 
 HOST_CC ?= gcc
 UNOW_ROOT := $(CURRENT_DIR)/../unow
@@ -54,10 +56,12 @@ all: ulama-build
 	@echo "build $(PKG_NAME) done";
 
 ulama-build: $(TARGET_LIB_A) $(TARGET_BIN)
-	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/include $(PKG_OUT)/lib
+	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc $(PKG_OUT)/etc/init.d $(PKG_OUT)/include $(PKG_OUT)/lib
 	@cp -f $(TARGET_BIN) $(PKG_OUT)/bin/
 	@cp -f $(TARGET_LIB_A) $(PKG_OUT)/lib/
 	@cp -rfa $(CURRENT_DIR)/include/* $(PKG_OUT)/include/
+	@if [ -f $(PKG_SCRIPT_DIR)/S99ulama ]; then cp -f $(PKG_SCRIPT_DIR)/S99ulama $(PKG_OUT)/etc/init.d/; fi
+	@if [ -f $(PKG_CONFIG_DIR)/ulama.conf ]; then cp -f $(PKG_CONFIG_DIR)/ulama.conf $(PKG_OUT)/etc/; fi
 
 $(PKG_BUILD)/src/%.o: $(CURRENT_DIR)/src/%.c
 	@mkdir -p $(dir $@)

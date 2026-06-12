@@ -1,0 +1,98 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: ulama
+# Required-Start: $network
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: ULAMA CRSF bridge daemon
+### END INIT INFO
+
+set -eu
+
+BIN="${ULAMA_BIN:-/oem/usr/bin/ulamad}"
+CONFIG="${ULAMA_CONFIG:-/etc/ulama.conf}"
+PIDFILE="${ULAMA_PIDFILE:-/var/run/ulama.pid}"
+LOG_DIR="${ULAMA_LOG_DIR:-/var/log/ulama}"
+STDOUT_LOG="$LOG_DIR/ulamad.stdout"
+STDERR_LOG="$LOG_DIR/ulamad.stderr"
+
+log() {
+    echo "[S99ulama] $*"
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    if [ ! -x "$BIN" ]; then
+        log "ERROR: binary not found or not executable: $BIN"
+        return 1
+    fi
+
+    if [ ! -f "$CONFIG" ]; then
+        log "ERROR: config not found: $CONFIG"
+        return 1
+    fi
+
+    mkdir -p "$LOG_DIR"
+
+    if is_running; then
+        log "already running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "starting daemon bin=$BIN config=$CONFIG"
+
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --config "$CONFIG"
+    else
+        "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        echo $! > "$PIDFILE"
+    fi
+}
+
+stop() {
+    if is_running; then
+        pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        log "stopping pid=$pid"
+        kill "$pid" 2>/dev/null || true
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    log "not running"
+    rm -f "$PIDFILE"
+    return 0
+}
+
+status() {
+    if is_running; then
+        log "running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "stopped"
+    return 3
+}
+
+case "${1:-start}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop || true
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "ulama/crsf.h"
 #include "ulama/serial_uart.h"
@@ -22,6 +23,7 @@ typedef enum {
 
 typedef struct {
 	ulama_transport_kind_t transport_kind;
+	const char *config_path;
 	const char *iface;
 	const char *listen_addr;
 	uint8_t node_id;
@@ -34,11 +36,25 @@ typedef struct {
 	bool verbose;
 } app_config_t;
 
+static void init_defaults(app_config_t *cfg)
+{
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->transport_kind = ULAMA_TRANSPORT_KIND_UNOW;
+	cfg->config_path = NULL;
+	cfg->iface = "mon0";
+	cfg->listen_addr = "0.0.0.0:5000";
+	cfg->node_id = 1;
+	cfg->uart_path = "/dev/ttyS3";
+	cfg->uart_baud = 420000U;
+	cfg->output_mode = OUTPUT_MODE_UART;
+}
+
 static void usage(FILE *stream)
 {
 	fprintf(stream,
 		"usage: ulamad [options]\n"
 		"  --transport udp|unow       transport backend (default: unow)\n"
+		"  --config PATH              optional config file (default: disabled)\n"
 		"  --iface IFACE              monitor interface for unow (default: mon0)\n"
 		"  --listen IP:PORT           udp listen endpoint (default: 0.0.0.0:5000)\n"
 		"  --node ID                  local ULAMA node id (default: 1)\n"
@@ -49,6 +65,33 @@ static void usage(FILE *stream)
 		"  --count N                  exit after N accepted frames (default: 0 = forever)\n"
 		"  --ready-file PATH          create marker file after transport/output init\n"
 		"  --verbose                  print decoded channel summary\n");
+}
+
+static int trim_in_place(char *text)
+{
+	char *start;
+	char *end;
+
+	if (text == NULL) {
+		return -1;
+	}
+	start = text;
+	while (*start != '\0' && (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')) {
+		start++;
+	}
+	if (start != text) {
+		memmove(text, start, strlen(start) + 1U);
+	}
+	end = text + strlen(text);
+	while (end > text) {
+		char ch = end[-1];
+		if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+			break;
+		}
+		end--;
+	}
+	*end = '\0';
+	return 0;
 }
 
 static void on_signal(int signum)
@@ -111,6 +154,126 @@ static int parse_uint(const char *text, unsigned int *out)
 	return 0;
 }
 
+static int parse_bool_text(const char *text, bool *out)
+{
+	if (text == NULL || out == NULL) {
+		return -1;
+	}
+	if (strcmp(text, "1") == 0 || strcasecmp(text, "true") == 0 || strcasecmp(text, "yes") == 0 || strcasecmp(text, "on") == 0) {
+		*out = true;
+		return 0;
+	}
+	if (strcmp(text, "0") == 0 || strcasecmp(text, "false") == 0 || strcasecmp(text, "no") == 0 || strcasecmp(text, "off") == 0) {
+		*out = false;
+		return 0;
+	}
+	return -1;
+}
+
+static int apply_config_key(app_config_t *cfg, const char *key, const char *value)
+{
+	if (strcmp(key, "transport") == 0) {
+		ulama_transport_kind_t kind = ulama_transport_parse_kind(value);
+		if (kind == ULAMA_TRANSPORT_KIND_UNSPEC) {
+			return -1;
+		}
+		cfg->transport_kind = kind;
+		return 0;
+	}
+	if (strcmp(key, "iface") == 0) {
+		cfg->iface = strdup(value);
+		return cfg->iface == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "listen") == 0) {
+		cfg->listen_addr = strdup(value);
+		return cfg->listen_addr == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "node") == 0 || strcmp(key, "node_id") == 0) {
+		return parse_u8(value, &cfg->node_id);
+	}
+	if (strcmp(key, "uart") == 0 || strcmp(key, "uart_path") == 0) {
+		cfg->uart_path = strdup(value);
+		cfg->output_mode = OUTPUT_MODE_UART;
+		return cfg->uart_path == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "baud") == 0 || strcmp(key, "uart_baud") == 0) {
+		return parse_u32(value, &cfg->uart_baud);
+	}
+	if (strcmp(key, "output") == 0 || strcmp(key, "output_path") == 0) {
+		cfg->output_path = strdup(value);
+		cfg->output_mode = OUTPUT_MODE_FILE;
+		return cfg->output_path == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "stdout") == 0) {
+		bool enabled = false;
+		if (parse_bool_text(value, &enabled) != 0) {
+			return -1;
+		}
+		if (enabled) {
+			cfg->output_mode = OUTPUT_MODE_STDOUT;
+		}
+		return 0;
+	}
+	if (strcmp(key, "count") == 0) {
+		return parse_uint(value, &cfg->frame_limit);
+	}
+	if (strcmp(key, "ready_file") == 0 || strcmp(key, "ready-path") == 0) {
+		cfg->ready_path = strdup(value);
+		return cfg->ready_path == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "verbose") == 0) {
+		return parse_bool_text(value, &cfg->verbose);
+	}
+	return 0;
+}
+
+static int load_config_file(app_config_t *cfg, const char *path)
+{
+	FILE *file;
+	char line[512];
+	unsigned int line_no = 0;
+
+	if (cfg == NULL || path == NULL) {
+		return -1;
+	}
+	file = fopen(path, "rb");
+	if (file == NULL) {
+		return -1;
+	}
+	while (fgets(line, sizeof(line), file) != NULL) {
+		char *eq;
+		char *key;
+		char *value;
+
+		line_no++;
+		trim_in_place(line);
+		if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
+			continue;
+		}
+		if (line[0] == '[') {
+			continue;
+		}
+		eq = strchr(line, '=');
+		if (eq == NULL) {
+			fprintf(stderr, "config parse error %s:%u: missing '='\n", path, line_no);
+			fclose(file);
+			return -1;
+		}
+		*eq = '\0';
+		key = line;
+		value = eq + 1;
+		trim_in_place(key);
+		trim_in_place(value);
+		if (apply_config_key(cfg, key, value) != 0) {
+			fprintf(stderr, "config parse error %s:%u: invalid value for %s\n", path, line_no, key);
+			fclose(file);
+			return -1;
+		}
+	}
+	fclose(file);
+	return 0;
+}
+
 static int create_ready_file(const char *path)
 {
 	FILE *file;
@@ -131,6 +294,7 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 {
 	static const struct option options[] = {
 		{"transport", required_argument, NULL, 't'},
+		{"config", required_argument, NULL, 'f'},
 		{"iface", required_argument, NULL, 'i'},
 		{"listen", required_argument, NULL, 'l'},
 		{"node", required_argument, NULL, 'n'},
@@ -146,22 +310,16 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 	};
 	int opt;
 
-	memset(cfg, 0, sizeof(*cfg));
-	cfg->transport_kind = ULAMA_TRANSPORT_KIND_UNOW;
-	cfg->iface = "mon0";
-	cfg->listen_addr = "0.0.0.0:5000";
-	cfg->node_id = 1;
-	cfg->uart_path = "/dev/ttyS3";
-	cfg->uart_baud = 420000U;
-	cfg->output_mode = OUTPUT_MODE_UART;
-
-	while ((opt = getopt_long(argc, argv, "t:i:l:n:u:b:o:sc:r:vh", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:r:vh", options, NULL)) != -1) {
 		switch (opt) {
 		case 't':
 			cfg->transport_kind = ulama_transport_parse_kind(optarg);
 			if (cfg->transport_kind == ULAMA_TRANSPORT_KIND_UNSPEC) {
 				return -1;
 			}
+			break;
+		case 'f':
+			cfg->config_path = optarg;
 			break;
 		case 'i':
 			cfg->iface = optarg;
@@ -235,6 +393,17 @@ int main(int argc, char **argv)
 	unsigned int accepted = 0;
 	int exit_code = 1;
 
+	init_defaults(&cfg);
+	optind = 1;
+	if (parse_args(argc, argv, &cfg) != 0) {
+		usage(stderr);
+		return 2;
+	}
+	if (cfg.config_path != NULL && load_config_file(&cfg, cfg.config_path) != 0) {
+		fprintf(stderr, "failed to load config %s\n", cfg.config_path);
+		return 2;
+	}
+	optind = 1;
 	if (parse_args(argc, argv, &cfg) != 0) {
 		usage(stderr);
 		return 2;
