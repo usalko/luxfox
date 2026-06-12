@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOST_BIN_DIR="$ROOT_DIR/build/host-tools"
+HOST_UNOW_BIN_DIR="$ROOT_DIR/build/host-unow-tools"
 TARGET_BIN_DIR="$ROOT_DIR/out/bin"
 
 usage() {
@@ -85,12 +86,15 @@ run_host_tx() {
 		exit 2
 	fi
 
-	if [[ ! -x "$HOST_BIN_DIR/ulama_js_tx" ]]; then
-		make -C "$ROOT_DIR" host >/dev/null
+	if [[ ! -x "$HOST_UNOW_BIN_DIR/ulama_js_tx" ]]; then
+		if ! make -C "$ROOT_DIR" host-unow >/dev/null; then
+			echo "failed to build UNOW-enabled host sender; install host deps first: sudo apt install libpcap-dev iw tcpdump" >&2
+			exit 2
+		fi
 	fi
 
 	if [[ -n "$joystick" ]]; then
-		exec "$HOST_BIN_DIR/ulama_js_tx" \
+		exec "$HOST_UNOW_BIN_DIR/ulama_js_tx" \
 			--transport unow \
 			--iface "$iface" \
 			--dst-mac "$dst_mac" \
@@ -101,7 +105,7 @@ run_host_tx() {
 			--verbose
 	fi
 
-	exec "$HOST_BIN_DIR/ulama_js_tx" \
+	exec "$HOST_UNOW_BIN_DIR/ulama_js_tx" \
 		--transport unow \
 		--iface "$iface" \
 		--dst-mac "$dst_mac" \

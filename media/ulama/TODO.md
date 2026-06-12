@@ -71,6 +71,9 @@ payload ≤ 220 Б). Это уже ровно то, что просил зака
   `ulama_js_tx --joystick ... --count 1` корректно завершает one-shot прогон.
 - [~] Добавлен host-side regression `tests/e2e_udp_crsf_uart_pty.sh`: путь
   `ulamad -> serial_uart -> pseudo-TTY` проходит end-to-end без настоящего `ttyS3`.
+- [~] Подготовлены deploy/runbook/logging для общего smoke:
+  `deploy-to-luckfox.sh`, `HOST_LUCKFOX_CRSF_SMOKE.md`, `make host-unow` и
+  обновлённый `tests/run_unow_crsf_smoke.sh`.
 - [ ] Следующий аппаратный smoke: `UNOW RX on LuckFox -> /dev/ttyS3 @ 420000 -> Betaflight CRSF RX`.
 - [ ] Следующий end-to-end smoke: живой `--joystick /dev/input/js0` на хосте +
   реальный радиоканал `UNOW` между двумя USB-адаптерами.
@@ -79,6 +82,8 @@ payload ≤ 220 Б). Это уже ровно то, что просил зака
 
 - [x] `make -C media/ulama host`
 - [x] `make -C media/ulama test`
+- [~] `make -C media/ulama host-unow` — таргет добавлен; на этом хосте сейчас
+  ожидаемо упирается в отсутствие `libpcap-dev`.
 - [x] `cd media/ulama && ./tests/e2e_udp_crsf.sh`
 - [x] `cd media/ulama && ./tests/e2e_udp_crsf_config.sh`
 - [x] `cd media/ulama && ./tests/e2e_udp_crsf_uart_pty.sh`

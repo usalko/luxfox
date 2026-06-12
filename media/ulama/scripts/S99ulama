@@ -10,7 +10,7 @@
 
 set -eu
 
-BIN="${ULAMA_BIN:-/oem/usr/bin/ulamad}"
+BIN="${ULAMA_BIN:-/usr/bin/ulamad}"
 CONFIG="${ULAMA_CONFIG:-/etc/ulama.conf}"
 PIDFILE="${ULAMA_PIDFILE:-/var/run/ulama.pid}"
 LOG_DIR="${ULAMA_LOG_DIR:-/var/log/ulama}"

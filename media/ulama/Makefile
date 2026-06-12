@@ -49,7 +49,26 @@ ifneq ($(wildcard $(UNOW_PCAP_SYSROOT)/usr/lib/libpcap.so),)
 APP_LDFLAGS += -L$(UNOW_PCAP_SYSROOT)/usr/lib -Wl,-rpath-link,$(UNOW_PCAP_SYSROOT)/usr/lib
 endif
 
-.PHONY: all clean distclean host test
+HOST_PCAP_CFLAGS := $(shell pkg-config --cflags libpcap 2>/dev/null)
+HOST_PCAP_LIBS := $(shell pkg-config --libs libpcap 2>/dev/null)
+ifeq ($(HOST_PCAP_LIBS),)
+ifneq ($(wildcard /usr/include/pcap/pcap.h),)
+HOST_PCAP_CFLAGS := -I/usr/include
+HOST_PCAP_LIBS := -lpcap
+endif
+endif
+
+ifeq ($(HOST_PCAP_LIBS),)
+HAVE_HOST_PCAP := 0
+else
+HAVE_HOST_PCAP := 1
+endif
+
+HOST_UNOW_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=1 -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS) $(HOST_PCAP_CFLAGS)
+HOST_UNOW_LDFLAGS := $(HOST_PCAP_LIBS) -lpthread
+HOST_UNOW_TOOL_BINS := $(patsubst $(CURRENT_DIR)/tools/%.c,$(PKG_BUILD)/host-unow-tools/%,$(HOST_TOOL_SRCS))
+
+.PHONY: all clean distclean host host-unow test
 
 all: ulama-build
 	@$(call MAROC_COPY_PKG_TO_MEDIA_OUTPUT, $(RK_MEDIA_OUTPUT), $(PKG_OUT))
@@ -75,6 +94,15 @@ $(TARGET_BIN): $(TARGET_APP_SRC) $(LIB_SRCS) $(UNOW_SRCS)
 
 host: $(HOST_TEST_BINS) $(HOST_TOOL_BINS)
 
+ifeq ($(HAVE_HOST_PCAP),1)
+host-unow: $(HOST_UNOW_TOOL_BINS)
+else
+host-unow:
+	@echo "host-unow requires libpcap development files on the host." >&2
+	@echo "Install them first, for example: sudo apt install libpcap-dev iw tcpdump" >&2
+	@exit 1
+endif
+
 test: host
 	@for test_bin in $(HOST_TEST_BINS); do \
 		echo "running $$test_bin"; \
@@ -88,6 +116,10 @@ $(PKG_BUILD)/tests/%: $(CURRENT_DIR)/tests/%.c $(LIB_SRCS)
 $(PKG_BUILD)/host-tools/%: $(CURRENT_DIR)/tools/%.c $(LIB_SRCS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) $< $(LIB_SRCS) -o $@ $(HOST_LDFLAGS)
+
+$(PKG_BUILD)/host-unow-tools/%: $(CURRENT_DIR)/tools/%.c $(LIB_SRCS) $(UNOW_SRCS)
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_UNOW_CFLAGS) $< $(LIB_SRCS) $(UNOW_SRCS) -o $@ $(HOST_UNOW_LDFLAGS)
 
 clean:
 	@rm -rf $(PKG_BUILD) $(TARGET_LIB_A) $(TARGET_BIN)
