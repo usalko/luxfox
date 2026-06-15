@@ -4,19 +4,24 @@
 # build.sh — Build ULAMA and stage files for flashing to LuckFox
 #
 # Builds ULAMA and stages files into the same directories that `./flash.sh`
-# packages into rootfs.img.
+# packages into rootfs.img, and also prepares files for OEM sync.
 #
 # Usage:
-#   ./build.sh [OPTIONS]
+#   ./build.sh [COMMAND] [OPTIONS]
+#
+# Commands:
+#   build                Build and stage files (default)
+#   test                 Interactive hardware smoke test
 #
 # Options:
-#   -h, --help              Show this help
-#   -c, --clean             Clean build artifacts
-#   -v, --verbose           Verbose output
+#   -h, --help           Show this help
+#   -c, --clean          Clean build artifacts
+#   -v, --verbose        Verbose output
 #
 # Examples:
 #   ./build.sh                      # Build all targets and stage files
 #   ./build.sh -c                   # Clean and rebuild
+#   ./build.sh test                 # Run hardware smoke test (interactive)
 #
 ##############################################################################
 
@@ -239,9 +244,267 @@ print_next_steps() {
 }
 
 ##############################################################################
+# TESTING STAGES — Interactive Hardware Validation
+##############################################################################
+
+print_test_intro() {
+    echo ""
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}ULAMA Hardware Smoke Test — Step-by-Step${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Hardware:"
+    echo "  • Host:    WiFi adapter wlx088af1422c79, joystick /dev/input/js0"
+    echo "  • LuckFox: WiFi adapter wlan0, UART3 /dev/ttyS3 @ 420000 baud"
+    echo ""
+    echo "Time: ~30 min for full progression (can skip stages if issues detected)"
+    echo ""
+}
+
+stage_a_radio_only() {
+    echo -e "${YELLOW}┌─────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│ STAGE A: Radio-Only Reception           │${NC}"
+    echo -e "${YELLOW}└─────────────────────────────────────────┘${NC}"
+    echo ""
+    echo "Goal: Receive CRSF frames via UNOW without UART3 output"
+    echo ""
+    echo "PREREQS:"
+    echo "  1. LuckFox connected to host network (SSH 192.168.100.1)"
+    echo "  2. Both on same WiFi channel (use: iw dev mon0 set channel 6)"
+    echo ""
+    echo "STEPS:"
+    echo ""
+    echo "Step 1: On LuckFox, enter monitor mode"
+    echo "  ssh root@192.168.100.1"
+    echo "  /oem/usr/bin/scripts/unow-mon.sh mon0 6"
+    echo "  Expected: 'mon0 set to monitor mode on channel 6'"
+    echo ""
+    echo "Step 2: On LuckFox, start ulamad in debug mode"
+    echo "  UNOW_LOG_LEVEL=debug /oem/usr/bin/ulamad \\"
+    echo "    --transport unow \\"
+    echo "    --iface mon0 \\"
+    echo "    --node 1 \\"
+    echo "    --output /dev/null \\"
+    echo "    --verbose 2>&1 | tee /tmp/ulama_stage_a.log"
+    echo ""
+    echo "Step 3: On host, compile and send fixed CRSF pattern"
+    echo "  cd $ULAMA_ROOT"
+    echo "  export LD_LIBRARY_PATH=$UNOW_ROOT/lib:\$LD_LIBRARY_PATH"
+    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "    --transport unow \\"
+    echo "    --iface wlx088af1422c79 \\"
+    echo "    --channel 6 \\"
+    echo "    --count 10 \\"
+    echo "    --verbose"
+    echo ""
+    echo "Step 4: Observe LuckFox output"
+    echo "  Expected in ulamad log:"
+    echo "    'rx_frames: 10, valid: 10, dropped: 0'"
+    echo "  If PASS → proceed to Stage B"
+    echo "  If FAIL → debug checklist below"
+    echo ""
+    echo "FAIL DIAGNOSTICS:"
+    echo "  ✗ No UNOW_LOG output:"
+    echo "    → Check libpcap-dev: apt install libpcap-dev"
+    echo "    → Rebuild: make host-unow"
+    echo "  ✗ rx_frames: 0:"
+    echo "    → Monitor mode issue: iw dev wlx088af1422c79 info"
+    echo "    → Same channel? Both on channel 6?"
+    echo "    → Capture on host: tcpdump -i wlx088af1422c79 -c 5 'type data'"
+    echo "  ✗ Valid < 10:"
+    echo "    → CRSF decode fail: check ulama_js_tx --help"
+    echo ""
+}
+
+stage_b_uart_output() {
+    echo ""
+    echo -e "${YELLOW}┌─────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│ STAGE B: UART3 Output (Betaflight)      │${NC}"
+    echo -e "${YELLOW}└─────────────────────────────────────────┘${NC}"
+    echo ""
+    echo "Goal: Write CRSF frames to /dev/ttyS3 @ 420000 baud"
+    echo ""
+    echo "PREREQS:"
+    echo "  ✓ Stage A PASS (radio reception working)"
+    echo "  • Betaflight FC connected to LuckFox UART3"
+    echo "  • FC powered but NOT armed (safety!)"
+    echo ""
+    echo "STEPS:"
+    echo ""
+    echo "Step 1: On LuckFox, verify UART3"
+    echo "  ssh root@192.168.100.1"
+    echo "  stty -F /dev/ttyS3 -a"
+    echo "  Expected: speed 420000 baud (may show 115200, that's OK, ulamad sets it)"
+    echo ""
+    echo "Step 2: On LuckFox, start ulamad with UART3 output"
+    echo "  UNOW_LOG_LEVEL=debug /oem/usr/bin/ulamad \\"
+    echo "    --transport unow \\"
+    echo "    --iface mon0 \\"
+    echo "    --node 1 \\"
+    echo "    --uart /dev/ttyS3 \\"
+    echo "    --baud 420000 \\"
+    echo "    --verbose 2>&1 | tee /tmp/ulama_stage_b.log"
+    echo ""
+    echo "Step 3: On host, send 5 frames"
+    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "    --transport unow \\"
+    echo "    --iface wlx088af1422c79 \\"
+    echo "    --channel 6 \\"
+    echo "    --count 5"
+    echo ""
+    echo "Step 4: Check Betaflight"
+    echo "  • Betaflight Configurator → Receiver tab"
+    echo "  • Channels should show 1500 (center) or ±values"
+    echo "  • If bars not moving: RC link broken"
+    echo ""
+    echo "Step 5: Verify UART write"
+    echo "  On LuckFox, check /tmp/ulama_stage_b.log:"
+    echo "    'uart_write: 26 bytes to /dev/ttyS3'"
+    echo "  If PASS → proceed to Stage C"
+    echo ""
+    echo "FAIL DIAGNOSTICS:"
+    echo "  ✗ Betaflight channels not moving:"
+    echo "    → Check UART connection: multimeter /dev/ttyS3 pins"
+    echo "    → Verify baud rate: 420000"
+    echo "    → Check FC RX input: Betaflight CLI 'serial' command"
+    echo "  ✗ uart_write errors:"
+    echo "    → Device not open? Check permissions"
+    echo "    → Baud mismatch? FC expects 420000 CRSF only"
+    echo ""
+}
+
+stage_c_joystick_live() {
+    echo ""
+    echo -e "${YELLOW}┌─────────────────────────────────────────┐${NC}"
+    echo -e "${YELLOW}│ STAGE C: Live Joystick Input            │${NC}"
+    echo -e "${YELLOW}└─────────────────────────────────────────┘${NC}"
+    echo ""
+    echo "Goal: Read joystick → CRSF → UART3 (full loop)"
+    echo ""
+    echo "PREREQS:"
+    echo "  ✓ Stage B PASS (UART3 output working)"
+    echo "  • Joystick connected to host (/dev/input/js0)"
+    echo "  • Betaflight FC connected and responsive"
+    echo ""
+    echo "STEPS:"
+    echo ""
+    echo "Step 1: Verify joystick"
+    echo "  ls -la /dev/input/js*"
+    echo "  jstest /dev/input/js0"
+    echo "  Expected: Axes 0-3, buttons 0+ respond to input"
+    echo ""
+    echo "Step 2: On LuckFox, start ulamad (same as Stage B)"
+    echo "  /oem/usr/bin/ulamad \\"
+    echo "    --transport unow --iface mon0 --node 1 \\"
+    echo "    --uart /dev/ttyS3 --baud 420000 --verbose 2>&1"
+    echo ""
+    echo "Step 3: On host, start joystick sender"
+    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "    --transport unow \\"
+    echo "    --iface wlx088af1422c79 \\"
+    echo "    --channel 6 \\"
+    echo "    --joystick /dev/input/js0"
+    echo ""
+    echo "Step 4: Move joystick & observe Betaflight"
+    echo "  • Channels in Betaflight Configurator should follow joystick"
+    echo "  • Axis 0 (X) → Channel 1 (Roll)"
+    echo "  • Axis 1 (Y) → Channel 2 (Pitch)"
+    echo "  • Axis 2 (Throttle) → Channel 3"
+    echo "  • Axis 3 (Yaw) → Channel 4"
+    echo "  • Button 0 (A) → Channel 5 (Arm toggle)"
+    echo "  • Button 1+ (B,X,Y) → Channels 6+ (Aux)"
+    echo ""
+    echo "Step 5: Test arm/disarm"
+    echo "  • Press Button 0 to toggle ARM on Channel 5 (900↔2100)"
+    echo "  • Check FC shows armed state"
+    echo "  • If armed: SLOWLY move throttle stick to verify control"
+    echo ""
+    echo "✓ STAGE C PASS = ULAMA SMOKE TEST COMPLETE"
+    echo ""
+    echo "FAIL DIAGNOSTICS:"
+    echo "  ✗ Joystick not found:"
+    echo "    → Connect USB adapter, check dmesg"
+    echo "    → Try different port: /dev/input/js1, js2"
+    echo "  ✗ Channels not responding to joystick:"
+    echo "    → Check mapping: values should move 1000-2000 range"
+    echo "    → Verify ulama_js_tx is actually sending"
+    echo "    → Check logs for errors"
+    echo "  ✗ Arm button doesn't toggle:"
+    echo "    → Check button mapping in ulama_js_tx code"
+    echo "    → Verify button press detected: 'jstest' output"
+    echo ""
+}
+
+print_test_summary() {
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}Testing Roadmap:${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Stage A (Radio):     Check UNOW reception on /oem side"
+    echo "Stage B (UART):      Verify Betaflight receives RC frames"
+    echo "Stage C (Joystick):  Full closed-loop with live input"
+    echo ""
+    echo "Expected timing:"
+    echo "  Stage A: 5-10 min"
+    echo "  Stage B: 5-10 min (if Stage A pass)"
+    echo "  Stage C: 5-10 min (if Stage B pass)"
+    echo ""
+    echo "Logs saved to /tmp/ulama_stage_*.log on device"
+    echo ""
+}
+
+do_test() {
+    print_test_intro
+    
+    echo "Which stage to run?"
+    echo "  a) Stage A - Radio only"
+    echo "  b) Stage B - UART output"
+    echo "  c) Stage C - Joystick live"
+    echo "  all) All stages (full progression)"
+    echo "  summary) Show roadmap only"
+    echo ""
+    read -p "Choice [a/b/c/all/summary]: " choice
+    
+    case "$choice" in
+        a|A) stage_a_radio_only ;;
+        b|B) stage_b_uart_output ;;
+        c|C) stage_c_joystick_live ;;
+        all|ALL)
+            stage_a_radio_only
+            echo ""
+            read -p "Stage A done. Press Enter for Stage B..."
+            stage_b_uart_output
+            echo ""
+            read -p "Stage B done. Press Enter for Stage C..."
+            stage_c_joystick_live
+            ;;
+        summary|SUMMARY)
+            print_test_summary
+            ;;
+        *)
+            log_error "Unknown choice: $choice"
+            return 1
+            ;;
+    esac
+    
+    print_test_summary
+}
+
+##############################################################################
 # MAIN
 ##############################################################################
 main() {
+    local COMMAND="${1:-build}"
+    
+    # Handle help first
+    if [[ "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
+        print_usage
+        exit 0
+    fi
+    
+    shift 2>/dev/null || true
+    
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -265,30 +528,54 @@ main() {
         esac
     done
     
+    log_debug "COMMAND=$COMMAND"
     log_debug "CLEAN=$CLEAN"
     log_debug "VERBOSE=$VERBOSE"
     
-    # Clean if requested
-    if [ $CLEAN -eq 1 ]; then
-        do_clean
-    fi
-    
-    # Build
-    if ! do_build; then
-        log_error "Build failed!"
-        return 1
-    fi
-    
-    # Stage files
-    if ! stage_files; then
-        log_error "Failed to stage files for flashing!"
-        return 1
-    fi
-    
-    # Print summary
-    print_summary
-    print_next_steps
-    return 0
+    case "$COMMAND" in
+        build)
+            # Clean if requested
+            if [ $CLEAN -eq 1 ]; then
+                do_clean
+            fi
+            
+            # Build
+            if ! do_build; then
+                log_error "Build failed!"
+                return 1
+            fi
+            
+            # Stage files
+            if ! stage_files; then
+                log_error "Failed to stage files for flashing!"
+                return 1
+            fi
+            
+            # Print summary
+            print_summary
+            print_next_steps
+            return 0
+            ;;
+        test)
+            do_test
+            return $?
+            ;;
+        *)
+            log_error "Unknown command: $COMMAND"
+            echo ""
+            echo "Usage: $0 [COMMAND] [OPTIONS]"
+            echo ""
+            echo "Commands:"
+            echo "  build                Build and stage files (default)"
+            echo "  test                 Interactive hardware smoke test"
+            echo ""
+            echo "Options:"
+            echo "  -h, --help           Show help"
+            echo "  -c, --clean          Clean before build"
+            echo "  -v, --verbose        Verbose output"
+            return 1
+            ;;
+    esac
 }
 
 # Run main
