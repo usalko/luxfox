@@ -77,8 +77,12 @@ esp_err_t unow_init_iface(uint8_t node_id, const char *iface)
 		UNOW_LOGE("pcap open failed for %s: %s", active_iface, error_buf);
 		return ESP_FAIL;
 	}
+	UNOW_LOGI("DEBUG: opened pcap for %s, datalink=%d DLT_IEEE802_11_RADIO=%d", active_iface, datalink, DLT_IEEE802_11_RADIO);
 	if (datalink != DLT_IEEE802_11_RADIO) {
-		UNOW_LOGE("interface %s is not radiotap/monitor (datalink=%d:%s)", active_iface, datalink, pcap_datalink_val_to_name(datalink));
+		UNOW_LOGE("interface %s is not radiotap/monitor (datalink=%d:%s, expected=%d:%s)", 
+			active_iface, datalink, pcap_datalink_val_to_name(datalink), 
+			DLT_IEEE802_11_RADIO, pcap_datalink_val_to_name(DLT_IEEE802_11_RADIO));
+		UNOW_LOGE("TIP: Check with 'iw dev %s link' and 'iw %s info' on device", active_iface, active_iface);
 		unow_iface_close_pcap(&pcap_handle);
 		return ESP_ERR_INVALID_STATE;
 	}

@@ -109,6 +109,46 @@ int unow_iface_query(const char *iface, unow_iface_info_t *out, char *error_buf,
 		return -1;
 	}
 	memcpy(out->mac, ifr.ifr_hwaddr.sa_data, sizeof(out->mac));
+	
+	/* Debug: Log the MAC address we got */
+	if (out->mac[0] == 0 && out->mac[1] == 0 && out->mac[2] == 0 && 
+	    out->mac[3] == 0 && out->mac[4] == 0 && out->mac[5] == 0) {
+		UNOW_LOGW("WARNING: Interface %s has all-zero MAC address (%02x:%02x:%02x:%02x:%02x:%02x)", iface,
+			out->mac[0], out->mac[1], out->mac[2], out->mac[3], out->mac[4], out->mac[5]);
+		UNOW_LOGW("  This may indicate monitor interface not properly bound to base interface");
+		UNOW_LOGW("  This is a known rtl8192eu driver limitation");
+		UNOW_LOGW("  Try: ip link set %s address $(ip link show wlan0 | grep ether | awk '{print $2}')", iface);
+		
+		/* Workaround: If mon0 has zero MAC, try to get MAC from wlan0 base interface */
+		char base_iface[16] = {0};
+		if (strncmp(iface, "mon", 3) == 0) {
+			strncpy(base_iface, "wlan0", sizeof(base_iface) - 1);
+		} else if (strncmp(iface, "mon-", 4) == 0) {
+			strncpy(base_iface, "wlan0", sizeof(base_iface) - 1);
+		}
+		
+		if (strlen(base_iface) > 0) {
+			UNOW_LOGI("Attempting to retrieve MAC from base interface '%s'...", base_iface);
+			
+			int base_sock = socket(AF_INET, SOCK_DGRAM, 0);
+			if (base_sock >= 0) {
+				struct ifreq base_ifr = {0};
+				strncpy(base_ifr.ifr_name, base_iface, sizeof(base_ifr.ifr_name) - 1);
+				
+				if (ioctl(base_sock, SIOCGIFHWADDR, &base_ifr) == 0) {
+					unsigned char *base_mac = (unsigned char *)base_ifr.ifr_hwaddr.sa_data;
+					if (!(base_mac[0] == 0 && base_mac[1] == 0 && base_mac[2] == 0 &&
+					      base_mac[3] == 0 && base_mac[4] == 0 && base_mac[5] == 0)) {
+						memcpy(out->mac, base_ifr.ifr_hwaddr.sa_data, sizeof(out->mac));
+						UNOW_LOGI("  ✓ Found valid MAC from %s: %02x:%02x:%02x:%02x:%02x:%02x", base_iface,
+							out->mac[0], out->mac[1], out->mac[2], out->mac[3], out->mac[4], out->mac[5]);
+					}
+				}
+				close(base_sock);
+			}
+		}
+	}
+	
 	close(sockfd);
 	return 0;
 }

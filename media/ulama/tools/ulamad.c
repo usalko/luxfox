@@ -7,11 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 #include "ulama/crsf.h"
 #include "ulama/serial_uart.h"
 #include "ulama/transport.h"
 #include "ulama/ulama_frame.h"
+#include "ulama/ulama_version.h"
 
 static volatile sig_atomic_t g_stop;
 
@@ -385,6 +387,9 @@ static void print_channel_summary(const uint16_t channels[ULAMA_CRSF_NUM_CHANNEL
 
 int main(int argc, char **argv)
 {
+	fprintf(stderr, "[ulamad] Build: #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+
 	app_config_t cfg;
 	ulama_rx_transport_t transport;
 	ulama_serial_port_t uart = {.fd = -1, .baud = 0};
@@ -409,6 +414,11 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	install_signals();
+
+	/* Log version information */
+	fprintf(stderr, "[ulamad] Build: #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+
 	memset(&transport, 0, sizeof(transport));
 	transport.fd = -1;
 
@@ -450,12 +460,26 @@ int main(int argc, char **argv)
 		(unsigned int)cfg.node_id,
 		cfg.output_mode == OUTPUT_MODE_UART ? cfg.uart_path : (cfg.output_mode == OUTPUT_MODE_FILE ? cfg.output_path : "stdout"));
 
+	time_t last_stats = time(NULL);
+
 	while (!g_stop) {
 		ulama_frame_view_t view;
 		uint16_t channels[ULAMA_CRSF_NUM_CHANNELS];
 		uint8_t address = 0;
 		int8_t rssi = 0;
 		ssize_t received = ulama_transport_rx_recv(&transport, raw_frame, sizeof(raw_frame), 250, NULL, &rssi);
+
+		/* Periodically log statistics */
+		time_t now = time(NULL);
+		if (now - last_stats >= 5) {
+			if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
+				fprintf(stderr, "[stats] frames=%u accepted=%u (uptime=%lds)\n", 
+					(unsigned int)received > 0 ? accepted + 1 : accepted,
+					(unsigned int)accepted,
+					(long)(now - (last_stats - 5)));
+			}
+			last_stats = now;
+		}
 
 		if (received < 0) {
 			fprintf(stderr, "receive failed: %s\n", strerror(errno));
