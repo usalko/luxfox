@@ -786,7 +786,15 @@ function build_media() {
 function build_sync() {
 	echo "============Start buildspot sync via SSH============"
 	if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" ]; then
-		"${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" "$@"
+		# Default parameters for SSH sync to LuckFox device
+		# Can be overridden with --host, --user, etc.
+		"${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" \
+			--host 192.168.100.1 \
+			--user root \
+			--port 22 \
+			--source "${RK_PROJECT_OUTPUT}/oem" \
+			--target /oem \
+			"$@"
 	else
 		msg_error "buildspot-sync-ssh.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
 		exit 1

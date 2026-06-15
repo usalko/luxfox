@@ -9,7 +9,7 @@
 #   ./buildspot-sync-ssh.sh [options]
 #
 # Options:
-#   --host HOST         Device hostname/IP (default: 192.168.1.100)
+#   --host HOST         Device hostname/IP (default: 192.168.100.1)
 #   --user USER         SSH user (default: root)
 #   --port PORT         SSH port (default: 22)
 #   --key FILE          SSH private key (default: ~/.ssh/id_rsa)
@@ -24,7 +24,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../" && pwd)"
 
-HOST="${HOST:-192.168.1.100}"
+HOST="${HOST:-192.168.100.1}"
 USER="${USER:-root}"
 PORT="${PORT:-22}"
 KEY="${KEY:-$HOME/.ssh/id_rsa}"
