@@ -56,8 +56,9 @@ int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_le
 		 UNOW_VENDOR_SUBTYPE_DATA);
 	status = pcap_compile(handle, &program, filter_expr, 1, PCAP_NETMASK_UNKNOWN);
 	if (status < 0) {
-		unow_set_error(error_buf, error_buf_len, "pcap_compile failed: %s", pcap_geterr(handle));
-		return -1;
+		UNOW_LOGW("pcap_compile failed (embedded libpcap limitation): %s", pcap_geterr(handle));
+		UNOW_LOGW("operating without BPF filter; will do software filtering instead");
+		return 0;  // Non-fatal: continue without filter
 	}
 	status = pcap_setfilter(handle, &program);
 	pcap_freecode(&program);
