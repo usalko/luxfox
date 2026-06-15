@@ -86,6 +86,44 @@ do_clean() {
 }
 
 ##############################################################################
+# VERSION GENERATION
+##############################################################################
+generate_version() {
+    local version_file="$ULAMA_ROOT/include/ulama/ulama_version.h"
+    local build_number_file="$ULAMA_ROOT/.build_number"
+    local build_num=0
+    
+    # Increment build number
+    if [ -f "$build_number_file" ]; then
+        build_num=$(($(cat "$build_number_file") + 1))
+    fi
+    echo "$build_num" > "$build_number_file"
+    
+    # Get git info
+    local git_hash=""
+    local git_branch=""
+    if git rev-parse --git-dir > /dev/null 2>&1; then
+        git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    fi
+    
+    # Generate version header
+    cat > "$version_file" << EOF
+#ifndef ULAMA_VERSION_H
+#define ULAMA_VERSION_H
+
+#define ULAMA_BUILD_NUMBER    $build_num
+#define ULAMA_GIT_HASH        "$git_hash"
+#define ULAMA_GIT_BRANCH      "$git_branch"
+#define ULAMA_BUILD_DATE      "$(date '+%Y-%m-%d %H:%M:%S')"
+
+#endif /* ULAMA_VERSION_H */
+EOF
+    
+    log_debug "Generated version: build #$build_num ($git_branch@$git_hash)"
+}
+
+##############################################################################
 # BUILD
 ##############################################################################
 do_build() {
@@ -94,6 +132,9 @@ do_build() {
     log_info "=========================================="
     
     cd "$ULAMA_ROOT"
+    
+    # Generate version before building
+    generate_version
     
     log_info "Step 1/4: make host"
     make host || {
@@ -138,9 +179,9 @@ stage_files() {
     if [ ! -f "$ULAMA_ROOT/out/bin/ulamad" ]; then
         log_error "Binary not found: $ULAMA_ROOT/out/bin/ulamad"
         return 1
+    fi
     cp -f "$ULAMA_ROOT/out/bin/ulamad" "$OEM_STAGING/usr/bin/ulamad"
     chmod +x "$OEM_STAGING/usr/bin/ulamad"
-    fi
     cp -f "$ULAMA_ROOT/out/bin/ulamad" "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
     chmod +x "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
     
@@ -254,7 +295,7 @@ print_test_intro() {
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo ""
     echo "Hardware:"
-    echo "  • Host:    WiFi adapter wlx088af1422c79, joystick /dev/input/js0"
+    echo "  • Host:    WiFi adapter wlx088af1287d57 → mon-host (monitor mode), joystick /dev/input/js0"
     echo "  • LuckFox: WiFi adapter wlan0, UART3 /dev/ttyS3 @ 420000 baud"
     echo ""
     echo "Time: ~30 min for full progression (can skip stages if issues detected)"
@@ -294,19 +335,25 @@ stage_a_radio_only() {
     echo "    --output /dev/null \\"
     echo "    --verbose 2>&1 | tee /tmp/ulama_stage_a.log"
     echo ""
-    echo "Step 5: On host, compile and send fixed CRSF pattern"
+    echo "Step 5: On host, put WiFi adapter into monitor mode FIRST"
+    echo "  IMPORTANT: Your host adapter is wlx088af1287d57 (NOT wlan0 on host)"
+    echo "  Create a virtual monitor interface:"
+    echo "    sudo /home/pascale/projects/63411/luxfox/media/unow/scripts/unow-mon.sh wlx088af1287d57 mon-host 6"
+    echo "  (or if script not available: sudo iw wlx088af1287d57 interface add mon-host type monitor)"
+    echo ""
+    echo "Step 5b: Send fixed CRSF pattern from host"
     echo "  cd $ULAMA_ROOT"
     echo "  export LD_LIBRARY_PATH=$UNOW_ROOT/lib:\$LD_LIBRARY_PATH"
-    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "  sudo ./build/host-unow-tools/ulama_js_tx \\"
     echo "    --transport unow \\"
-    echo "    --iface wlx088af1422c79 \\"
+    echo "    --iface mon-host \\"
     echo "    --channel 6 \\"
     echo "    --count 10 \\"
     echo "    --verbose"
     echo ""
     echo "Step 6: Observe LuckFox output"
     echo "  Expected in ulamad log:"
-    echo "    'rx_frames: 10, valid: 10, dropped: 0'"
+    echo "    'rx_frames: 10, valid: 10, dropped: 0' (or similar success)"
     echo "  If PASS → proceed to Stage B"
     echo "  If FAIL → debug checklist below"
     echo ""
@@ -323,7 +370,7 @@ stage_a_radio_only() {
     echo "  ✗ rx_frames: 0:"
     echo "    → Monitor mode issue: iw dev mon0 info"
     echo "    → Same channel? Both on channel 6?"
-    echo "    → Capture on host: tcpdump -i wlx088af1422c79 -c 5 'type data'"
+    echo "  ✗ Capture on host: sudo tcpdump -i mon-host -c 5"
     echo "  ✗ Valid < 10:"
     echo "    → CRSF decode fail: check ulama_js_tx --help"
     echo ""
@@ -361,10 +408,15 @@ stage_b_uart_output() {
     echo "    --baud 420000 \\"
     echo "    --verbose 2>&1 | tee /tmp/ulama_stage_b.log"
     echo ""
-    echo "Step 4: On host, send 5 frames"
-    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "Step 4: On host, ensure mon-host is in monitor mode, then send 5 frames"
+    echo "  (If not already in monitor mode, run in another terminal:)"
+    echo "  sudo /home/pascale/projects/63411/luxfox/media/unow/scripts/unow-mon.sh wlx088af1287d57 mon-host 6"
+    echo ""
+    echo "  Then send frames:"
+    echo "  export LD_LIBRARY_PATH=/home/pascale/projects/63411/luxfox/media/unow/lib:\$LD_LIBRARY_PATH"
+    echo "  sudo ./build/host-unow-tools/ulama_js_tx \\"
     echo "    --transport unow \\"
-    echo "    --iface wlx088af1422c79 \\"
+    echo "    --iface mon-host \\"
     echo "    --channel 6 \\"
     echo "    --count 5"
     echo ""
@@ -421,10 +473,15 @@ stage_c_joystick_live() {
     echo "    --transport unow --iface mon0 --node 1 \\"
     echo "    --uart /dev/ttyS3 --baud 420000 --verbose 2>&1"
     echo ""
-    echo "Step 4: On host, start joystick sender"
-    echo "  ./build/host-unow-tools/ulama_js_tx \\"
+    echo "Step 4: On host, ensure mon-host is in monitor mode, then start joystick sender"
+    echo "  (If not already in monitor mode, run in another terminal:)"
+    echo "  sudo /home/pascale/projects/63411/luxfox/media/unow/scripts/unow-mon.sh wlx088af1287d57 mon-host 6"
+    echo ""
+    echo "  Then start joystick sender:"
+    echo "  export LD_LIBRARY_PATH=/home/pascale/projects/63411/luxfox/media/unow/lib:\$LD_LIBRARY_PATH"
+    echo "  sudo ./build/host-unow-tools/ulama_js_tx \\"
     echo "    --transport unow \\"
-    echo "    --iface wlx088af1422c79 \\"
+    echo "    --iface mon-host \\"
     echo "    --channel 6 \\"
     echo "    --joystick /dev/input/js0"
     echo ""
