@@ -784,11 +784,11 @@ function build_media() {
 }
 
 function build_sync() {
-	echo "============Start buildspot sync via UART============"
-	if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot.sh" ]; then
-		"${SDK_MEDIA_DIR}/buildspot/buildspot.sh" "$@"
+	echo "============Start buildspot sync via SSH============"
+	if [ -x "${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" ]; then
+		"${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" "$@"
 	else
-		msg_error "buildspot.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
+		msg_error "buildspot-sync-ssh.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
 		exit 1
 	fi
 	finish_build

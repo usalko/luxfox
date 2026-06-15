@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# S99buildspot-ssh — Init service for Buildspot SSH Daemon
+#
+# Automatically starts SSH service on boot for OEM file sync.
+# Uses /etc/init.d standard interface.
+#
+
+set -u
+
+DAEMON="/oem/usr/bin/buildspot-ssh-daemon.sh"
+NAME="buildspot-ssh"
+DESC="Buildspot SSH Sync Service"
+PIDFILE="/var/run/buildspot-ssh.pid"
+
+[ -x "$DAEMON" ] || exit 0
+
+case "$1" in
+    start)
+        echo "Starting $DESC..."
+        mkdir -p /var/log
+        # Run daemon with output to log
+        $DAEMON > /var/log/buildspot-ssh.log 2>&1 &
+        echo $! > "$PIDFILE"
+        sleep 2
+        echo "$DESC started (see /var/log/buildspot-ssh.log)"
+        ;;
+    stop)
+        echo "Stopping $DESC..."
+        if [ -f "$PIDFILE" ]; then
+            kill $(cat "$PIDFILE") 2>/dev/null || true
+            rm -f "$PIDFILE"
+        fi
+        killall buildspot-ssh-daemon.sh 2>/dev/null || true
+        killall dropbear 2>/dev/null || true
+        killall udhcpd 2>/dev/null || true
+        echo "$DESC stopped"
+        ;;
+    restart)
+        $0 stop
+        sleep 2
+        $0 start
+        ;;
+    status)
+        if pgrep -f "buildspot-ssh-daemon" >/dev/null; then
+            echo "$DESC is running"
+            echo "Recent logs:"
+            tail -5 /var/log/buildspot-ssh.log 2>/dev/null || echo "  (no log)"
+            exit 0
+        else
+            echo "$DESC is not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
