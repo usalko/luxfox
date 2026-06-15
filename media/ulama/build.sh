@@ -30,7 +30,9 @@ OUTPUT_ROOT="$PROJECT_ROOT/output/out"
 
 # Firmware staging paths (same as used by main SDK build)
 # - output/out/media_out/root -> copied into rootfs during build_firmware
+# - output/out/oem -> synced to /oem on device via ./build.sh sync
 MEDIA_ROOT_STAGING="$OUTPUT_ROOT/media_out/root"
+OEM_STAGING="$OUTPUT_ROOT/oem"
 
 # Color codes
 RED='\033[0;31m'
@@ -114,20 +116,25 @@ do_build() {
 ##############################################################################
 stage_files() {
     log_info "=========================================="
-    log_info "Staging files for firmware packaging"
+    log_info "Staging files for firmware packaging & OEM sync"
     log_info "=========================================="
     
     log_info "Rootfs staging: $MEDIA_ROOT_STAGING"
+    log_info "OEM staging:    $OEM_STAGING"
     
     # Create staging directories
     mkdir -p "$MEDIA_ROOT_STAGING/usr/bin/scripts"
     mkdir -p "$MEDIA_ROOT_STAGING/etc/init.d"
+    mkdir -p "$OEM_STAGING/usr/bin/scripts"
+    mkdir -p "$OEM_STAGING/etc/init.d"
     
     # Stage /usr/bin/ulamad
     log_debug "Staging /usr/bin/ulamad"
     if [ ! -f "$ULAMA_ROOT/out/bin/ulamad" ]; then
         log_error "Binary not found: $ULAMA_ROOT/out/bin/ulamad"
         return 1
+    cp -f "$ULAMA_ROOT/out/bin/ulamad" "$OEM_STAGING/usr/bin/ulamad"
+    chmod +x "$OEM_STAGING/usr/bin/ulamad"
     fi
     cp -f "$ULAMA_ROOT/out/bin/ulamad" "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
     chmod +x "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
@@ -139,6 +146,7 @@ stage_files() {
         return 1
     fi
     cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$MEDIA_ROOT_STAGING/etc/ulama.conf"
+    cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$OEM_STAGING/etc/ulama.conf"
     
     # Stage /etc/init.d/S99ulama
     log_debug "Staging /etc/init.d/S99ulama"
@@ -148,6 +156,8 @@ stage_files() {
     fi
     cp -f "$ULAMA_ROOT/scripts/S99ulama" "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
     chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
+    cp -f "$ULAMA_ROOT/scripts/S99ulama" "$OEM_STAGING/etc/init.d/S99ulama"
+    chmod +x "$OEM_STAGING/etc/init.d/S99ulama"
     
     # Stage /usr/bin/scripts/unow-mon.sh
     log_debug "Staging /usr/bin/scripts/unow-mon.sh"
@@ -155,6 +165,8 @@ stage_files() {
         log_error "Script not found: $UNOW_ROOT/scripts/unow-mon.sh"
         return 1
     fi
+    cp -f "$UNOW_ROOT/scripts/unow-mon.sh" "$OEM_STAGING/usr/bin/scripts/unow-mon.sh"
+    chmod +x "$OEM_STAGING/usr/bin/scripts/unow-mon.sh"
     cp -f "$UNOW_ROOT/scripts/unow-mon.sh" "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-mon.sh"
     chmod +x "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-mon.sh"
     
@@ -166,6 +178,8 @@ stage_files() {
     fi
     cp -f "$UNOW_ROOT/scripts/unow-down.sh" "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-down.sh"
     chmod +x "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-down.sh"
+    cp -f "$UNOW_ROOT/scripts/unow-down.sh" "$OEM_STAGING/usr/bin/scripts/unow-down.sh"
+    chmod +x "$OEM_STAGING/usr/bin/scripts/unow-down.sh"
     
     log_info "✓ Files staged successfully:"
     log_info "  - usr/bin/ulamad"
@@ -195,7 +209,13 @@ print_summary() {
     if [ -d "$MEDIA_ROOT_STAGING" ]; then
         echo ""
         echo -e "${GREEN}✓ Files Staged for Flashing${NC}"
-        echo "  Staging: $MEDIA_ROOT_STAGING"
+        echo "  Rootfs:  $MEDIA_ROOT_STAGING"
+    fi
+    
+    if [ -d "$OEM_STAGING" ]; then
+        echo ""
+        echo -e "${GREEN}✓ Files Staged for OEM Sync${NC}"
+        echo "  OEM:     $OEM_STAGING"
     fi
     
     echo ""
@@ -206,8 +226,15 @@ print_next_steps() {
     echo -e "${BLUE}Next Steps:${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
     echo ""
-    echo "• Files are staged in: $MEDIA_ROOT_STAGING"
-    echo "• To flash to device: $PROJECT_ROOT/flash.sh"
+    echo "• Rootfs staging: $MEDIA_ROOT_STAGING"
+    echo "• OEM staging:    $OEM_STAGING"
+    echo ""
+    echo "To update on LuckFox Pico Ultra:"
+    echo "  1. Full reflash (rootfs + OEM):"
+    echo "     cd $PROJECT_ROOT && ./flash.sh"
+    echo ""
+    echo "  2. Fast OEM sync (seconds, not minutes):"
+    echo "     cd $PROJECT_ROOT && ./build.sh sync"
     echo ""
 }
 
