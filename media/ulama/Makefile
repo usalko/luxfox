@@ -37,13 +37,13 @@ TARGET_LIB_A := libulama.a
 
 INC_FLAGS := -I$(CURRENT_DIR)/include -I$(CURRENT_DIR)/src -I$(RK_MEDIA_OUTPUT)/include -I$(UNOW_ROOT)/include -I$(UNOW_ROOT)/src
 ifneq ($(wildcard $(UNOW_PCAP_SYSROOT)/usr/include/pcap/pcap.h),)
-INC_FLAGS += -I$(UNOW_PCAP_SYSROOT)/usr/include
+INC_FLAGS += -isystem $(UNOW_PCAP_SYSROOT)/usr/include
 endif
-CFLAGS += $(RK_MEDIA_CROSS_CFLAGS) -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=1 -g -Wall -Wextra -std=c11 $(INC_FLAGS) -fPIC
+CFLAGS += $(RK_MEDIA_CROSS_CFLAGS) -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -DULAMA_WITH_UNOW=1 -g -Wall -Wextra -std=c11 $(INC_FLAGS) -fPIC
 
 HOST_INC_FLAGS := -I$(CURRENT_DIR)/include -I$(CURRENT_DIR)/src -I$(UNOW_ROOT)/include -I$(UNOW_ROOT)/src
 HOST_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=0 -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS)
-APP_LDFLAGS += -lpcap -lpthread
+APP_LDFLAGS += -lpcap -lpthread -lrt
 HOST_LDFLAGS += -lpthread
 ifneq ($(wildcard $(UNOW_PCAP_SYSROOT)/usr/lib/libpcap.so),)
 APP_LDFLAGS += -L$(UNOW_PCAP_SYSROOT)/usr/lib -Wl,-rpath-link,$(UNOW_PCAP_SYSROOT)/usr/lib

@@ -9,6 +9,9 @@
 #include <strings.h>
 #include <time.h>
 
+#define KEEPALIVE_HZ          150U
+#define KEEPALIVE_INTERVAL_NS (1000000000LL / (int64_t)KEEPALIVE_HZ)
+
 #include "ulama/crsf.h"
 #include "ulama/serial_uart.h"
 #include "ulama/transport.h"
@@ -371,6 +374,11 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 	return 0;
 }
 
+static int64_t timespec_diff_ns(const struct timespec *a, const struct timespec *b)
+{
+	return ((int64_t)(a->tv_sec - b->tv_sec) * 1000000000LL) + (int64_t)(a->tv_nsec - b->tv_nsec);
+}
+
 static void print_channel_summary(const uint16_t channels[ULAMA_CRSF_NUM_CHANNELS], uint16_t seq, int8_t rssi)
 {
 	fprintf(stderr,
@@ -397,6 +405,12 @@ int main(int argc, char **argv)
 	uint8_t raw_frame[256];
 	unsigned int accepted = 0;
 	int exit_code = 1;
+
+	uint8_t last_crsf_frame[ULAMA_CRSF_RC_FRAME_SIZE];
+	size_t last_crsf_len = 0;
+	bool has_last_frame = false;
+	struct timespec last_tx = {0, 0};
+	unsigned int keepalive_count = 0;
 
 	init_defaults(&cfg);
 	optind = 1;
@@ -467,18 +481,33 @@ int main(int argc, char **argv)
 		uint16_t channels[ULAMA_CRSF_NUM_CHANNELS];
 		uint8_t address = 0;
 		int8_t rssi = 0;
-		ssize_t received = ulama_transport_rx_recv(&transport, raw_frame, sizeof(raw_frame), 250, NULL, &rssi);
+
+		/* Wake up early enough to honour the 150 Hz keepalive deadline. */
+		int recv_timeout_ms = 250;
+		if (has_last_frame && cfg.output_mode == OUTPUT_MODE_UART) {
+			struct timespec ts_now;
+			clock_gettime(CLOCK_MONOTONIC, &ts_now);
+			int64_t remaining_ns = KEEPALIVE_INTERVAL_NS - timespec_diff_ns(&ts_now, &last_tx);
+			if (remaining_ns <= 0) {
+				recv_timeout_ms = 0;
+			} else {
+				int ms = (int)(remaining_ns / 1000000LL);
+				recv_timeout_ms = (ms < 1) ? 1 : (ms < 250 ? ms : 250);
+			}
+		}
+
+		ssize_t received = ulama_transport_rx_recv(&transport, raw_frame, sizeof(raw_frame), recv_timeout_ms, NULL, &rssi);
 
 		/* Periodically log statistics */
-		time_t now = time(NULL);
-		if (now - last_stats >= 5) {
+		time_t stats_now = time(NULL);
+		if (stats_now - last_stats >= 5) {
 			if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
-				fprintf(stderr, "[stats] frames=%u accepted=%u (uptime=%lds)\n", 
-					(unsigned int)received > 0 ? accepted + 1 : accepted,
+				fprintf(stderr, "[stats] accepted=%u keepalive=%u (uptime=%lds)\n",
 					(unsigned int)accepted,
-					(long)(now - (last_stats - 5)));
+					(unsigned int)keepalive_count,
+					(long)(stats_now - (last_stats - 5)));
 			}
-			last_stats = now;
+			last_stats = stats_now;
 		}
 
 		if (received < 0) {
@@ -486,54 +515,79 @@ int main(int argc, char **argv)
 			goto cleanup;
 		}
 		if (received == 0) {
-			continue;
+			goto keepalive;
 		}
 		if (!ulama_frame_unpack(raw_frame, (size_t)received, &view)) {
 			fprintf(stderr, "drop: bad ulama frame len=%zd\n", received);
-			continue;
+			goto keepalive;
 		}
 		if (view.dst_node != cfg.node_id && view.dst_node != 0xFFU) {
-			continue;
+			goto keepalive;
 		}
 		if (view.traffic_class != ULAMA_CLASS_CTRL) {
-			continue;
+			goto keepalive;
 		}
 		if (!ulama_crsf_parse_rc_channels_frame(view.payload, view.payload_len, &address, channels)) {
 			fprintf(stderr, "drop: invalid crsf payload len=%zu\n", view.payload_len);
-			continue;
+			goto keepalive;
 		}
 		if (address != ULAMA_CRSF_ADDRESS_FLIGHT_CONTROLLER) {
 			fprintf(stderr, "drop: unexpected crsf address 0x%02x\n", address);
-			continue;
+			goto keepalive;
 		}
-		/* payload[1] is the CRSF length field (bytes after it), so the total
-		 * CRSF frame is payload[1]+2 bytes. This trims any trailing bytes
-		 * that 802.11 capture drivers (e.g. 8192eu) append to pcap frames,
-		 * such as the 4-byte 802.11 FCS. */
-		size_t crsf_len = (view.payload_len >= 2U)
-			? ((size_t)view.payload[1] + 2U)
-			: view.payload_len;
-		if (crsf_len > view.payload_len) {
-			crsf_len = view.payload_len;
-		}
-		if (cfg.output_mode == OUTPUT_MODE_UART) {
-			if (ulama_serial_write_all(&uart, view.payload, crsf_len) < 0) {
-				fprintf(stderr, "uart write failed: %s\n", strerror(errno));
-				goto cleanup;
+		{
+			/* payload[1] is the CRSF length field (bytes after it), so the total
+			 * CRSF frame is payload[1]+2 bytes. This trims any trailing bytes
+			 * that 802.11 capture drivers (e.g. 8192eu) append to pcap frames,
+			 * such as the 4-byte 802.11 FCS. */
+			size_t crsf_len = (view.payload_len >= 2U)
+				? ((size_t)view.payload[1] + 2U)
+				: view.payload_len;
+			if (crsf_len > view.payload_len) {
+				crsf_len = view.payload_len;
 			}
-		} else {
-			if (fwrite(view.payload, 1, crsf_len, out_file) != crsf_len) {
-				fprintf(stderr, "output write failed\n");
-				goto cleanup;
+			if (cfg.output_mode == OUTPUT_MODE_UART) {
+				if (ulama_serial_write_all(&uart, view.payload, crsf_len) < 0) {
+					fprintf(stderr, "uart write failed: %s\n", strerror(errno));
+					goto cleanup;
+				}
+			} else {
+				if (fwrite(view.payload, 1, crsf_len, out_file) != crsf_len) {
+					fprintf(stderr, "output write failed\n");
+					goto cleanup;
+				}
+				fflush(out_file);
 			}
-			fflush(out_file);
+			/* Save frame for keepalive retransmit. last_tx is set here so the
+			 * keepalive check below does not double-send on the same iteration. */
+			memcpy(last_crsf_frame, view.payload, crsf_len);
+			last_crsf_len = crsf_len;
+			clock_gettime(CLOCK_MONOTONIC, &last_tx);
+			has_last_frame = true;
+
+			accepted++;
+			if (cfg.verbose) {
+				print_channel_summary(channels, view.seq, rssi);
+			}
+			if (cfg.frame_limit != 0U && accepted >= cfg.frame_limit) {
+				break;
+			}
 		}
-		accepted++;
-		if (cfg.verbose) {
-			print_channel_summary(channels, view.seq, rssi);
-		}
-		if (cfg.frame_limit != 0U && accepted >= cfg.frame_limit) {
-			break;
+
+keepalive:
+		/* Retransmit the last CRSF frame at 150 Hz so the flight controller
+		 * does not trigger failsafe when incoming ULAMA frames are absent. */
+		if (has_last_frame && cfg.output_mode == OUTPUT_MODE_UART) {
+			struct timespec ts_now;
+			clock_gettime(CLOCK_MONOTONIC, &ts_now);
+			if (timespec_diff_ns(&ts_now, &last_tx) >= KEEPALIVE_INTERVAL_NS) {
+				if (ulama_serial_write_all(&uart, last_crsf_frame, last_crsf_len) < 0) {
+					fprintf(stderr, "uart write failed (keepalive): %s\n", strerror(errno));
+					goto cleanup;
+				}
+				last_tx = ts_now;
+				keepalive_count++;
+			}
 		}
 	}
 

@@ -201,6 +201,23 @@ UNOW_LOG_LEVEL=debug ./tests/run_unow_crsf_smoke.sh host-tx \
 
 Now check the Betaflight Receiver tab. With the fixed pattern the channels should move deterministically.
 
+### Keepalive behaviour
+
+`ulamad` saves the last valid CRSF frame internally. Once the first frame is
+accepted, it **retransmits it at 150 Hz** (~6.67 ms interval) even when no new
+ULAMA frames arrive. This prevents the flight controller from entering failsafe
+due to a gap in the CRSF stream (e.g. brief packet loss over UNOW).
+
+To verify keepalive is running, stop the host-tx sender after a few frames and
+watch the `[stats]` line in `/tmp/ulamad-uart.log`:
+
+```text
+[stats] accepted=42 keepalive=763 (uptime=10s)
+```
+
+`keepalive` should keep incrementing at ~150 per second even when `accepted`
+stops growing. If `keepalive` stays at 0, no frame was received yet.
+
 ## 7. Stage C: real joystick on host
 
 Only do this after Stage B is stable.

@@ -232,6 +232,13 @@ MVP — это исказит тайминги/тесты. Оптимизаци�
   Buildroot-rootfs (автозапуск).
 - [~] `scripts/S99ulama` и `config/ulama.conf` уже пакуются в `out/etc`; запуск на
   реальном rootfs ещё не прогнан.
+- [x] **5.6** Keepalive (anti-failsafe): при отсутствии входящих ULAMA-фреймов
+  `ulamad` повторно передаёт последний принятый CRSF RC_CHANNELS кадр в `/dev/ttyS3`
+  с частотой **150 Гц** (интервал ~6.67 мс), предотвращая срабатывание failsafe
+  полётного контроллера. Таймер recv-блокировки динамически укорачивается до
+  остатка до следующего keepalive-дедлайна. Режимы `--output FILE` и `--stdout`
+  keepalive не используют (тестовые режимы, не требуют keepalive). Статистика
+  retransmit-счётчика (`keepalive=N`) выводится в `[stats]`-строке каждые 5 с.
 - [~] Артефакт: `ulamad` собирается под ARM и host; host e2e с `UDP` пройден;
   on-device runtime с `UNOW` и `UART3` ещё не прогнан.
 
