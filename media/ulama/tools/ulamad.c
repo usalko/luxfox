@@ -506,13 +506,23 @@ int main(int argc, char **argv)
 			fprintf(stderr, "drop: unexpected crsf address 0x%02x\n", address);
 			continue;
 		}
+		/* payload[1] is the CRSF length field (bytes after it), so the total
+		 * CRSF frame is payload[1]+2 bytes. This trims any trailing bytes
+		 * that 802.11 capture drivers (e.g. 8192eu) append to pcap frames,
+		 * such as the 4-byte 802.11 FCS. */
+		size_t crsf_len = (view.payload_len >= 2U)
+			? ((size_t)view.payload[1] + 2U)
+			: view.payload_len;
+		if (crsf_len > view.payload_len) {
+			crsf_len = view.payload_len;
+		}
 		if (cfg.output_mode == OUTPUT_MODE_UART) {
-			if (ulama_serial_write_all(&uart, view.payload, view.payload_len) < 0) {
+			if (ulama_serial_write_all(&uart, view.payload, crsf_len) < 0) {
 				fprintf(stderr, "uart write failed: %s\n", strerror(errno));
 				goto cleanup;
 			}
 		} else {
-			if (fwrite(view.payload, 1, view.payload_len, out_file) != view.payload_len) {
+			if (fwrite(view.payload, 1, crsf_len, out_file) != crsf_len) {
 				fprintf(stderr, "output write failed\n");
 				goto cleanup;
 			}
