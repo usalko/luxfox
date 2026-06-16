@@ -136,6 +136,13 @@
 	};
 };
 
+/**********UART3 CRSF RX (M0: GPIO1_A0=TX, GPIO1_A1=RX)**********/
+&uart3 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart3m0_xfer>;
+};
+
 /**********SPI**********/
 &spi0 {
 	status = "disabled";
