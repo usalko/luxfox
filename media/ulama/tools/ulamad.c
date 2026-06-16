@@ -38,6 +38,7 @@ typedef struct {
 	const char *ready_path;
 	output_mode_t output_mode;
 	unsigned int frame_limit;
+	unsigned int keepalive_timeout_s;
 	bool verbose;
 } app_config_t;
 
@@ -52,6 +53,7 @@ static void init_defaults(app_config_t *cfg)
 	cfg->uart_path = "/dev/ttyS3";
 	cfg->uart_baud = 420000U;
 	cfg->output_mode = OUTPUT_MODE_UART;
+	cfg->keepalive_timeout_s = 2U;
 }
 
 static void usage(FILE *stream)
@@ -68,6 +70,7 @@ static void usage(FILE *stream)
 		"  --output PATH              write CRSF frames to file instead of UART\n"
 		"  --stdout                   write CRSF frames to stdout instead of UART\n"
 		"  --count N                  exit after N accepted frames (default: 0 = forever)\n"
+		"  --keepalive-timeout SECS   stop keepalive if no WiFi frame for N seconds (default: 2, 0=forever)\n"
 		"  --ready-file PATH          create marker file after transport/output init\n"
 		"  --verbose                  print decoded channel summary\n");
 }
@@ -222,6 +225,9 @@ static int apply_config_key(app_config_t *cfg, const char *key, const char *valu
 	if (strcmp(key, "count") == 0) {
 		return parse_uint(value, &cfg->frame_limit);
 	}
+	if (strcmp(key, "keepalive_timeout") == 0 || strcmp(key, "keepalive-timeout") == 0) {
+		return parse_uint(value, &cfg->keepalive_timeout_s);
+	}
 	if (strcmp(key, "ready_file") == 0 || strcmp(key, "ready-path") == 0) {
 		cfg->ready_path = strdup(value);
 		return cfg->ready_path == NULL ? -1 : 0;
@@ -308,6 +314,7 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 		{"output", required_argument, NULL, 'o'},
 		{"stdout", no_argument, NULL, 's'},
 		{"count", required_argument, NULL, 'c'},
+		{"keepalive-timeout", required_argument, NULL, 'k'},
 		{"ready-file", required_argument, NULL, 'r'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
@@ -315,7 +322,7 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 	};
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:r:vh", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:k:r:vh", options, NULL)) != -1) {
 		switch (opt) {
 		case 't':
 			cfg->transport_kind = ulama_transport_parse_kind(optarg);
@@ -355,6 +362,11 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 			break;
 		case 'c':
 			if (parse_uint(optarg, &cfg->frame_limit) != 0) {
+				return -1;
+			}
+			break;
+		case 'k':
+			if (parse_uint(optarg, &cfg->keepalive_timeout_s) != 0) {
 				return -1;
 			}
 			break;
@@ -410,7 +422,9 @@ int main(int argc, char **argv)
 	size_t last_crsf_len = 0;
 	bool has_last_frame = false;
 	struct timespec last_tx = {0, 0};
+	struct timespec last_rx = {0, 0};
 	unsigned int keepalive_count = 0;
+	bool keepalive_expired_logged = false;
 
 	init_defaults(&cfg);
 	optind = 1;
@@ -487,12 +501,16 @@ int main(int argc, char **argv)
 		if (has_last_frame && cfg.output_mode == OUTPUT_MODE_UART) {
 			struct timespec ts_now;
 			clock_gettime(CLOCK_MONOTONIC, &ts_now);
-			int64_t remaining_ns = KEEPALIVE_INTERVAL_NS - timespec_diff_ns(&ts_now, &last_tx);
-			if (remaining_ns <= 0) {
-				recv_timeout_ms = 0;
-			} else {
-				int ms = (int)(remaining_ns / 1000000LL);
-				recv_timeout_ms = (ms < 1) ? 1 : (ms < 250 ? ms : 250);
+			bool within_timeout = (cfg.keepalive_timeout_s == 0U) ||
+				(timespec_diff_ns(&ts_now, &last_rx) < (int64_t)cfg.keepalive_timeout_s * 1000000000LL);
+			if (within_timeout) {
+				int64_t remaining_ns = KEEPALIVE_INTERVAL_NS - timespec_diff_ns(&ts_now, &last_tx);
+				if (remaining_ns <= 0) {
+					recv_timeout_ms = 0;
+				} else {
+					int ms = (int)(remaining_ns / 1000000LL);
+					recv_timeout_ms = (ms < 1) ? 1 : (ms < 250 ? ms : 250);
+				}
 			}
 		}
 
@@ -558,12 +576,15 @@ int main(int argc, char **argv)
 				}
 				fflush(out_file);
 			}
-			/* Save frame for keepalive retransmit. last_tx is set here so the
-			 * keepalive check below does not double-send on the same iteration. */
+			/* Save frame for keepalive retransmit. last_tx/last_rx are set here
+			 * so the keepalive check below does not double-send on the same
+			 * iteration, and the timeout window is reset. */
 			memcpy(last_crsf_frame, view.payload, crsf_len);
 			last_crsf_len = crsf_len;
 			clock_gettime(CLOCK_MONOTONIC, &last_tx);
+			last_rx = last_tx;
 			has_last_frame = true;
+			keepalive_expired_logged = false;
 
 			accepted++;
 			if (cfg.verbose) {
@@ -576,11 +597,21 @@ int main(int argc, char **argv)
 
 keepalive:
 		/* Retransmit the last CRSF frame at 150 Hz so the flight controller
-		 * does not trigger failsafe when incoming ULAMA frames are absent. */
+		 * does not trigger failsafe when incoming ULAMA frames are absent.
+		 * Stops retransmitting after keepalive_timeout_s of no new WiFi frames
+		 * (0 = transmit forever). */
 		if (has_last_frame && cfg.output_mode == OUTPUT_MODE_UART) {
 			struct timespec ts_now;
 			clock_gettime(CLOCK_MONOTONIC, &ts_now);
-			if (timespec_diff_ns(&ts_now, &last_tx) >= KEEPALIVE_INTERVAL_NS) {
+			bool within_timeout = (cfg.keepalive_timeout_s == 0U) ||
+				(timespec_diff_ns(&ts_now, &last_rx) < (int64_t)cfg.keepalive_timeout_s * 1000000000LL);
+			if (!within_timeout) {
+				if (!keepalive_expired_logged) {
+					fprintf(stderr, "[keepalive] timeout: no WiFi frame for %u s, stopping CRSF output\n",
+						cfg.keepalive_timeout_s);
+					keepalive_expired_logged = true;
+				}
+			} else if (timespec_diff_ns(&ts_now, &last_tx) >= KEEPALIVE_INTERVAL_NS) {
 				if (ulama_serial_write_all(&uart, last_crsf_frame, last_crsf_len) < 0) {
 					fprintf(stderr, "uart write failed (keepalive): %s\n", strerror(errno));
 					goto cleanup;
