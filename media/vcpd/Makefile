@@ -42,6 +42,9 @@ CFLAGS += $(RK_MEDIA_CROSS_CFLAGS) -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -
 HOST_INC_FLAGS := -I$(CURRENT_DIR)/include -I$(ULAMA_ROOT)/include -I$(ULAMA_ROOT)/src -I$(UNOW_ROOT)/include -I$(UNOW_ROOT)/src
 HOST_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=0 -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS)
 APP_LDFLAGS += -lpcap -lpthread -lrt
+ifneq ($(wildcard $(UNOW_PCAP_SYSROOT)/usr/lib/libpcap.so),)
+APP_LDFLAGS += -L$(UNOW_PCAP_SYSROOT)/usr/lib -Wl,-rpath-link,$(UNOW_PCAP_SYSROOT)/usr/lib
+endif
 HOST_LDFLAGS += -lpthread
 
 .PHONY: all clean distclean host test
