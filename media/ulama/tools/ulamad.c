@@ -560,6 +560,12 @@ int main(int argc, char **argv)
 				}
 			}
 			has_tx = true;
+		} else if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
+			if (ulama_transport_tx_init_unow(&tx_transport, cfg.node_id, cfg.iface, NULL) != 0) {
+				fprintf(stderr, "failed to init unow tx for telemetry: %s\n", strerror(errno));
+				goto cleanup;
+			}
+			has_tx = true;
 		}
 	}
 
