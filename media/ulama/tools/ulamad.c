@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -533,6 +534,12 @@ int main(int argc, char **argv)
 		if (ulama_serial_open(&msp_uart, cfg.msp_uart_path, cfg.msp_uart_baud) != 0) {
 			fprintf(stderr, "failed to open msp uart %s: %s\n", cfg.msp_uart_path, strerror(errno));
 			goto cleanup;
+		}
+		/* MSP reads must be non-blocking to avoid stalling the main loop */
+		{
+			int flags = fcntl(msp_uart.fd, F_GETFL, 0);
+			if (flags >= 0)
+				fcntl(msp_uart.fd, F_SETFL, flags | O_NONBLOCK);
 		}
 		msp_parser_init(&msp_parser);
 		has_msp = true;
