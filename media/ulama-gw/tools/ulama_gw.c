@@ -391,14 +391,13 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
 	}
 
-	struct pollfd pfds[2];
+	struct pollfd pfds[1];
 	pfds[0].fd = ctx.cascade_rx_fd;
 	pfds[0].events = POLLIN;
-	pfds[1].fd = ctx.ulama_rx.fd;
-	pfds[1].events = POLLIN;
+	bool ulama_rx_is_pollable = (ctx.ulama_rx.fd >= 0);
 
 	while (g_running) {
-		int ret = poll(pfds, 2, 50);
+		int ret = poll(pfds, 1, ulama_rx_is_pollable ? 50 : 5);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -410,8 +409,8 @@ int main(int argc, char *argv[])
 		if (pfds[0].revents & POLLIN)
 			handle_cascade_rx(&ctx);
 
-		if (pfds[1].revents & POLLIN)
-			handle_ulama_rx(&ctx);
+		/* For UNOW: fd=-1, poll can't watch it; call recv with timeout=0 */
+		handle_ulama_rx(&ctx);
 
 		frag_reassembly_expire(&ctx.reassembly, ts);
 
