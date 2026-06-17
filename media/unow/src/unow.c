@@ -35,8 +35,9 @@ esp_err_t unow_configure_iface(const char *iface)
 	}
 	pthread_mutex_lock(&g_unow.lock);
 	if (g_unow.initialized) {
+		bool same = (strcmp(g_unow.iface.name, iface) == 0);
 		pthread_mutex_unlock(&g_unow.lock);
-		return ESP_ERR_INVALID_STATE;
+		return same ? ESP_OK : ESP_ERR_INVALID_STATE;
 	}
 	memcpy(g_unow.iface.name, iface, len + 1U);
 	pthread_mutex_unlock(&g_unow.lock);
@@ -68,6 +69,12 @@ esp_err_t unow_init_iface(uint8_t node_id, const char *iface)
 			return err;
 		}
 	}
+	pthread_mutex_lock(&g_unow.lock);
+	if (g_unow.initialized && g_unow.pcap != NULL) {
+		pthread_mutex_unlock(&g_unow.lock);
+		return ESP_OK;
+	}
+	pthread_mutex_unlock(&g_unow.lock);
 	active_iface = unow_get_iface();
 	if (unow_iface_query(active_iface, &iface_info, error_buf, sizeof(error_buf)) != 0) {
 		UNOW_LOGE("interface probe failed for %s: %s", active_iface, error_buf);
