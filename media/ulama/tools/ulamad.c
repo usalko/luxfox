@@ -459,6 +459,7 @@ int main(int argc, char **argv)
 	ulama_serial_port_t uart = {.fd = -1, .baud = 0};
 	ulama_serial_port_t msp_uart = {.fd = -1, .baud = 0};
 	msp_parser_t msp_parser;
+	crsf_telem_parser_t crsf_telem_parser;
 	FILE *out_file = NULL;
 	uint8_t raw_frame[256];
 	unsigned int accepted = 0;
@@ -542,6 +543,7 @@ int main(int argc, char **argv)
 				fcntl(msp_uart.fd, F_SETFL, flags | O_NONBLOCK);
 		}
 		msp_parser_init(&msp_parser);
+		crsf_telem_parser_init(&crsf_telem_parser);
 		has_msp = true;
 		fprintf(stderr, "ulamad msp: uart=%s baud=%u\n", cfg.msp_uart_path, (unsigned)cfg.msp_uart_baud);
 
@@ -696,6 +698,7 @@ int main(int argc, char **argv)
 
 			uint8_t msp_byte;
 			while (read(msp_uart.fd, &msp_byte, 1) == 1) {
+				/* Try MSP parser */
 				msp_message_t msp_msg;
 				if (msp_parser_feed(&msp_parser, msp_byte, &msp_msg)) {
 					if (has_tx && msp_msg.direction == MSP_DIR_RESPONSE) {
@@ -724,6 +727,33 @@ int main(int argc, char **argv)
 					if (cfg.verbose) {
 						fprintf(stderr, "[msp] v%d code=%u len=%u\n",
 							msp_msg.version, msp_msg.code, msp_msg.payload_len);
+					}
+				}
+				/* Try CRSF telemetry parser (battery, GPS, attitude, etc.) */
+				uint8_t crsf_frame[ULAMA_CRSF_MAX_FRAME_SIZE];
+				uint8_t crsf_len = 0;
+				if (crsf_telem_parser_feed(&crsf_telem_parser, msp_byte, crsf_frame, &crsf_len)) {
+					if (has_tx && crsf_len <= ULAMA_FRAME_MAX_PAYLOAD) {
+						ulama_frame_view_t tf = {
+							.src_node = cfg.node_id,
+							.dst_node = 0xFF,
+							.flags = ULAMA_FLAG_DUP_ALLOWED,
+							.traffic_class = ULAMA_CLASS_TELEMETRY,
+							.seq = telem_seq++,
+							.frag_idx = 0,
+							.frag_total = 1,
+							.ttl = ULAMA_FRAME_DEFAULT_TTL,
+							.payload = crsf_frame,
+							.payload_len = crsf_len,
+						};
+						uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+						size_t telem_len = 0;
+						if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len))
+							ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+					}
+					if (cfg.verbose) {
+						fprintf(stderr, "[crsf-telem] type=0x%02x len=%u\n",
+							crsf_frame[2], crsf_len);
 					}
 				}
 			}

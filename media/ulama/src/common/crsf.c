@@ -159,3 +159,75 @@ bool ulama_crsf_parse_rc_channels_frame(const uint8_t *frame,
 	unpack_11bit_channels(&frame[3], channels);
 	return true;
 }
+
+/* ---- CRSF telemetry stream parser ---- */
+
+static bool crsf_is_telem_address(uint8_t b)
+{
+	return b == ULAMA_CRSF_ADDRESS_RADIO_TRANSMITTER ||
+	       b == ULAMA_CRSF_ADDRESS_RECEIVER ||
+	       b == ULAMA_CRSF_ADDRESS_FLIGHT_CONTROLLER;
+}
+
+void crsf_telem_parser_init(crsf_telem_parser_t *p)
+{
+	if (p == NULL) return;
+	p->state = CRSF_TP_IDLE;
+	p->pos = 0;
+	p->frame_len = 0;
+}
+
+bool crsf_telem_parser_feed(crsf_telem_parser_t *p, uint8_t byte,
+			    uint8_t *out_buf, uint8_t *out_len)
+{
+	if (p == NULL) return false;
+
+	switch (p->state) {
+	case CRSF_TP_IDLE:
+		if (crsf_is_telem_address(byte)) {
+			p->buf[0] = byte;
+			p->pos = 1;
+			p->state = CRSF_TP_LEN;
+		}
+		return false;
+
+	case CRSF_TP_LEN:
+		if (byte < 2 || byte > ULAMA_CRSF_MAX_FRAME_SIZE - 2) {
+			p->state = CRSF_TP_IDLE;
+			return false;
+		}
+		p->buf[1] = byte;
+		p->frame_len = byte;
+		p->pos = 2;
+		p->state = CRSF_TP_DATA;
+		return false;
+
+	case CRSF_TP_DATA: {
+		p->buf[p->pos++] = byte;
+		uint8_t total = 2 + p->frame_len; /* addr + len + (type+payload+crc) */
+		if (p->pos < total)
+			return false;
+
+		/* Frame complete — verify CRC (over type+payload, excluding addr/len/crc) */
+		uint8_t crc = ulama_crsf_crc8_dvb_s2(&p->buf[2], p->frame_len - 1);
+		p->state = CRSF_TP_IDLE;
+
+		if (crc != p->buf[total - 1])
+			return false;
+
+		/* Skip RC frames — those are handled separately */
+		if (p->buf[2] == ULAMA_CRSF_FRAME_TYPE_RC_CHANNELS_PACKED)
+			return false;
+
+		if (out_buf != NULL)
+			__builtin_memcpy(out_buf, p->buf, total);
+		if (out_len != NULL)
+			*out_len = total;
+		return true;
+	}
+
+	default:
+		p->state = CRSF_TP_IDLE;
+		return false;
+	}
+}

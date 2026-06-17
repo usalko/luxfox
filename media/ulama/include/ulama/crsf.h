@@ -27,3 +27,29 @@ bool ulama_crsf_parse_rc_channels_frame(const uint8_t *frame,
 	size_t len,
 	uint8_t *out_address,
 	uint16_t channels[ULAMA_CRSF_NUM_CHANNELS]);
+
+/* CRSF telemetry addresses and frame types */
+#define ULAMA_CRSF_ADDRESS_RADIO_TRANSMITTER 0xEA
+#define ULAMA_CRSF_ADDRESS_RECEIVER          0xEC
+
+#define ULAMA_CRSF_TYPE_GPS             0x02
+#define ULAMA_CRSF_TYPE_VARIO           0x07
+#define ULAMA_CRSF_TYPE_BATTERY         0x08
+#define ULAMA_CRSF_TYPE_BARO_ALT        0x09
+#define ULAMA_CRSF_TYPE_LINK_STATS      0x14
+#define ULAMA_CRSF_TYPE_ATTITUDE        0x1E
+#define ULAMA_CRSF_TYPE_FLIGHT_MODE     0x21
+
+#define ULAMA_CRSF_MAX_FRAME_SIZE       64
+
+/* Stream parser for CRSF telemetry (byte-at-a-time from UART) */
+typedef struct {
+	uint8_t  buf[ULAMA_CRSF_MAX_FRAME_SIZE];
+	uint8_t  pos;
+	uint8_t  frame_len; /* value of length field (bytes after it: type+payload+crc) */
+	enum { CRSF_TP_IDLE, CRSF_TP_LEN, CRSF_TP_DATA } state;
+} crsf_telem_parser_t;
+
+void crsf_telem_parser_init(crsf_telem_parser_t *p);
+bool crsf_telem_parser_feed(crsf_telem_parser_t *p, uint8_t byte,
+			    uint8_t *out_buf, uint8_t *out_len);
