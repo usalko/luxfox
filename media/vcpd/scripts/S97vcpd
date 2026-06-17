@@ -1,0 +1,92 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: vcpd
+# Required-Start: $network
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: ULAMA video capture daemon
+### END INIT INFO
+
+set -eu
+
+BIN="${VCPD_BIN:-/usr/bin/vcpd}"
+PIDFILE="${VCPD_PIDFILE:-/var/run/vcpd.pid}"
+LOG_DIR="${VCPD_LOG_DIR:-/var/log/vcpd}"
+STDOUT_LOG="$LOG_DIR/vcpd.stdout"
+STDERR_LOG="$LOG_DIR/vcpd.stderr"
+
+log() {
+    echo "[S97vcpd] $*"
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    if [ ! -x "$BIN" ]; then
+        log "ERROR: binary not found or not executable: $BIN"
+        return 1
+    fi
+
+    mkdir -p "$LOG_DIR"
+
+    if is_running; then
+        log "already running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "starting daemon bin=$BIN"
+
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --verbose
+    else
+        "$BIN" --verbose >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        echo $! > "$PIDFILE"
+    fi
+}
+
+stop() {
+    if is_running; then
+        pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        log "stopping pid=$pid"
+        kill "$pid" 2>/dev/null || true
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    log "not running"
+    rm -f "$PIDFILE"
+    return 0
+}
+
+status() {
+    if is_running; then
+        log "running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "stopped"
+    return 3
+}
+
+case "${1:-start}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop || true
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac

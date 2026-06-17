@@ -8,15 +8,23 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #define KEEPALIVE_HZ          150U
 #define KEEPALIVE_INTERVAL_NS (1000000000LL / (int64_t)KEEPALIVE_HZ)
 
 #include "ulama/crsf.h"
+#include "ulama/msp.h"
 #include "ulama/serial_uart.h"
 #include "ulama/transport.h"
 #include "ulama/ulama_frame.h"
 #include "ulama/ulama_version.h"
+
+#define MSP_POLL_INTERVAL_MS 200
+#define MSP_POLL_CODES_COUNT 6
+static const uint16_t MSP_POLL_CODES[MSP_POLL_CODES_COUNT] = {
+	MSP_ATTITUDE, MSP_ALTITUDE, MSP_ANALOG, MSP_RAW_GPS, MSP_STATUS, MSP_BATTERY_STATE,
+};
 
 static volatile sig_atomic_t g_stop;
 
@@ -40,6 +48,9 @@ typedef struct {
 	unsigned int frame_limit;
 	unsigned int keepalive_timeout_s;
 	bool verbose;
+	const char *msp_uart_path;
+	uint32_t msp_uart_baud;
+	const char *tx_peer;
 } app_config_t;
 
 static void init_defaults(app_config_t *cfg)
@@ -54,6 +65,9 @@ static void init_defaults(app_config_t *cfg)
 	cfg->uart_baud = 420000U;
 	cfg->output_mode = OUTPUT_MODE_UART;
 	cfg->keepalive_timeout_s = 2U;
+	cfg->msp_uart_path = NULL;
+	cfg->msp_uart_baud = 115200U;
+	cfg->tx_peer = NULL;
 }
 
 static void usage(FILE *stream)
@@ -72,7 +86,10 @@ static void usage(FILE *stream)
 		"  --count N                  exit after N accepted frames (default: 0 = forever)\n"
 		"  --keepalive-timeout SECS   stop keepalive if no WiFi frame for N seconds (default: 2, 0=forever)\n"
 		"  --ready-file PATH          create marker file after transport/output init\n"
-		"  --verbose                  print decoded channel summary\n");
+		"  --verbose                  print decoded channel summary\n"
+		"  --msp-uart PATH            UART to read MSP telemetry from FC\n"
+		"  --msp-baud RATE            MSP UART baud rate (default: 115200)\n"
+		"  --tx-peer IP:PORT          send ULAMA TELEMETRY frames to (UDP)\n");
 }
 
 static int trim_in_place(char *text)
@@ -235,6 +252,17 @@ static int apply_config_key(app_config_t *cfg, const char *key, const char *valu
 	if (strcmp(key, "verbose") == 0) {
 		return parse_bool_text(value, &cfg->verbose);
 	}
+	if (strcmp(key, "msp_uart") == 0 || strcmp(key, "msp-uart") == 0) {
+		cfg->msp_uart_path = strdup(value);
+		return cfg->msp_uart_path == NULL ? -1 : 0;
+	}
+	if (strcmp(key, "msp_baud") == 0 || strcmp(key, "msp-baud") == 0) {
+		return parse_u32(value, &cfg->msp_uart_baud);
+	}
+	if (strcmp(key, "tx_peer") == 0 || strcmp(key, "tx-peer") == 0) {
+		cfg->tx_peer = strdup(value);
+		return cfg->tx_peer == NULL ? -1 : 0;
+	}
 	return 0;
 }
 
@@ -318,11 +346,14 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 		{"ready-file", required_argument, NULL, 'r'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"help", no_argument, NULL, 'h'},
+		{"msp-uart", required_argument, NULL, 'M'},
+		{"msp-baud", required_argument, NULL, 'B'},
+		{"tx-peer", required_argument, NULL, 'T'},
 		{0, 0, 0, 0},
 	};
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:k:r:vh", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:k:r:vhM:B:T:", options, NULL)) != -1) {
 		switch (opt) {
 		case 't':
 			cfg->transport_kind = ulama_transport_parse_kind(optarg);
@@ -376,6 +407,17 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 		case 'v':
 			cfg->verbose = true;
 			break;
+		case 'M':
+			cfg->msp_uart_path = optarg;
+			break;
+		case 'B':
+			if (parse_u32(optarg, &cfg->msp_uart_baud) != 0) {
+				return -1;
+			}
+			break;
+		case 'T':
+			cfg->tx_peer = optarg;
+			break;
 		case 'h':
 			usage(stdout);
 			exit(0);
@@ -412,11 +454,18 @@ int main(int argc, char **argv)
 
 	app_config_t cfg;
 	ulama_rx_transport_t transport;
+	ulama_tx_transport_t tx_transport;
 	ulama_serial_port_t uart = {.fd = -1, .baud = 0};
+	ulama_serial_port_t msp_uart = {.fd = -1, .baud = 0};
+	msp_parser_t msp_parser;
 	FILE *out_file = NULL;
 	uint8_t raw_frame[256];
 	unsigned int accepted = 0;
 	int exit_code = 1;
+	bool has_tx = false;
+	bool has_msp = false;
+	uint16_t msp_poll_idx = 0;
+	uint16_t telem_seq = 0;
 
 	uint8_t last_crsf_frame[ULAMA_CRSF_RC_FRAME_SIZE];
 	size_t last_crsf_len = 0;
@@ -477,6 +526,34 @@ int main(int argc, char **argv)
 		}
 	}
 
+	memset(&tx_transport, 0, sizeof(tx_transport));
+	tx_transport.fd = -1;
+
+	if (cfg.msp_uart_path != NULL) {
+		if (ulama_serial_open(&msp_uart, cfg.msp_uart_path, cfg.msp_uart_baud) != 0) {
+			fprintf(stderr, "failed to open msp uart %s: %s\n", cfg.msp_uart_path, strerror(errno));
+			goto cleanup;
+		}
+		msp_parser_init(&msp_parser);
+		has_msp = true;
+		fprintf(stderr, "ulamad msp: uart=%s baud=%u\n", cfg.msp_uart_path, (unsigned)cfg.msp_uart_baud);
+
+		if (cfg.tx_peer != NULL) {
+			if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
+				if (ulama_transport_tx_init_udp(&tx_transport, cfg.tx_peer) != 0) {
+					fprintf(stderr, "failed to init tx peer %s: %s\n", cfg.tx_peer, strerror(errno));
+					goto cleanup;
+				}
+			} else {
+				if (ulama_transport_tx_init_unow(&tx_transport, cfg.node_id, cfg.iface, NULL) != 0) {
+					fprintf(stderr, "failed to init unow tx: %s\n", strerror(errno));
+					goto cleanup;
+				}
+			}
+			has_tx = true;
+		}
+	}
+
 	if (create_ready_file(cfg.ready_path) != 0) {
 		fprintf(stderr, "failed to create ready file %s: %s\n", cfg.ready_path, strerror(errno));
 		goto cleanup;
@@ -489,6 +566,7 @@ int main(int argc, char **argv)
 		cfg.output_mode == OUTPUT_MODE_UART ? cfg.uart_path : (cfg.output_mode == OUTPUT_MODE_FILE ? cfg.output_path : "stdout"));
 
 	time_t last_stats = time(NULL);
+	struct timespec last_msp_poll = {0, 0};
 
 	while (!g_stop) {
 		ulama_frame_view_t view;
@@ -595,6 +673,55 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* MSP telemetry polling: send request to FC, read & forward responses */
+		if (has_msp) {
+			struct timespec ts_msp;
+			clock_gettime(CLOCK_MONOTONIC, &ts_msp);
+			int64_t msp_elapsed_ms = (timespec_diff_ns(&ts_msp, &last_msp_poll) / 1000000LL);
+			if (msp_elapsed_ms >= MSP_POLL_INTERVAL_MS || last_msp_poll.tv_sec == 0) {
+				uint8_t req_buf[16];
+				size_t req_len = msp_v1_build_request(MSP_POLL_CODES[msp_poll_idx], req_buf, sizeof(req_buf));
+				if (req_len > 0)
+					ulama_serial_write_all(&msp_uart, req_buf, req_len);
+				msp_poll_idx = (msp_poll_idx + 1) % MSP_POLL_CODES_COUNT;
+				last_msp_poll = ts_msp;
+			}
+
+			uint8_t msp_byte;
+			while (read(msp_uart.fd, &msp_byte, 1) == 1) {
+				msp_message_t msp_msg;
+				if (msp_parser_feed(&msp_parser, msp_byte, &msp_msg)) {
+					if (has_tx && msp_msg.direction == MSP_DIR_RESPONSE) {
+						uint8_t msp_wire[MSP_V2_OVERHEAD + MSP_MAX_PAYLOAD];
+						size_t wire_len = msp_v1_build_response(msp_msg.code, msp_msg.payload,
+								msp_msg.payload_len, msp_wire, sizeof(msp_wire));
+						if (wire_len > 0 && wire_len <= ULAMA_FRAME_MAX_PAYLOAD) {
+							ulama_frame_view_t tf = {
+								.src_node = cfg.node_id,
+								.dst_node = 0xFF,
+								.flags = ULAMA_FLAG_DUP_ALLOWED,
+								.traffic_class = ULAMA_CLASS_TELEMETRY,
+								.seq = telem_seq++,
+								.frag_idx = 0,
+								.frag_total = 1,
+								.ttl = ULAMA_FRAME_DEFAULT_TTL,
+								.payload = msp_wire,
+								.payload_len = wire_len,
+							};
+							uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+							size_t telem_len = 0;
+							if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len))
+								ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+						}
+					}
+					if (cfg.verbose) {
+						fprintf(stderr, "[msp] v%d code=%u len=%u\n",
+							msp_msg.version, msp_msg.code, msp_msg.payload_len);
+					}
+				}
+			}
+		}
+
 keepalive:
 		/* Retransmit the last CRSF frame at 150 Hz so the flight controller
 		 * does not trigger failsafe when incoming ULAMA frames are absent.
@@ -629,6 +756,9 @@ cleanup:
 		fclose(out_file);
 	}
 	ulama_serial_close(&uart);
+	ulama_serial_close(&msp_uart);
 	ulama_transport_rx_close(&transport);
+	if (has_tx)
+		ulama_transport_tx_close(&tx_transport);
 	return exit_code;
 }
