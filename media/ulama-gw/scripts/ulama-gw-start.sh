@@ -80,31 +80,48 @@ if iw dev "$MON_IFACE" info 2>/dev/null | grep -q "type monitor"; then
 else
     echo "[ulama-gw] creating $MON_IFACE from $ADAPTER on channel $CHANNEL"
 
-    # Remove stale monitor interface
-    iw dev "$MON_IFACE" del 2>/dev/null || true
-
-    # Bring down managed interface
-    ip link set "$ADAPTER" down 2>/dev/null || true
-
-    # Create monitor interface
+    # Determine phy before any changes
     PHY=$(iw dev "$ADAPTER" info 2>/dev/null | grep wiphy | awk '{print "phy"$2}')
     if [ -z "$PHY" ]; then
         echo "ERROR: cannot determine phy for $ADAPTER" >&2
         exit 1
     fi
+
+    # Remove stale monitor interface
+    iw dev "$MON_IFACE" del 2>/dev/null || true
+
+    # Stop NetworkManager/wpa_supplicant from managing this adapter
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$ADAPTER" managed no 2>/dev/null || true
+    fi
+    killall -q wpa_supplicant 2>/dev/null || true
+
+    # Bring down managed interface and remove it to free the phy
+    ip link set "$ADAPTER" down 2>/dev/null || true
+    iw dev "$ADAPTER" del 2>/dev/null || true
+    sleep 0.2
+
+    # Create monitor interface on the freed phy
     iw "$PHY" interface add "$MON_IFACE" type monitor
     iw dev "$MON_IFACE" set channel "$CHANNEL"
     ip link set "$MON_IFACE" up
 
-    echo "[ulama-gw] $MON_IFACE up on channel $CHANNEL (phy: $PHY)"
+    echo "[ulama-gw] $MON_IFACE up on channel $CHANNEL (phy: $PHY, was: $ADAPTER)"
 fi
 
 # Cleanup on exit
 cleanup() {
     echo ""
-    echo "[ulama-gw] shutting down, removing $MON_IFACE"
+    echo "[ulama-gw] shutting down, restoring $ADAPTER"
     iw dev "$MON_IFACE" del 2>/dev/null || true
+    # Restore managed interface if it was removed
+    if ! iw dev "$ADAPTER" info >/dev/null 2>&1 && [ -n "${PHY:-}" ]; then
+        iw "$PHY" interface add "$ADAPTER" type managed 2>/dev/null || true
+    fi
     ip link set "$ADAPTER" up 2>/dev/null || true
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$ADAPTER" managed yes 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
