@@ -80,9 +80,19 @@ ROOTFS_ETC_DIR="$MEDIA_ROOT_STAGING/etc"
 echo "Staging dnsmasq.conf -> $ROOTFS_ETC_DIR/"
 install_file "$SCRIPT_DIR/dnsmasq.conf" "$ROOTFS_ETC_DIR/dnsmasq.conf"
 
-# Create .ssh directory for later population by user/deployment
+# Create .ssh directory and embed developer's SSH public key
 mkdir -p "$OEM_SSH_DIR"
 chmod 700 "$OEM_SSH_DIR"
+
+DEVELOPER_PUBKEY="$HOME/.ssh/id_rsa.pub"
+AUTHORIZED_KEYS="$OEM_SSH_DIR/authorized_keys"
+if [ -f "$DEVELOPER_PUBKEY" ]; then
+	echo "Embedding SSH public key from $DEVELOPER_PUBKEY"
+	cp "$DEVELOPER_PUBKEY" "$AUTHORIZED_KEYS"
+	chmod 600 "$AUTHORIZED_KEYS"
+else
+	echo "WARNING: $DEVELOPER_PUBKEY not found — SSH key auth will require manual setup"
+fi
 
 # Cleanup legacy UART-based files
 for legacy_path in "${LEGACY_UART_PATHS[@]}"; do
