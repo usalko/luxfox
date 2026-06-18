@@ -130,30 +130,48 @@ do_build() {
     log_info "=========================================="
     log_info "Building ULAMA"
     log_info "=========================================="
-    
+
     cd "$ULAMA_ROOT"
-    
+
     # Generate version before building
     generate_version
-    
-    log_info "Step 1/4: make host"
+
+    log_info "Step 1/5: make host"
     make host || {
         log_error "make host failed"
         return 1
     }
-    
-    log_info "Step 2/4: make host-unow"
+
+    log_info "Step 2/5: make host-unow"
     make host-unow || {
         log_error "make host-unow failed"
         return 1
     }
-    
-    log_info "Step 3/4: make (ARM build)"
+
+    log_info "Step 3/5: make (ARM build)"
     make || {
         log_error "make failed"
         return 1
     }
-    
+
+    log_info "Step 4/5: ulama-gw host-unow"
+    local GW_ROOT="$ULAMA_ROOT/../ulama-gw"
+    if [ -f "$GW_ROOT/Makefile" ]; then
+        make -C "$GW_ROOT" host-unow || {
+            log_error "ulama-gw host-unow build failed"
+            return 1
+        }
+    else
+        log_warn "ulama-gw not found at $GW_ROOT, skipping"
+    fi
+
+    log_info "Step 5/5: ulama-gw (ARM build)"
+    if [ -f "$GW_ROOT/Makefile" ]; then
+        make -C "$GW_ROOT" || {
+            log_warn "ulama-gw ARM build failed (non-fatal)"
+        }
+    fi
+
     return 0
 }
 
