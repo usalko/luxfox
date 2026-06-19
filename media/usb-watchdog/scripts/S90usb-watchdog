@@ -1,0 +1,103 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides: usb-watchdog
+# Required-Start: $local_fs
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: USB hub stability watchdog for MW300UH + camera
+### END INIT INFO
+
+set -eu
+
+BIN="${USB_WATCHDOG_BIN:-/usr/bin/usb-watchdog.sh}"
+PIDFILE="${USB_WATCHDOG_PIDFILE:-/var/run/usb-watchdog.pid}"
+IFACE="${USB_WATCHDOG_IFACE:-wlan0}"
+
+log() {
+    echo "[S90usb-watchdog] $*"
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+do_usb_stable() {
+    # Disable USB autosuspend to prevent hub resets under load
+    echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true
+    for dev in /sys/bus/usb/devices/*/power/control; do
+        echo on > "$dev" 2>/dev/null || true
+    done
+    for f in /sys/bus/usb/devices/*/power/usb2_hardware_lpm; do
+        echo N > "$f" 2>/dev/null || true
+    done
+    log "USB autosuspend disabled"
+}
+
+start() {
+    # Always apply USB stability settings
+    do_usb_stable
+
+    if [ ! -x "$BIN" ]; then
+        log "ERROR: watchdog script not found: $BIN"
+        return 1
+    fi
+
+    if is_running; then
+        log "already running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "starting watchdog iface=$IFACE"
+
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- "$IFACE"
+    else
+        "$BIN" "$IFACE" &
+        echo $! > "$PIDFILE"
+    fi
+}
+
+stop() {
+    if is_running; then
+        pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        log "stopping pid=$pid"
+        kill "$pid" 2>/dev/null || true
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    log "not running"
+    rm -f "$PIDFILE"
+    return 0
+}
+
+status() {
+    if is_running; then
+        log "running (pid $(cat "$PIDFILE" 2>/dev/null))"
+        return 0
+    fi
+
+    log "stopped"
+    return 3
+}
+
+case "${1:-start}" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop || true
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac
