@@ -661,7 +661,19 @@ int main(int argc, char **argv)
 					rc = ulama_transport_rx_init_unow(&transport, cfg.node_id, cfg.iface);
 				}
 				if (rc == 0) {
-					fprintf(stderr, "[transport] reconnected successfully\n");
+					/* Verify interface is ready: try a short recv.
+					 * If it fails immediately, the adapter is not
+					 * stable yet (monitor mode not set, etc). */
+					uint8_t probe[256];
+					ssize_t probe_rc = ulama_transport_rx_recv(&transport, probe, sizeof(probe), 2000, NULL, NULL);
+					if (probe_rc < 0) {
+						fprintf(stderr, "[transport] reconnect unstable, retrying...\n");
+						ulama_transport_rx_close(&transport);
+						memset(&transport, 0, sizeof(transport));
+						transport.fd = -1;
+						continue;
+					}
+					fprintf(stderr, "[transport] reconnected and stable\n");
 					/* Also reinit TX if needed */
 					if (has_tx) {
 						ulama_transport_tx_close(&tx_transport);
