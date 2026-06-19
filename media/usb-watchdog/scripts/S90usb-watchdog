@@ -10,7 +10,7 @@
 
 set -eu
 
-BIN="${USB_WATCHDOG_BIN:-/usr/bin/usb-watchdog.sh}"
+BIN="${USB_WATCHDOG_BIN:-/oem/usr/bin/usb-watchdog.sh}"
 PIDFILE="${USB_WATCHDOG_PIDFILE:-/var/run/usb-watchdog.pid}"
 IFACE="${USB_WATCHDOG_IFACE:-wlan0}"
 
