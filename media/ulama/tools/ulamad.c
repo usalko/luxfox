@@ -622,8 +622,57 @@ int main(int argc, char **argv)
 		}
 
 		if (received < 0) {
-			fprintf(stderr, "receive failed: %s\n", strerror(errno));
-			goto cleanup;
+			/* WiFi adapter disappeared (USB hub reset). UART to FC is still
+			 * alive — continue keepalive so FC does not enter failsafe.
+			 * Try to re-initialize transport after adapter re-enumerates. */
+			fprintf(stderr, "[transport] lost: %s — entering recovery mode\n", strerror(errno));
+			ulama_transport_rx_close(&transport);
+			memset(&transport, 0, sizeof(transport));
+			transport.fd = -1;
+
+			/* Recovery loop: keepalive to FC + retry transport init */
+			while (!g_stop) {
+				/* Keepalive to FC while WiFi is down */
+				if (has_last_frame && cfg.output_mode == OUTPUT_MODE_UART) {
+					struct timespec ts_ka;
+					clock_gettime(CLOCK_MONOTONIC, &ts_ka);
+					bool within_timeout = (cfg.keepalive_timeout_s == 0U) ||
+						(timespec_diff_ns(&ts_ka, &last_rx) < (int64_t)cfg.keepalive_timeout_s * 1000000000LL);
+					if (within_timeout && timespec_diff_ns(&ts_ka, &last_tx) >= KEEPALIVE_INTERVAL_NS) {
+						ulama_serial_write_all(&uart, last_crsf_frame, last_crsf_len);
+						last_tx = ts_ka;
+						keepalive_count++;
+					}
+				}
+
+				/* Try to re-init transport every ~3 seconds */
+				usleep(20000); /* 20ms — maintain keepalive cadence */
+				static unsigned int retry_counter = 0;
+				retry_counter++;
+				if (retry_counter % 150 != 0) { /* ~3 seconds at 20ms */
+					continue;
+				}
+
+				fprintf(stderr, "[transport] attempting reconnect (iface=%s)...\n", cfg.iface);
+				int rc;
+				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
+					rc = ulama_transport_rx_init_udp(&transport, cfg.listen_addr);
+				} else {
+					rc = ulama_transport_rx_init_unow(&transport, cfg.node_id, cfg.iface);
+				}
+				if (rc == 0) {
+					fprintf(stderr, "[transport] reconnected successfully\n");
+					/* Also reinit TX if needed */
+					if (has_tx) {
+						ulama_transport_tx_close(&tx_transport);
+						if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
+							ulama_transport_tx_init_unow(&tx_transport, cfg.node_id, cfg.iface, NULL);
+						}
+					}
+					break; /* Resume main loop */
+				}
+			}
+			continue; /* Back to main recv loop */
 		}
 		if (received == 0) {
 			goto keepalive;
