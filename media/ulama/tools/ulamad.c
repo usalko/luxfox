@@ -654,6 +654,21 @@ int main(int argc, char **argv)
 				}
 
 				fprintf(stderr, "[transport] attempting reconnect (iface=%s)...\n", cfg.iface);
+
+				/* Restore monitor mode before re-opening pcap.
+				 * After USB re-enumeration the interface comes up
+				 * in managed mode — pcap opens but recv fails. */
+				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
+					char cmd[256];
+					snprintf(cmd, sizeof(cmd),
+						"ip link set %s down 2>/dev/null; "
+						"ip link set %s up 2>/dev/null; "
+						"iw dev %s set channel 6 2>/dev/null",
+						cfg.iface, cfg.iface, cfg.iface);
+					(void)system(cmd);
+					usleep(500000); /* 500ms settle */
+				}
+
 				int rc;
 				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
 					rc = ulama_transport_rx_init_udp(&transport, cfg.listen_addr);
