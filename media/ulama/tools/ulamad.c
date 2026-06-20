@@ -656,17 +656,29 @@ int main(int argc, char **argv)
 				fprintf(stderr, "[transport] attempting reconnect (iface=%s)...\n", cfg.iface);
 
 				/* Restore monitor mode before re-opening pcap.
-				 * After USB re-enumeration the interface comes up
-				 * in managed mode — pcap opens but recv fails. */
+				 * After USB re-enumeration the interface appears
+				 * as a NEW phy in managed mode. Full sequence:
+				 *   1. Wait for interface to exist
+				 *   2. ip link set down
+				 *   3. iw set type monitor (critical — driver defaults to managed)
+				 *   4. ip link set up
+				 *   5. iw set channel
+				 * Timing: USB re-enum takes ~4s (hub + device + driver). */
 				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
-					char cmd[256];
+					char cmd[512];
 					snprintf(cmd, sizeof(cmd),
+						"for i in 1 2 3 4 5 6 7 8 9 10; do "
+						"  ip link show %s >/dev/null 2>&1 && break; "
+						"  sleep 1; "
+						"done; "
 						"ip link set %s down 2>/dev/null; "
+						"iw dev %s set type monitor 2>/dev/null; "
 						"ip link set %s up 2>/dev/null; "
 						"iw dev %s set channel 6 2>/dev/null",
-						cfg.iface, cfg.iface, cfg.iface);
+						cfg.iface,
+						cfg.iface, cfg.iface, cfg.iface, cfg.iface);
 					(void)system(cmd);
-					usleep(500000); /* 500ms settle */
+					usleep(1000000); /* 1s settle after mode change */
 				}
 
 				int rc;
