@@ -343,6 +343,11 @@ void ulama_transport_rx_close(ulama_rx_transport_t *transport)
 	if (transport->kind == ULAMA_TRANSPORT_KIND_UDP && transport->fd >= 0) {
 		close(transport->fd);
 	}
+	#if ULAMA_WITH_UNOW
+	if (transport->kind == ULAMA_TRANSPORT_KIND_UNOW) {
+		unow_deinit();
+	}
+	#endif
 	memset(transport, 0, sizeof(*transport));
 	transport->fd = -1;
 }

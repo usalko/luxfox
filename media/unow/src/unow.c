@@ -114,6 +114,16 @@ esp_err_t unow_init_iface(uint8_t node_id, const char *iface)
 	return ESP_OK;
 }
 
+void unow_deinit(void)
+{
+	pthread_mutex_lock(&g_unow.lock);
+	if (g_unow.pcap != NULL) {
+		unow_iface_close_pcap(&g_unow.pcap);
+	}
+	g_unow.initialized = false;
+	pthread_mutex_unlock(&g_unow.lock);
+}
+
 esp_err_t radio_espnow_init(uint8_t node_id)
 {
 	return unow_init_iface(node_id, NULL);

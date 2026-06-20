@@ -49,6 +49,7 @@ typedef struct {
 esp_err_t unow_configure_iface(const char *iface);
 const char *unow_get_iface(void);
 esp_err_t unow_init_iface(uint8_t node_id, const char *iface);
+void unow_deinit(void);
 
 esp_err_t radio_espnow_init(uint8_t node_id);
 esp_err_t radio_espnow_send(const uint8_t *dst_mac, const uint8_t *payload, size_t len);
