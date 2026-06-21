@@ -59,6 +59,7 @@ static void usage(const char *prog)
 		"  --node        ID         Drone node ID            (default 2)\n"
 		"  --dst-node    ID         Gateway node ID          (default 1)\n"
 		"  --stream-id   ID         LTS stream ID            (default 0)\n"
+		"  --autostart              Start streaming immediately (no UVCP READY needed)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -75,6 +76,7 @@ typedef struct {
 	uint8_t stream_id;
 	uint16_t ulama_seq;
 	bool verbose;
+	bool autostart;
 	char transport_str[16];
 	char peer_addr[64];
 	char listen_addr[64];
@@ -182,6 +184,7 @@ int main(int argc, char *argv[])
 		{"dst-node",  required_argument, NULL, 'd'},
 		{"stream-id", required_argument, NULL, 'S'},
 		{"dst-mac",   required_argument, NULL, 'm'},
+		{"autostart", no_argument,       NULL, 'A'},
 		{"verbose",   no_argument,       NULL, 'v'},
 		{"help",      no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -208,6 +211,7 @@ int main(int argc, char *argv[])
 		case 'd': ctx.dst_node = (uint8_t)atoi(optarg); break;
 		case 'S': ctx.stream_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
+		case 'A': ctx.autostart = true; break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -247,6 +251,14 @@ int main(int argc, char *argv[])
 
 	fprintf(stderr, "vcpd: started (node=%u, dst=%u, stream=%u, transport=%s)\n",
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk));
+
+	if (ctx.autostart) {
+		fprintf(stderr, "vcpd: autostart — starting video immediately\n");
+		ctx.uvcp_sess.state = UVCP_STATE_STREAMING;
+		ctx.uvcp_sess.last_ready_ms = now_ms();
+		ctx.uvcp_sess.lease_ms = UINT64_MAX / 2;
+		vsrc_start(&ctx.video);
+	}
 
 	uint8_t ts_buf[VIDEO_TS_GROUP_BYTES];
 
