@@ -66,6 +66,7 @@ typedef struct {
 	ulama_rx_transport_t ulama_rx;
 	frag_reassembly_ctx_t reassembly;
 	lts_decoder_t lts_dec;
+	uint16_t lts_video_src; /* source drone ID for periodic LTS emit */
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -275,6 +276,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 		lts_packet_t pkt;
 		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
+			ctx->lts_video_src = src_u16;
 			lts_decoder_insert(&ctx->lts_dec, &pkt, now_ms());
 			emit_lts_to_cascade(ctx, src_u16);
 		}
@@ -419,7 +421,7 @@ int main(int argc, char *argv[])
 		for (size_t i = 0; i < lts_n; i++) {
 			cascade_frame_view_t cf = {
 				.version = CASCADE_FRAME_VERSION,
-				.src = 0,
+				.src = ctx.lts_video_src,
 				.dst = 0,
 				.traffic_class = CASCADE_CLASS_VIDEO,
 				.payload = lts_out[i].payload,
