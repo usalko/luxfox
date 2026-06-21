@@ -40,3 +40,4 @@ __pycache__
 *.a
 *.so
 ulamad
+.claude
