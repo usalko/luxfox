@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -84,6 +85,9 @@ typedef struct {
 	char dst_mac_str[32];
 } vcpd_ctx_t;
 
+static unsigned int tx_fail_count = 0;
+#define TX_FAIL_THRESHOLD 10
+
 static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 {
 	ulama_frame_view_t uf = {
@@ -101,8 +105,14 @@ static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
-	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
-		ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+		int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		if (rc < 0) {
+			tx_fail_count++;
+		} else {
+			tx_fail_count = 0;
+		}
+	}
 }
 
 static void handle_uvcp_rx(vcpd_ctx_t *ctx)
@@ -294,14 +304,61 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
-		if (nfds > 1 && (pfds[1].revents & POLLIN) && ctx.video.running) {
+		if (nfds > 1 && (pfds[1].revents & (POLLIN | POLLERR | POLLHUP)) && ctx.video.running) {
 			ssize_t n = vsrc_read(&ctx.video, ts_buf, sizeof(ts_buf));
 			if (n <= 0) {
-				if (n == 0) {
-					fprintf(stderr, "vcpd: ffmpeg EOF, restarting\n");
+				if (n == 0 || errno == ENODEV || errno == EIO) {
+					fprintf(stderr, "vcpd: video source lost (%s), entering recovery\n",
+						n == 0 ? "EOF" : strerror(errno));
 					vsrc_stop(&ctx.video);
-					if (uvcp_session_is_active(&ctx.uvcp_sess, ts))
+
+					/* Recovery: wait for USB re-enumeration, restore monitor mode, restart */
+					for (int retry = 0; retry < 30 && g_running; retry++) {
+						usleep(1000000); /* 1s */
+						/* Check if video device reappeared */
+						int probe_fd = open(ctx.video.device, O_RDONLY);
+						if (probe_fd >= 0) {
+							close(probe_fd);
+							fprintf(stderr, "vcpd: video device %s reappeared\n", ctx.video.device);
+							break;
+						}
+					}
+
+					/* Restore UNOW: wait for interface, set monitor mode, retry TX init */
+					if (strcmp(ctx.transport_str, "unow") == 0) {
+						char cmd[512];
+						snprintf(cmd, sizeof(cmd),
+							"for i in $(seq 1 15); do "
+							"  ip link show %s >/dev/null 2>&1 && break; "
+							"  sleep 1; "
+							"done; "
+							"sleep 2; "
+							"ip link set %s down 2>/dev/null; "
+							"iw dev %s set type monitor 2>/dev/null; "
+							"ip link set %s up 2>/dev/null; "
+							"iw dev %s set channel 6 2>/dev/null; "
+							"sleep 2",
+							ctx.iface, ctx.iface, ctx.iface, ctx.iface, ctx.iface);
+						(void)system(cmd);
+
+						/* Retry UNOW TX init until it works */
+						ulama_transport_tx_close(&ctx.ulama_tx);
+						for (int t = 0; t < 10 && g_running; t++) {
+							if (ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface, NULL) == 0) {
+								fprintf(stderr, "vcpd: UNOW TX reconnected\n");
+								break;
+							}
+							fprintf(stderr, "vcpd: UNOW TX init retry %d/10...\n", t + 1);
+							usleep(2000000);
+							(void)system(cmd);
+						}
+					}
+
+					/* Restart video */
+					if (uvcp_session_is_active(&ctx.uvcp_sess, now_ms()) || ctx.autostart) {
+						fprintf(stderr, "vcpd: restarting video source\n");
 						vsrc_start(&ctx.video);
+					}
 				}
 				continue;
 			}
@@ -318,6 +375,46 @@ int main(int argc, char *argv[])
 
 			if (ctx.verbose && npkts > 0) {
 				fprintf(stderr, "vcpd: sent %zu LTS packets (%zd bytes TS)\n", npkts, n);
+			}
+
+			/* Detect UNOW TX failure (interface gone) */
+			if (tx_fail_count >= TX_FAIL_THRESHOLD) {
+				fprintf(stderr, "vcpd: UNOW TX failed %u times, recovering transport\n", tx_fail_count);
+				tx_fail_count = 0;
+
+				/* Stop video to avoid flooding broken pipe */
+				vsrc_stop(&ctx.video);
+
+				/* Re-init UNOW */
+				char cmd[512];
+				snprintf(cmd, sizeof(cmd),
+					"for i in $(seq 1 15); do "
+					"  ip link show %s >/dev/null 2>&1 && break; "
+					"  sleep 1; "
+					"done; "
+					"sleep 2; "
+					"ip link set %s down 2>/dev/null; "
+					"iw dev %s set type monitor 2>/dev/null; "
+					"ip link set %s up 2>/dev/null; "
+					"iw dev %s set channel 6 2>/dev/null; "
+					"sleep 2",
+					ctx.iface, ctx.iface, ctx.iface, ctx.iface, ctx.iface);
+
+				ulama_transport_tx_close(&ctx.ulama_tx);
+				for (int t = 0; t < 10 && g_running; t++) {
+					(void)system(cmd);
+					if (ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface, NULL) == 0) {
+						fprintf(stderr, "vcpd: UNOW TX reconnected\n");
+						break;
+					}
+					fprintf(stderr, "vcpd: UNOW TX retry %d/10...\n", t + 1);
+				}
+
+				/* Restart video */
+				if (uvcp_session_is_active(&ctx.uvcp_sess, now_ms()) || ctx.autostart) {
+					fprintf(stderr, "vcpd: restarting video after TX recovery\n");
+					vsrc_start(&ctx.video);
+				}
 			}
 		}
 	}

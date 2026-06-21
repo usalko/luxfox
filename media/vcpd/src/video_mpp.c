@@ -4,8 +4,7 @@
  * Pipeline: V4L2 MJPEG capture → VDEC (HW MJPEG decode) → VENC (HW H.264 encode)
  * Based on working sample: samples/example/demo/sample_demo_v4l2_mjpeg_vdec_venc.c
  *
- * The encoded H.264 NALs are written to an internal pipe so that vcpd main loop
- * can read them via the same video_source interface as the ffmpeg backend.
+ * Uses RK MPI directly — no dependency on sample_comm.h.
  */
 
 #ifdef VCPD_WITH_MPP
@@ -24,7 +23,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include "sample_comm.h"
+#include "rk_debug.h"
+#include "rk_mpi_cal.h"
+#include "rk_mpi_mb.h"
+#include "rk_mpi_sys.h"
+#include "rk_mpi_vdec.h"
+#include "rk_mpi_venc.h"
 
 #define V4L2_BUFFER_COUNT 4
 #define VDEC_CHN_ID 0
@@ -43,7 +47,8 @@ typedef struct {
 	uint32_t actual_width;
 	uint32_t actual_height;
 
-	SAMPLE_VENC_CTX_S venc;
+	VENC_STREAM_S venc_stream;
+	VENC_PACK_S venc_pack;
 
 	int pipe_wr;
 	pthread_t thread;
@@ -61,8 +66,7 @@ static int xioctl(int fd, unsigned long request, void *arg)
 
 static RK_S32 mjpeg_packet_free(void *opaque)
 {
-	if (opaque)
-		free(opaque);
+	free(opaque);
 	return RK_SUCCESS;
 }
 
@@ -86,8 +90,8 @@ static int v4l2_open(mpp_ctx_t *ctx)
 
 	memset(&fmt, 0, sizeof(fmt));
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	fmt.fmt.pix.width = ctx->src->width;
-	fmt.fmt.pix.height = ctx->src->height;
+	fmt.fmt.pix.width = (unsigned)ctx->src->width;
+	fmt.fmt.pix.height = (unsigned)ctx->src->height;
 	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
 	fmt.fmt.pix.field = V4L2_FIELD_NONE;
 	if (xioctl(ctx->v4l2_fd, VIDIOC_S_FMT, &fmt) < 0)
@@ -99,7 +103,7 @@ static int v4l2_open(mpp_ctx_t *ctx)
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	parm.parm.capture.timeperframe.numerator = 1;
-	parm.parm.capture.timeperframe.denominator = ctx->src->fps;
+	parm.parm.capture.timeperframe.denominator = (unsigned)ctx->src->fps;
 	xioctl(ctx->v4l2_fd, VIDIOC_S_PARM, &parm);
 
 	memset(&req, 0, sizeof(req));
@@ -208,29 +212,60 @@ static RK_S32 init_vdec(uint32_t width, uint32_t height)
 
 static RK_S32 init_venc(mpp_ctx_t *ctx)
 {
-	memset(&ctx->venc, 0, sizeof(ctx->venc));
-	ctx->venc.s32ChnId = VENC_CHN_ID;
-	ctx->venc.u32Width = ctx->actual_width;
-	ctx->venc.u32Height = ctx->actual_height;
-	ctx->venc.u32Fps = ctx->src->fps;
-	ctx->venc.u32Gop = ctx->src->fps;
-	ctx->venc.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
-	ctx->venc.enCodecType = RK_CODEC_TYPE_H264;
-	ctx->venc.enRcMode = VENC_RC_MODE_H264CBR;
-	ctx->venc.enPixelFormat = RK_FMT_YUV420SP;
-	ctx->venc.stChnAttr.stVencAttr.u32Profile = 100;
+	VENC_CHN_ATTR_S chn_attr;
+	memset(&chn_attr, 0, sizeof(chn_attr));
 
-	RK_S32 ret = SAMPLE_COMM_VENC_CreateChn(&ctx->venc);
-	if (ret != RK_SUCCESS)
+	chn_attr.stVencAttr.enType = RK_VIDEO_ID_AVC;
+	chn_attr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
+	chn_attr.stVencAttr.u32Profile = 100;
+	chn_attr.stVencAttr.u32PicWidth = ctx->actual_width;
+	chn_attr.stVencAttr.u32PicHeight = ctx->actual_height;
+	chn_attr.stVencAttr.u32VirWidth = ctx->actual_width;
+	chn_attr.stVencAttr.u32VirHeight = ctx->actual_height;
+	chn_attr.stVencAttr.u32StreamBufCnt = 4;
+	chn_attr.stVencAttr.u32BufSize = ctx->actual_width * ctx->actual_height / 2;
+
+	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
+	chn_attr.stRcAttr.stH264Cbr.u32Gop = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.stH264Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
+	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateDen = 1;
+	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
+	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
+
+	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
+	if (ret != RK_SUCCESS) {
+		RK_LOGE("RK_MPI_VENC_CreateChn failed %#X", ret);
 		return ret;
-
-	ctx->venc.stFrame.pstPack = calloc(1, sizeof(VENC_PACK_S));
-	if (!ctx->venc.stFrame.pstPack) {
-		SAMPLE_COMM_VENC_DestroyChn(&ctx->venc);
-		return RK_FAILURE;
 	}
 
+	VENC_RECV_PIC_PARAM_S recv_param;
+	memset(&recv_param, 0, sizeof(recv_param));
+	recv_param.s32RecvPicNum = -1;
+	ret = RK_MPI_VENC_StartRecvFrame(VENC_CHN_ID, &recv_param);
+	if (ret != RK_SUCCESS) {
+		RK_LOGE("RK_MPI_VENC_StartRecvFrame failed %#X", ret);
+		RK_MPI_VENC_DestroyChn(VENC_CHN_ID);
+		return ret;
+	}
+
+	memset(&ctx->venc_pack, 0, sizeof(ctx->venc_pack));
+	memset(&ctx->venc_stream, 0, sizeof(ctx->venc_stream));
+	ctx->venc_stream.pstPack = &ctx->venc_pack;
+
 	return RK_SUCCESS;
+}
+
+static void deinit_venc(void)
+{
+	RK_MPI_VENC_StopRecvFrame(VENC_CHN_ID);
+	RK_MPI_VENC_DestroyChn(VENC_CHN_ID);
+}
+
+static void deinit_vdec(void)
+{
+	RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
+	RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
 }
 
 static RK_S32 send_mjpeg_to_vdec(const void *data, size_t len)
@@ -281,6 +316,7 @@ static void *mpp_capture_thread(void *arg)
 		if (xioctl(ctx->v4l2_fd, VIDIOC_DQBUF, &buf) < 0) {
 			if (errno == EAGAIN)
 				continue;
+			fprintf(stderr, "vcpd: V4L2 capture failed: %s\n", strerror(errno));
 			break;
 		}
 
@@ -296,24 +332,30 @@ static void *mpp_capture_thread(void *arg)
 
 			ret = RK_MPI_VDEC_GetFrame(VDEC_CHN_ID, &decoded_frame, 1000);
 			if (ret == RK_SUCCESS) {
-				ret = RK_MPI_VENC_SendFrame(ctx->venc.s32ChnId, &decoded_frame, 1000);
+				ret = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &decoded_frame, 1000);
 				RK_MPI_VDEC_ReleaseFrame(VDEC_CHN_ID, &decoded_frame);
 
 				if (ret == RK_SUCCESS) {
-					void *stream_data = NULL;
-					ret = SAMPLE_COMM_VENC_GetStream(&ctx->venc, &stream_data);
-					if (ret == RK_SUCCESS && stream_data) {
-						size_t nal_len = ctx->venc.stFrame.pstPack->u32Len;
-						if (nal_len > 0) {
-							write(ctx->pipe_wr, stream_data, nal_len);
-						}
-						SAMPLE_COMM_VENC_ReleaseStream(&ctx->venc);
+					ctx->venc_stream.pstPack = &ctx->venc_pack;
+					ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
+					if (ret == RK_SUCCESS) {
+						void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_pack.pMbBlk);
+						RK_U32 nal_len = ctx->venc_pack.u32Len;
+						if (nal_data && nal_len > 0)
+							write(ctx->pipe_wr, nal_data, nal_len);
+						RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
 					}
 				}
 			}
 		}
 
 		xioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf);
+	}
+
+	/* Close pipe write end so main loop sees EOF and triggers recovery */
+	if (ctx->pipe_wr >= 0) {
+		close(ctx->pipe_wr);
+		ctx->pipe_wr = -1;
 	}
 
 	return NULL;
@@ -353,16 +395,14 @@ int video_source_mpp_start(video_source_mpp_t *src)
 
 	ret = init_venc(ctx);
 	if (ret != RK_SUCCESS) {
-		RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
-		RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
+		deinit_vdec();
 		goto fail;
 	}
 
 	int pipefd[2];
 	if (pipe(pipefd) < 0) {
-		SAMPLE_COMM_VENC_DestroyChn(&ctx->venc);
-		RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
-		RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
+		deinit_venc();
+		deinit_vdec();
 		goto fail;
 	}
 
@@ -372,9 +412,8 @@ int video_source_mpp_start(video_source_mpp_t *src)
 	if (v4l2_stream_on(ctx) < 0) {
 		close(pipefd[0]);
 		close(pipefd[1]);
-		SAMPLE_COMM_VENC_DestroyChn(&ctx->venc);
-		RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
-		RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
+		deinit_venc();
+		deinit_vdec();
 		goto fail;
 	}
 
@@ -383,9 +422,8 @@ int video_source_mpp_start(video_source_mpp_t *src)
 		v4l2_cleanup(ctx);
 		close(pipefd[0]);
 		close(pipefd[1]);
-		SAMPLE_COMM_VENC_DestroyChn(&ctx->venc);
-		RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
-		RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
+		deinit_venc();
+		deinit_vdec();
 		goto fail;
 	}
 
@@ -410,9 +448,8 @@ void video_source_mpp_stop(video_source_mpp_t *src)
 	pthread_join(ctx->thread, NULL);
 
 	v4l2_cleanup(ctx);
-	SAMPLE_COMM_VENC_DestroyChn(&ctx->venc);
-	RK_MPI_VDEC_StopRecvStream(VDEC_CHN_ID);
-	RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
+	deinit_venc();
+	deinit_vdec();
 
 	if (ctx->pipe_wr >= 0) {
 		close(ctx->pipe_wr);
