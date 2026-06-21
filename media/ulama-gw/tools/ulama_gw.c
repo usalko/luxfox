@@ -274,11 +274,23 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	}
 
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
+		/* Pass-through mode: forward video immediately without reorder buffer.
+		 * MPEG-TS is loss-tolerant; reorder adds 80ms latency and makes
+		 * stream unusable at high PER (radio losses on UNOW). */
 		lts_packet_t pkt;
 		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
-			ctx->lts_video_src = src_u16;
-			lts_decoder_insert(&ctx->lts_dec, &pkt, now_ms());
-			emit_lts_to_cascade(ctx, src_u16);
+			cascade_frame_view_t cf = {
+				.version = CASCADE_FRAME_VERSION,
+				.src = src_u16,
+				.dst = 0,
+				.traffic_class = CASCADE_CLASS_VIDEO,
+				.payload = pkt.payload,
+				.payload_len = pkt.payload_len,
+			};
+			send_cascade_frame(ctx, &cf);
+			if (ctx->verbose) {
+				fprintf(stderr, "gw: VIDEO fwd seq=%u len=%zu\n", pkt.pkt_seq, pkt.payload_len);
+			}
 		}
 		return;
 	}
