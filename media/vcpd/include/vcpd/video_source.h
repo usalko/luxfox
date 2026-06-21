@@ -40,4 +40,7 @@ typedef struct {
 int video_source_mpp_start(video_source_mpp_t *src);
 void video_source_mpp_stop(video_source_mpp_t *src);
 ssize_t video_source_mpp_read(video_source_mpp_t *src, uint8_t *buf, size_t len);
+typedef video_source_mpp_t video_source_t;
+#else
+typedef video_source_ffmpeg_t video_source_t;
 #endif

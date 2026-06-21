@@ -24,7 +24,18 @@ UNOW_ROOT := $(CURRENT_DIR)/../unow
 UNOW_PCAP_SYSROOT ?= $(CURRENT_DIR)/../../sysdrv/source/buildroot/buildroot-2023.02.6/output/host/arm-buildroot-linux-uclibcgnueabihf/sysroot
 
 VCPD_SRCS := $(CURRENT_DIR)/src/lts_encoder.c $(CURRENT_DIR)/src/uvcp.c
-VCPD_VIDEO_SRCS := $(CURRENT_DIR)/src/video_ffmpeg.c
+
+# MPP hardware encoder (default for target ARM build)
+# Falls back to ffmpeg if MPP libs not found
+MPP_SAMPLE_DIR := $(RK_MEDIA_OUTPUT)/../../samples/example
+MPP_LIBS_AVAIL := $(wildcard $(RK_MEDIA_OUTPUT)/lib/librockchip_mpp.so)
+ifneq ($(MPP_LIBS_AVAIL),)
+    VCPD_VIDEO_SRCS := $(CURRENT_DIR)/src/video_mpp.c
+    CFLAGS += -DVCPD_WITH_MPP=1 -I$(MPP_SAMPLE_DIR)/include
+    APP_LDFLAGS += -L$(RK_MEDIA_OUTPUT)/lib -lrockit -lrockchip_mpp -lrt
+else
+    VCPD_VIDEO_SRCS := $(CURRENT_DIR)/src/video_ffmpeg.c
+endif
 ULAMA_LIB_SRCS := $(wildcard $(ULAMA_ROOT)/src/core/*.c) $(wildcard $(ULAMA_ROOT)/src/common/*.c)
 UNOW_SRCS := $(wildcard $(UNOW_ROOT)/src/*.c)
 TARGET_APP_SRC := $(CURRENT_DIR)/tools/vcpd.c

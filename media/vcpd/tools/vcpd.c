@@ -16,6 +16,17 @@
 #include "ulama/ulama_frame.h"
 #include "ulama/transport.h"
 
+/* Unified video source API — delegates to MPP (HW) or ffmpeg (SW) */
+#ifdef VCPD_WITH_MPP
+#define vsrc_start(v)    video_source_mpp_start(v)
+#define vsrc_stop(v)     video_source_mpp_stop(v)
+#define vsrc_read(v,b,l) video_source_mpp_read(v,b,l)
+#else
+#define vsrc_start(v)    video_source_ffmpeg_start(v)
+#define vsrc_stop(v)     video_source_ffmpeg_stop(v)
+#define vsrc_read(v,b,l) video_source_ffmpeg_read(v,b,l)
+#endif
+
 static volatile sig_atomic_t g_running = 1;
 
 static void sig_handler(int sig)
@@ -54,7 +65,7 @@ static void usage(const char *prog)
 }
 
 typedef struct {
-	video_source_ffmpeg_t video;
+	video_source_t video;
 	lts_encoder_t lts_enc;
 	uvcp_session_t uvcp_sess;
 	ulama_tx_transport_t ulama_tx;
@@ -123,7 +134,7 @@ static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 	if (prev == UVCP_STATE_IDLE && ctx->uvcp_sess.state == UVCP_STATE_STREAMING) {
 		fprintf(stderr, "vcpd: stream started (READY from operator)\n");
 		if (!ctx->video.running)
-			video_source_ffmpeg_start(&ctx->video);
+			vsrc_start(&ctx->video);
 	}
 
 	if (msg.verb == UVCP_VERB_PING) {
@@ -141,7 +152,9 @@ int main(int argc, char *argv[])
 	vcpd_ctx_t ctx;
 	memset(&ctx, 0, sizeof(ctx));
 	strncpy(ctx.video.device, "/dev/video0", sizeof(ctx.video.device));
+#ifndef VCPD_WITH_MPP
 	strncpy(ctx.video.codec, "libx264", sizeof(ctx.video.codec));
+#endif
 	ctx.video.bitrate_kbps = 512;
 	ctx.video.width = 640;
 	ctx.video.height = 480;
@@ -178,7 +191,11 @@ int main(int argc, char *argv[])
 	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:vh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
+#ifndef VCPD_WITH_MPP
 		case 'c': strncpy(ctx.video.codec, optarg, sizeof(ctx.video.codec) - 1); break;
+#else
+		case 'c': break; /* codec ignored with MPP HW encoder */
+#endif
 		case 'b': ctx.video.bitrate_kbps = atoi(optarg); break;
 		case 'W': ctx.video.width = atoi(optarg); break;
 		case 'H': ctx.video.height = atoi(optarg); break;
@@ -261,18 +278,18 @@ int main(int argc, char *argv[])
 
 		if (!uvcp_session_is_active(&ctx.uvcp_sess, ts) && ctx.video.running) {
 			fprintf(stderr, "vcpd: lease expired, stopping video\n");
-			video_source_ffmpeg_stop(&ctx.video);
+			vsrc_stop(&ctx.video);
 			continue;
 		}
 
 		if (nfds > 1 && (pfds[1].revents & POLLIN) && ctx.video.running) {
-			ssize_t n = video_source_ffmpeg_read(&ctx.video, ts_buf, sizeof(ts_buf));
+			ssize_t n = vsrc_read(&ctx.video, ts_buf, sizeof(ts_buf));
 			if (n <= 0) {
 				if (n == 0) {
 					fprintf(stderr, "vcpd: ffmpeg EOF, restarting\n");
-					video_source_ffmpeg_stop(&ctx.video);
+					vsrc_stop(&ctx.video);
 					if (uvcp_session_is_active(&ctx.uvcp_sess, ts))
-						video_source_ffmpeg_start(&ctx.video);
+						vsrc_start(&ctx.video);
 				}
 				continue;
 			}
@@ -294,7 +311,7 @@ int main(int argc, char *argv[])
 	}
 
 	fprintf(stderr, "vcpd: shutting down\n");
-	video_source_ffmpeg_stop(&ctx.video);
+	vsrc_stop(&ctx.video);
 	ulama_transport_tx_close(&ctx.ulama_tx);
 	ulama_transport_rx_close(&ctx.ulama_rx);
 
