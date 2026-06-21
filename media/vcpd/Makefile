@@ -32,7 +32,7 @@ MPP_LIBS_AVAIL := $(wildcard $(RK_MEDIA_OUTPUT)/lib/librockchip_mpp.so)
 ifneq ($(MPP_LIBS_AVAIL),)
     VCPD_VIDEO_SRCS := $(CURRENT_DIR)/src/video_mpp.c
     CFLAGS += -DVCPD_WITH_MPP=1 -I$(MPP_SAMPLE_DIR)/include
-    APP_LDFLAGS += -L$(RK_MEDIA_OUTPUT)/lib -lrockit -lrockchip_mpp -lrt
+    APP_LDFLAGS += -L$(RK_MEDIA_OUTPUT)/lib -lrockit_full -lrockchip_mpp -lrga -lrt
 else
     VCPD_VIDEO_SRCS := $(CURRENT_DIR)/src/video_ffmpeg.c
 endif
