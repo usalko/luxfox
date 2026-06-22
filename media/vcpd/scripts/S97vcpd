@@ -10,7 +10,8 @@
 
 set -eu
 
-BIN="${VCPD_BIN:-/usr/bin/vcpd}"
+BIN="${VCPD_BIN:-/oem/usr/bin/vcpd}"
+CONFIG="${VCPD_CONFIG:-/oem/etc/vcpd.conf}"
 PIDFILE="${VCPD_PIDFILE:-/var/run/vcpd.pid}"
 LOG_DIR="${VCPD_LOG_DIR:-/var/log/vcpd}"
 STDOUT_LOG="$LOG_DIR/vcpd.stdout"
@@ -40,9 +41,9 @@ start() {
     log "starting daemon bin=$BIN"
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --verbose
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --config "$CONFIG"
     else
-        "$BIN" --verbose >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"
     fi
 }
