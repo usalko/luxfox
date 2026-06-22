@@ -70,13 +70,9 @@ start() {
     build_args
     log "starting bin=$BIN args=$ARGS"
 
-    if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" \
-            -x /bin/sh -- -c "export LD_LIBRARY_PATH=/oem/usr/lib; exec $BIN $ARGS >$STDOUT_LOG 2>$STDERR_LOG"
-    else
-        LD_LIBRARY_PATH=/oem/usr/lib "$BIN" $ARGS >"$STDOUT_LOG" 2>"$STDERR_LOG" &
-        echo $! > "$PIDFILE"
-    fi
+    export LD_LIBRARY_PATH=/oem/usr/lib
+    "$BIN" $ARGS >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+    echo $! > "$PIDFILE"
 }
 
 stop() {
