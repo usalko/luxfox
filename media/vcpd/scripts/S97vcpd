@@ -10,8 +10,17 @@
 
 set -eu
 
-BIN="${VCPD_BIN:-/oem/usr/bin/vcpd}"
-CONFIG="${VCPD_CONFIG:-/oem/etc/vcpd.conf}"
+# Look in /oem first (OEM sync), fallback to /usr (rootfs)
+if [ -x "/oem/usr/bin/vcpd" ]; then
+    BIN="${VCPD_BIN:-/oem/usr/bin/vcpd}"
+else
+    BIN="${VCPD_BIN:-/usr/bin/vcpd}"
+fi
+if [ -f "/oem/etc/vcpd.conf" ]; then
+    CONFIG="${VCPD_CONFIG:-/oem/etc/vcpd.conf}"
+else
+    CONFIG="${VCPD_CONFIG:-/etc/vcpd.conf}"
+fi
 PIDFILE="${VCPD_PIDFILE:-/var/run/vcpd.pid}"
 LOG_DIR="${VCPD_LOG_DIR:-/var/log/vcpd}"
 STDOUT_LOG="$LOG_DIR/vcpd.stdout"
@@ -38,10 +47,11 @@ start() {
         return 0
     fi
 
-    log "starting daemon bin=$BIN"
+    log "starting daemon bin=$BIN config=$CONFIG log=$LOG_DIR"
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --config "$CONFIG"
+        start-stop-daemon -S -b -m -p "$PIDFILE" \
+            -x /bin/sh -- -c "exec $BIN --config $CONFIG >$STDOUT_LOG 2>$STDERR_LOG"
     else
         "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"

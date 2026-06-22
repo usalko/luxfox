@@ -10,8 +10,17 @@
 
 set -eu
 
-BIN="${ULAMA_BIN:-/oem/usr/bin/ulamad}"
-CONFIG="${ULAMA_CONFIG:-/oem/etc/ulama.conf}"
+# Look in /oem first (OEM sync), fallback to /usr (rootfs)
+if [ -x "/oem/usr/bin/ulamad" ]; then
+    BIN="${ULAMA_BIN:-/oem/usr/bin/ulamad}"
+else
+    BIN="${ULAMA_BIN:-/usr/bin/ulamad}"
+fi
+if [ -f "/oem/etc/ulama.conf" ]; then
+    CONFIG="${ULAMA_CONFIG:-/oem/etc/ulama.conf}"
+else
+    CONFIG="${ULAMA_CONFIG:-/etc/ulama.conf}"
+fi
 PIDFILE="${ULAMA_PIDFILE:-/var/run/ulama.pid}"
 LOG_DIR="${ULAMA_LOG_DIR:-/var/log/ulama}"
 STDOUT_LOG="$LOG_DIR/ulamad.stdout"
@@ -43,10 +52,11 @@ start() {
         return 0
     fi
 
-    log "starting daemon bin=$BIN config=$CONFIG"
+    log "starting daemon bin=$BIN config=$CONFIG log=$LOG_DIR"
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --config "$CONFIG"
+        start-stop-daemon -S -b -m -p "$PIDFILE" \
+            -x /bin/sh -- -c "exec $BIN --config $CONFIG >$STDOUT_LOG 2>$STDERR_LOG"
     else
         "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"
