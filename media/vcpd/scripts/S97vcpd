@@ -42,9 +42,9 @@ start() {
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" \
-            -x /bin/sh -- -c "exec $BIN --config $CONFIG >$STDOUT_LOG 2>$STDERR_LOG"
+            -x /bin/sh -- -c "export LD_LIBRARY_PATH=/oem/usr/lib; exec $BIN --config $CONFIG >$STDOUT_LOG 2>$STDERR_LOG"
     else
-        "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        LD_LIBRARY_PATH=/oem/usr/lib "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"
     fi
 }
