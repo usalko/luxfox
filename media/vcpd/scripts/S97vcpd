@@ -11,11 +11,40 @@
 set -eu
 
 BIN="/oem/usr/bin/vcpd"
-CONFIG="/oem/etc/vcpd.conf"
+CONF="/oem/etc/vcpd.conf"
 PIDFILE="/var/run/vcpd.pid"
 LOG_DIR="/var/log/vcpd"
 STDOUT_LOG="$LOG_DIR/vcpd.stdout"
 STDERR_LOG="$LOG_DIR/vcpd.stderr"
+
+# Parse key=value config into CLI flags
+build_args() {
+    ARGS=""
+    [ ! -f "$CONF" ] && return
+    while IFS='=' read -r key value; do
+        case "$key" in
+            \#*|"") continue ;;
+        esac
+        value=$(echo "$value" | sed 's/#.*//' | xargs)
+        [ -z "$value" ] && continue
+        case "$key" in
+            autostart) [ "$value" = "true" ] && ARGS="$ARGS --autostart" ;;
+            verbose)   [ "$value" = "true" ] && ARGS="$ARGS --verbose" ;;
+            source)    ARGS="$ARGS --source $value" ;;
+            bitrate)   ARGS="$ARGS --bitrate $value" ;;
+            width)     ARGS="$ARGS --width $value" ;;
+            height)    ARGS="$ARGS --height $value" ;;
+            fps)       ARGS="$ARGS --fps $value" ;;
+            transport) ARGS="$ARGS --transport $value" ;;
+            iface)     ARGS="$ARGS --iface $value" ;;
+            node)      ARGS="$ARGS --node $value" ;;
+            dst_node)  ARGS="$ARGS --dst-node $value" ;;
+            stream_id) ARGS="$ARGS --stream-id $value" ;;
+            peer)      ARGS="$ARGS --peer $value" ;;
+            listen)    ARGS="$ARGS --listen $value" ;;
+        esac
+    done < "$CONF"
+}
 
 log() {
     echo "[S97vcpd] $*"
@@ -38,13 +67,14 @@ start() {
         return 0
     fi
 
-    log "starting bin=$BIN config=$CONFIG"
+    build_args
+    log "starting bin=$BIN args=$ARGS"
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" \
-            -x /bin/sh -- -c "export LD_LIBRARY_PATH=/oem/usr/lib; exec $BIN --config $CONFIG >$STDOUT_LOG 2>$STDERR_LOG"
+            -x /bin/sh -- -c "export LD_LIBRARY_PATH=/oem/usr/lib; exec $BIN $ARGS >$STDOUT_LOG 2>$STDERR_LOG"
     else
-        LD_LIBRARY_PATH=/oem/usr/lib "$BIN" --config "$CONFIG" >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        LD_LIBRARY_PATH=/oem/usr/lib "$BIN" $ARGS >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"
     fi
 }
