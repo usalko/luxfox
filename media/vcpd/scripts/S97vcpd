@@ -10,19 +10,10 @@
 
 set -eu
 
-# Look in /oem first (OEM sync), fallback to /usr (rootfs)
-if [ -x "/oem/usr/bin/vcpd" ]; then
-    BIN="${VCPD_BIN:-/oem/usr/bin/vcpd}"
-else
-    BIN="${VCPD_BIN:-/usr/bin/vcpd}"
-fi
-if [ -f "/oem/etc/vcpd.conf" ]; then
-    CONFIG="${VCPD_CONFIG:-/oem/etc/vcpd.conf}"
-else
-    CONFIG="${VCPD_CONFIG:-/etc/vcpd.conf}"
-fi
-PIDFILE="${VCPD_PIDFILE:-/var/run/vcpd.pid}"
-LOG_DIR="${VCPD_LOG_DIR:-/var/log/vcpd}"
+BIN="/oem/usr/bin/vcpd"
+CONFIG="/oem/etc/vcpd.conf"
+PIDFILE="/var/run/vcpd.pid"
+LOG_DIR="/var/log/vcpd"
 STDOUT_LOG="$LOG_DIR/vcpd.stdout"
 STDERR_LOG="$LOG_DIR/vcpd.stderr"
 
@@ -36,7 +27,7 @@ is_running() {
 
 start() {
     if [ ! -x "$BIN" ]; then
-        log "ERROR: binary not found or not executable: $BIN"
+        log "ERROR: binary not found: $BIN"
         return 1
     fi
 
@@ -47,7 +38,7 @@ start() {
         return 0
     fi
 
-    log "starting daemon bin=$BIN config=$CONFIG log=$LOG_DIR"
+    log "starting bin=$BIN config=$CONFIG"
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
         start-stop-daemon -S -b -m -p "$PIDFILE" \
@@ -66,7 +57,6 @@ stop() {
         rm -f "$PIDFILE"
         return 0
     fi
-
     log "not running"
     rm -f "$PIDFILE"
     return 0
@@ -77,27 +67,14 @@ status() {
         log "running (pid $(cat "$PIDFILE" 2>/dev/null))"
         return 0
     fi
-
     log "stopped"
     return 3
 }
 
 case "${1:-start}" in
-    start)
-        start
-        ;;
-    stop)
-        stop
-        ;;
-    restart)
-        stop || true
-        start
-        ;;
-    status)
-        status
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}" >&2
-        exit 1
-        ;;
+    start)  start ;;
+    stop)   stop ;;
+    restart) stop || true; start ;;
+    status) status ;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
 esac
