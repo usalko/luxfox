@@ -74,6 +74,18 @@ done
 log_info "✓ VCPD staged"
 
 ##############################################################################
+# 3b. Force-update rootfs staging (SDK rootfs may have stale copies)
+##############################################################################
+ROOTFS_STAGING="$OUTPUT_ROOT/rootfs_uclibc_rv1106"
+if [ -d "$ROOTFS_STAGING/etc/init.d" ]; then
+    log_info "Updating rootfs staging with current init scripts + configs..."
+    stage_executable "$SCRIPT_DIR/ulama/scripts/S99ulama"    "$ROOTFS_STAGING/etc/init.d/S99ulama"
+    stage_executable "$SCRIPT_DIR/vcpd/scripts/S97vcpd"      "$ROOTFS_STAGING/etc/init.d/S97vcpd"
+    stage_executable "$SCRIPT_DIR/usb-watchdog/scripts/S90usb-watchdog" "$ROOTFS_STAGING/etc/init.d/S90usb-watchdog"
+    log_info "✓ rootfs staging updated"
+fi
+
+##############################################################################
 # 4. Buildspot (SSH infrastructure for sync)
 ##############################################################################
 log_info "═══ Staging buildspot (SSH) ═══"
