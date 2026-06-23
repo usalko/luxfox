@@ -8,7 +8,7 @@
 # Short-Description: ULAMA video capture daemon
 ### END INIT INFO
 
-set -eu
+set -u
 
 BIN="/oem/usr/bin/vcpd"
 CONF="/oem/etc/vcpd.conf"

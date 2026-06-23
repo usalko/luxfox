@@ -8,7 +8,7 @@
 # Short-Description: ULAMA CRSF bridge daemon
 ### END INIT INFO
 
-set -eu
+set -u
 
 BIN="/oem/usr/bin/ulamad"
 CONFIG="/oem/etc/ulama.conf"
