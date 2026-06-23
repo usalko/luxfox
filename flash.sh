@@ -49,10 +49,7 @@ fi
 
 echo "=== Flash LuckFox with node_id=$NODE_ID ==="
 
-# Build firmware
-./build.sh firmware
-
-# Patch node ID in configs before flashing
+# Patch node ID in configs before building firmware image
 if [[ -f "$ULAMA_CONF" ]]; then
     sed -i "s/^node=.*/node=$NODE_ID/" "$ULAMA_CONF"
     echo "  ulama.conf: node=$NODE_ID"
@@ -62,6 +59,9 @@ if [[ -f "$VCPD_CONF" ]]; then
     sed -i "s/^node=.*/node=$NODE_ID/" "$VCPD_CONF"
     echo "  vcpd.conf:  node=$NODE_ID"
 fi
+
+# Build firmware (packs OEM partition with patched configs)
+./build.sh firmware
 
 echo "=== Flashing... ==="
 sudo ./rkflash.sh update
