@@ -35,6 +35,38 @@ static uint64_t now_ms(void)
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+static int setup_iface(const char *iface, int channel, bool verbose)
+{
+	char cmd[256];
+	int rc;
+
+	if (verbose)
+		fprintf(stderr, "gw: configuring %s (channel %d)\n", iface, channel);
+
+	snprintf(cmd, sizeof(cmd), "ip link set %s down", iface);
+	rc = system(cmd);
+	if (rc != 0)
+		fprintf(stderr, "gw: warning: '%s' returned %d\n", cmd, rc);
+
+	snprintf(cmd, sizeof(cmd), "ip link set %s up", iface);
+	rc = system(cmd);
+	if (rc != 0) {
+		fprintf(stderr, "gw: failed: '%s' returned %d\n", cmd, rc);
+		return -1;
+	}
+
+	snprintf(cmd, sizeof(cmd), "iw dev %s set channel %d", iface, channel);
+	rc = system(cmd);
+	if (rc != 0) {
+		fprintf(stderr, "gw: failed: '%s' returned %d\n", cmd, rc);
+		return -1;
+	}
+
+	if (verbose)
+		fprintf(stderr, "gw: %s ready (channel %d)\n", iface, channel);
+	return 0;
+}
+
 static void usage(const char *prog)
 {
 	fprintf(stderr,
@@ -45,6 +77,7 @@ static void usage(const char *prog)
 		"  --listen      ADDR:PORT  Listen for ULAMA frames (UDP)     (default 0.0.0.0:5000)\n"
 		"  --peer        ADDR:PORT  Send ULAMA frames to (UDP)        (default 127.0.0.1:5001)\n"
 		"  --iface       NAME       Monitor mode interface (UNOW)     (default mon0)\n"
+		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
 		"  --verbose                Enable verbose logging\n"
@@ -58,6 +91,7 @@ typedef struct {
 	char peer_addr[64];
 	char dst_mac_str[32];
 	bool verbose;
+	int channel;
 	uint16_t seq_counter;
 	int cascade_rx_fd;
 	struct sockaddr_in cascade_tx_addr;
@@ -318,6 +352,7 @@ int main(int argc, char *argv[])
 	strncpy(ctx.peer_addr, "127.0.0.1:5001", sizeof(ctx.peer_addr));
 	ctx.gw.node_id = 1;
 	ctx.verbose = false;
+	ctx.channel = 0;
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
@@ -326,6 +361,7 @@ int main(int argc, char *argv[])
 		{"listen",      required_argument, NULL, 'l'},
 		{"peer",        required_argument, NULL, 'p'},
 		{"iface",       required_argument, NULL, 'i'},
+		{"channel",     required_argument, NULL, 'c'},
 		{"node",        required_argument, NULL, 'n'},
 		{"dst-mac",     required_argument, NULL, 'm'},
 		{"verbose",     no_argument,       NULL, 'v'},
@@ -334,7 +370,7 @@ int main(int argc, char *argv[])
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "C:O:t:l:p:i:n:m:vh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "C:O:t:l:p:i:c:n:m:vh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'C': strncpy(ctx.gw.cascade_in, optarg, sizeof(ctx.gw.cascade_in) - 1); break;
 		case 'O': strncpy(ctx.gw.cascade_out, optarg, sizeof(ctx.gw.cascade_out) - 1); break;
@@ -342,6 +378,7 @@ int main(int argc, char *argv[])
 		case 'l': strncpy(ctx.listen_addr, optarg, sizeof(ctx.listen_addr) - 1); break;
 		case 'p': strncpy(ctx.peer_addr, optarg, sizeof(ctx.peer_addr) - 1); break;
 		case 'i': strncpy(ctx.gw.iface, optarg, sizeof(ctx.gw.iface) - 1); break;
+		case 'c': ctx.channel = atoi(optarg); break;
 		case 'n': ctx.gw.node_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'v': ctx.verbose = true; break;
@@ -367,6 +404,16 @@ int main(int argc, char *argv[])
 	}
 
 	ulama_transport_kind_t tk = ulama_transport_parse_kind(ctx.gw.transport_str);
+
+	if (tk == ULAMA_TRANSPORT_KIND_UNOW && ctx.channel > 0) {
+		if (setup_iface(ctx.gw.iface, ctx.channel, ctx.verbose) < 0) {
+			fprintf(stderr, "gw: failed to configure %s\n", ctx.gw.iface);
+			close(ctx.cascade_rx_fd);
+			close(ctx.cascade_tx_fd);
+			return 1;
+		}
+	}
+
 	int rc;
 	if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
 		uint8_t dst_mac[6];
