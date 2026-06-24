@@ -18,6 +18,10 @@
 #include "unow/unow_diag.h"
 #include "unow/unow_wire.h"
 
+#define UNOW_ACK_TIMEOUT_US  3000
+#define UNOW_ACK_MAX_RETRY   3
+#define UNOW_DEDUP_WINDOW    64
+
 typedef struct {
 	char name[IFNAMSIZ];
 	int ifindex;
@@ -40,6 +44,10 @@ typedef struct {
 	radio_espnow_stats_t stats;
 	bool peer_known;
 	uint8_t peer_mac[6];
+	uint16_t tx_seq;
+	uint16_t dedup_ring[UNOW_DEDUP_WINDOW];
+	uint16_t dedup_head;
+	uint16_t dedup_count;
 } unow_context_t;
 
 extern unow_context_t g_unow;
@@ -54,5 +62,6 @@ void unow_format_mac(const uint8_t mac[6], char *buffer, size_t buffer_size);
 bool unow_mac_is_broadcast(const uint8_t mac[6]);
 
 size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps);
+size_t unow_build_action_frame_ex(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps, uint8_t subtype);
 bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag_frame_t *frame);
 bool unow_radiotap_parse_dbm_signal(const uint8_t *packet, size_t packet_len, int8_t *out_rssi);

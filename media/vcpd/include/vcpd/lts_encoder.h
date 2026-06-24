@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define LTS_ENC_HEADER_SIZE 4
-#define LTS_ENC_MAX_PAYLOAD 236
+#define LTS_ENC_MAX_PAYLOAD 216
 
 #define LTS_ENC_FLAG_LAST_OF_FRAME (1 << 0)
 #define LTS_ENC_FLAG_KEYFRAME      (1 << 1)

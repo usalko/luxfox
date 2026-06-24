@@ -85,6 +85,17 @@ static void usage(const char *prog)
 		prog);
 }
 
+#define NAL_ASSEMBLE_MAX (64 * 1024)
+
+typedef struct {
+	uint8_t buf[NAL_ASSEMBLE_MAX];
+	size_t len;
+	uint16_t first_seq;
+	uint16_t expect_seq;
+	bool active;
+	bool skip;
+} nal_assembler_t;
+
 typedef struct {
 	gw_config_t gw;
 	char listen_addr[64];
@@ -100,7 +111,8 @@ typedef struct {
 	ulama_rx_transport_t ulama_rx;
 	frag_reassembly_ctx_t reassembly;
 	lts_decoder_t lts_dec;
-	uint16_t lts_video_src; /* source drone ID for periodic LTS emit */
+	uint16_t lts_video_src;
+	nal_assembler_t nal_asm;
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -226,13 +238,49 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 
 static void send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 {
-	uint8_t buf[CASCADE_FRAME_HEADER_SIZE + CASCADE_FRAME_MAX_PAYLOAD];
+	size_t buf_size = CASCADE_FRAME_HEADER_SIZE + cf->payload_len;
+	uint8_t *buf = (uint8_t *)malloc(buf_size);
+	if (!buf) return;
 	size_t len = 0;
-	if (!cascade_frame_pack(cf, buf, sizeof(buf), &len))
+	if (cascade_frame_pack(cf, buf, buf_size, &len)) {
+		sendto(ctx->cascade_tx_fd, buf, len, 0,
+		       (struct sockaddr *)&ctx->cascade_tx_addr, sizeof(ctx->cascade_tx_addr));
+	}
+	free(buf);
+}
+
+static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
+{
+	nal_assembler_t *a = &ctx->nal_asm;
+	if (!a->active || a->len == 0)
 		return;
 
-	sendto(ctx->cascade_tx_fd, buf, len, 0,
-	       (struct sockaddr *)&ctx->cascade_tx_addr, sizeof(ctx->cascade_tx_addr));
+	cascade_frame_view_t cf = {
+		.version = CASCADE_FRAME_VERSION,
+		.src = src_u16,
+		.dst = 0,
+		.traffic_class = CASCADE_CLASS_VIDEO,
+		.payload = a->buf,
+		.payload_len = a->len,
+	};
+	send_cascade_frame(ctx, &cf);
+
+	if (ctx->verbose)
+		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu\n",
+			a->first_seq, (uint16_t)(a->expect_seq - 1), a->len);
+
+	a->len = 0;
+	a->active = false;
+}
+
+static void drop_nal(app_ctx_t *ctx, uint16_t expected, uint16_t got)
+{
+	nal_assembler_t *a = &ctx->nal_asm;
+	if (ctx->verbose)
+		fprintf(stderr, "gw: NAL DROPPED gap at seq expected=%u got=%u (had %zu bytes)\n",
+			expected, got, a->len);
+	a->len = 0;
+	a->active = false;
 }
 
 static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
@@ -240,16 +288,51 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 	lts_packet_t emitted[64];
 	size_t n = lts_decoder_emit(&ctx->lts_dec, emitted, 64, now_ms());
 
+	nal_assembler_t *a = &ctx->nal_asm;
+
 	for (size_t i = 0; i < n; i++) {
-		cascade_frame_view_t cf = {
-			.version = CASCADE_FRAME_VERSION,
-			.src = src_u16,
-			.dst = 0,
-			.traffic_class = CASCADE_CLASS_VIDEO,
-			.payload = emitted[i].payload,
-			.payload_len = emitted[i].payload_len,
-		};
-		send_cascade_frame(ctx, &cf);
+		lts_packet_t *pkt = &emitted[i];
+
+		/* Gap detected — drop current NAL, wait for next LAST_OF_FRAME */
+		if (a->active && pkt->pkt_seq != a->expect_seq) {
+			drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+		}
+
+		/* LAST_OF_FRAME = end of a NAL from vcpd.
+		 * If we're not active (just dropped), this ends the damaged NAL.
+		 * If we are active, flush the complete NAL. */
+		if (pkt->flags & LTS_FLAG_LAST_OF_FRAME) {
+			if (a->active && a->len > 0) {
+				/* Append this last chunk */
+				if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
+					memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
+					a->len += pkt->payload_len;
+				}
+				flush_nal(ctx, src_u16);
+			} else {
+				/* Damaged NAL ended — just reset */
+				a->active = false;
+				a->len = 0;
+			}
+			continue;
+		}
+
+		/* Start new NAL or continue current */
+		if (!a->active) {
+			a->active = true;
+			a->len = 0;
+			a->first_seq = pkt->pkt_seq;
+		}
+
+		if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
+			memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
+			a->len += pkt->payload_len;
+		} else {
+			drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+			continue;
+		}
+
+		a->expect_seq = pkt->pkt_seq + 1;
 	}
 }
 
@@ -308,23 +391,10 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	}
 
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
-		/* Pass-through mode: forward video immediately without reorder buffer.
-		 * MPEG-TS is loss-tolerant; reorder adds 80ms latency and makes
-		 * stream unusable at high PER (radio losses on UNOW). */
 		lts_packet_t pkt;
 		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
-			cascade_frame_view_t cf = {
-				.version = CASCADE_FRAME_VERSION,
-				.src = src_u16,
-				.dst = 0,
-				.traffic_class = CASCADE_CLASS_VIDEO,
-				.payload = pkt.payload,
-				.payload_len = pkt.payload_len,
-			};
-			send_cascade_frame(ctx, &cf);
-			if (ctx->verbose) {
-				fprintf(stderr, "gw: VIDEO fwd seq=%u len=%zu\n", pkt.pkt_seq, pkt.payload_len);
-			}
+			lts_decoder_insert(&ctx->lts_dec, &pkt, now_ms());
+			emit_lts_to_cascade(ctx, src_u16);
 		}
 		return;
 	}
@@ -441,7 +511,8 @@ int main(int argc, char *argv[])
 	frag_reassembly_init(&ctx.reassembly);
 	lts_decoder_init(&ctx.lts_dec, LTS_REORDER_WINDOW, LTS_EMIT_DEADLINE_MS);
 
-	fprintf(stderr, "ulama-gw: started (node=%u, transport=%s)\n",
+	fprintf(stderr, "ulama-gw: build=%s lts_max=%d started (node=%u, transport=%s)\n",
+		ULAMA_GW_BUILD_ID, LTS_MAX_PAYLOAD,
 		ctx.gw.node_id, ulama_transport_kind_name(tk));
 	fprintf(stderr, "  cascade-in:  %s\n", ctx.gw.cascade_in);
 	fprintf(stderr, "  cascade-out: %s\n", ctx.gw.cascade_out);

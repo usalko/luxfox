@@ -42,7 +42,7 @@ int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_le
 	}
 	snprintf(filter_expr,
 		 sizeof(filter_expr),
-		 "wlan type mgt subtype action and wlan addr3 %02x:%02x:%02x:%02x:%02x:%02x and wlan[24] = %u and wlan[25] = 0x%02x and wlan[26] = 0x%02x and wlan[27] = 0x%02x and wlan[28] = %u",
+		 "wlan type mgt subtype action and wlan addr3 %02x:%02x:%02x:%02x:%02x:%02x and wlan[24] = %u and wlan[25] = 0x%02x and wlan[26] = 0x%02x and wlan[27] = 0x%02x",
 		 k_unow_bssid[0],
 		 k_unow_bssid[1],
 		 k_unow_bssid[2],
@@ -52,8 +52,7 @@ int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_le
 		 UNOW_VENDOR_CATEGORY,
 		 k_unow_oui[0],
 		 k_unow_oui[1],
-		 k_unow_oui[2],
-		 UNOW_VENDOR_SUBTYPE_DATA);
+		 k_unow_oui[2]);
 	status = pcap_compile(handle, &program, filter_expr, 1, PCAP_NETMASK_UNKNOWN);
 	if (status < 0) {
 		UNOW_LOGW("pcap_compile failed (embedded libpcap limitation): %s", pcap_geterr(handle));

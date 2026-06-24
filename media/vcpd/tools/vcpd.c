@@ -61,9 +61,64 @@ static void usage(const char *prog)
 		"  --dst-node    ID         Gateway node ID          (default 1)\n"
 		"  --stream-id   ID         LTS stream ID            (default 0)\n"
 		"  --autostart              Start streaming immediately (no UVCP READY needed)\n"
+		"  --test        FILE       Capture raw encoder output to file and exit\n"
+		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
+		"  --test-pattern           Use color bars instead of camera\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
+}
+
+static int run_test_capture(video_source_t *video, const char *outpath, int max_frames)
+{
+	fprintf(stderr, "vcpd: TEST MODE — capturing %d frames to %s\n", max_frames, outpath);
+
+	if (vsrc_start(video) != 0) {
+		fprintf(stderr, "vcpd: failed to start video source\n");
+		return 1;
+	}
+
+	FILE *fp = fopen(outpath, "wb");
+	if (!fp) {
+		fprintf(stderr, "vcpd: cannot open %s: %s\n", outpath, strerror(errno));
+		vsrc_stop(video);
+		return 1;
+	}
+
+	uint8_t buf[VIDEO_TS_GROUP_BYTES];
+	int frames = 0;
+	size_t total_bytes = 0;
+	uint64_t t0 = now_ms();
+
+	while (frames < max_frames && g_running) {
+		ssize_t n = vsrc_read(video, buf, sizeof(buf));
+		if (n <= 0) {
+			if (n == 0) break;
+			if (errno == EINTR) continue;
+			fprintf(stderr, "vcpd: read error: %s\n", strerror(errno));
+			break;
+		}
+		fwrite(buf, 1, (size_t)n, fp);
+		total_bytes += (size_t)n;
+		frames++;
+
+		if (frames % 10 == 0)
+			fprintf(stderr, "vcpd: captured %d/%d frames (%zu bytes)\n",
+				frames, max_frames, total_bytes);
+	}
+
+	fclose(fp);
+	vsrc_stop(video);
+
+	uint64_t elapsed = now_ms() - t0;
+	fprintf(stderr, "vcpd: TEST DONE — %d frames, %zu bytes, %llu ms (%.1f fps)\n",
+		frames, total_bytes, (unsigned long long)elapsed,
+		elapsed > 0 ? frames * 1000.0 / elapsed : 0.0);
+	fprintf(stderr, "vcpd: output: %s\n", outpath);
+	fprintf(stderr, "vcpd: to verify, copy to host and run:\n");
+	fprintf(stderr, "  ffplay -f hevc %s\n", outpath);
+	fprintf(stderr, "  ffmpeg -f hevc -i %s -frames:v 5 frame_%%02d.jpg\n", outpath);
+	return 0;
 }
 
 typedef struct {
@@ -78,6 +133,8 @@ typedef struct {
 	uint16_t ulama_seq;
 	bool verbose;
 	bool autostart;
+	char test_output[256];
+	int test_frames;
 	char transport_str[16];
 	char peer_addr[64];
 	char listen_addr[64];
@@ -106,11 +163,14 @@ static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
 	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+		/* Send twice for redundancy (UNOW has no ACK/retry unlike ESP-NOW) */
 		int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
-		if (rc < 0) {
-			tx_fail_count++;
-		} else {
+		if (rc >= 0) {
+			usleep(200);
+			ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
 			tx_fail_count = 0;
+		} else {
+			tx_fail_count++;
 		}
 	}
 }
@@ -194,14 +254,19 @@ int main(int argc, char *argv[])
 		{"dst-node",  required_argument, NULL, 'd'},
 		{"stream-id", required_argument, NULL, 'S'},
 		{"dst-mac",   required_argument, NULL, 'm'},
-		{"autostart", no_argument,       NULL, 'A'},
-		{"verbose",   no_argument,       NULL, 'v'},
-		{"help",      no_argument,       NULL, 'h'},
+		{"autostart",    no_argument,       NULL, 'A'},
+		{"test",         required_argument, NULL, 'T'},
+		{"test-pattern", no_argument,       NULL, 'P'},
+		{"test-frames",  required_argument, NULL, 'F'},
+		{"verbose",      no_argument,       NULL, 'v'},
+		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:vh", long_opts, NULL)) != -1) {
+	ctx.test_frames = 50;
+
+	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:T:F:vh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
 #ifndef VCPD_WITH_MPP
@@ -222,6 +287,9 @@ int main(int argc, char *argv[])
 		case 'S': ctx.stream_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'A': ctx.autostart = true; break;
+		case 'T': strncpy(ctx.test_output, optarg, sizeof(ctx.test_output) - 1); break;
+		case 'P': ctx.video.test_pattern = true; break;
+		case 'F': ctx.test_frames = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -231,6 +299,10 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 	signal(SIGPIPE, SIG_IGN);
+
+	if (ctx.test_output[0]) {
+		return run_test_capture(&ctx.video, ctx.test_output, ctx.test_frames);
+	}
 
 	ulama_transport_kind_t tk = ulama_transport_parse_kind(ctx.transport_str);
 	int rc;
@@ -259,7 +331,8 @@ int main(int argc, char *argv[])
 	lts_encoder_init(&ctx.lts_enc, ctx.stream_id);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: started (node=%u, dst=%u, stream=%u, transport=%s)\n",
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s)\n",
+		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk));
 
 	if (ctx.autostart) {
@@ -271,6 +344,12 @@ int main(int argc, char *argv[])
 	}
 
 	uint8_t ts_buf[VIDEO_TS_GROUP_BYTES];
+
+	/* NAL accumulator: collect bytes from pipe, split on start codes,
+	 * feed complete NALs to LTS encoder so LAST_OF_FRAME aligns with NAL boundaries */
+	uint8_t *nal_buf = malloc(64 * 1024);
+	size_t nal_len = 0;
+	const size_t nal_buf_cap = 64 * 1024;
 
 	while (g_running) {
 		struct pollfd pfds[2];
@@ -363,18 +442,68 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
-			lts_encoded_packet_t lts_pkts[8];
-			size_t npkts = lts_encoder_encode(&ctx.lts_enc, ts_buf, (size_t)n,
-							  0, lts_pkts, 8);
+			/* Accumulate pipe data, extract complete NALs by start code */
+			if (nal_len + (size_t)n > nal_buf_cap)
+				nal_len = 0;
+			memcpy(nal_buf + nal_len, ts_buf, (size_t)n);
+			nal_len += (size_t)n;
 
-			for (size_t i = 0; i < npkts; i++) {
-				if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD) {
-					send_ulama_video(&ctx, lts_pkts[i].data, lts_pkts[i].len);
+			/* Scan for NALs: find pairs of start codes */
+			size_t pos = 0;
+			while (pos < nal_len) {
+				/* Find first start code */
+				size_t sc1 = nal_len; /* sentinel */
+				for (size_t j = pos; j + 2 < nal_len; j++) {
+					if (nal_buf[j] == 0 && nal_buf[j+1] == 0 &&
+					    (nal_buf[j+2] == 1 ||
+					     (j+3 < nal_len && nal_buf[j+2] == 0 && nal_buf[j+3] == 1))) {
+						sc1 = j;
+						break;
+					}
 				}
+				if (sc1 >= nal_len) break;
+
+				size_t sc1_len = (sc1+3 < nal_len && nal_buf[sc1+2] == 0) ? 4 : 3;
+
+				/* Find second start code */
+				size_t sc2 = nal_len;
+				for (size_t j = sc1 + sc1_len; j + 2 < nal_len; j++) {
+					if (nal_buf[j] == 0 && nal_buf[j+1] == 0 &&
+					    (nal_buf[j+2] == 1 ||
+					     (j+3 < nal_len && nal_buf[j+2] == 0 && nal_buf[j+3] == 1))) {
+						sc2 = j;
+						break;
+					}
+				}
+				if (sc2 >= nal_len) break;
+
+				/* Complete NAL: nal_buf[sc1..sc2) */
+				uint8_t *nal_data = nal_buf + sc1;
+				size_t nal_size = sc2 - sc1;
+
+				lts_encoded_packet_t lts_pkts[64];
+				size_t max_pkts = nal_size / LTS_ENC_MAX_PAYLOAD + 2;
+				if (max_pkts > 64) max_pkts = 64;
+				size_t npkts = lts_encoder_encode(&ctx.lts_enc, nal_data, nal_size,
+								  0, lts_pkts, max_pkts);
+
+				for (size_t i = 0; i < npkts; i++) {
+					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
+						send_ulama_video(&ctx, lts_pkts[i].data, lts_pkts[i].len);
+				}
+
+				if (ctx.verbose && npkts > 0)
+					fprintf(stderr, "vcpd: NAL %zu bytes → %zu LTS pkts\n", nal_size, npkts);
+
+				pos = sc2;
 			}
 
-			if (ctx.verbose && npkts > 0) {
-				fprintf(stderr, "vcpd: sent %zu LTS packets (%zd bytes TS)\n", npkts, n);
+			/* Keep unprocessed tail */
+			if (pos > 0 && pos < nal_len) {
+				memmove(nal_buf, nal_buf + pos, nal_len - pos);
+				nal_len -= pos;
+			} else if (pos >= nal_len) {
+				nal_len = 0;
 			}
 
 			/* Detect UNOW TX failure (interface gone) */

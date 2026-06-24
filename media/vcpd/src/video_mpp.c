@@ -215,9 +215,9 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	VENC_CHN_ATTR_S chn_attr;
 	memset(&chn_attr, 0, sizeof(chn_attr));
 
-	chn_attr.stVencAttr.enType = RK_VIDEO_ID_AVC;
+	chn_attr.stVencAttr.enType = RK_VIDEO_ID_HEVC;
 	chn_attr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
-	chn_attr.stVencAttr.u32Profile = 100;
+	chn_attr.stVencAttr.u32Profile = 0;
 	chn_attr.stVencAttr.u32PicWidth = ctx->actual_width;
 	chn_attr.stVencAttr.u32PicHeight = ctx->actual_height;
 	chn_attr.stVencAttr.u32VirWidth = ctx->actual_width;
@@ -225,13 +225,13 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stVencAttr.u32StreamBufCnt = 4;
 	chn_attr.stVencAttr.u32BufSize = ctx->actual_width * ctx->actual_height / 2;
 
-	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
-	chn_attr.stRcAttr.stH264Cbr.u32Gop = (RK_U32)ctx->src->fps;
-	chn_attr.stRcAttr.stH264Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
-	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateDen = 1;
-	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
-	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
-	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
+	chn_attr.stRcAttr.stH265Cbr.u32Gop = 5;
+	chn_attr.stRcAttr.stH265Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
 
 	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
 	if (ret != RK_SUCCESS) {
@@ -301,6 +301,101 @@ static RK_S32 send_mjpeg_to_vdec(const void *data, size_t len)
 	ret = RK_MPI_VDEC_SendStream(VDEC_CHN_ID, &stream, 1000);
 	RK_MPI_MB_ReleaseMB(mb_blk);
 	return ret;
+}
+
+/* YUV420SP (NV12) color bars: 8 vertical stripes */
+static void fill_color_bars_nv12(uint8_t *y_plane, uint8_t *uv_plane,
+				 uint32_t w, uint32_t h, int frame_num)
+{
+	/* RGB values for 8 bars: white,yellow,cyan,green,magenta,red,blue,black */
+	static const uint8_t bars_r[] = {235,235, 54, 54,235,235, 54, 16};
+	static const uint8_t bars_g[] = {235,235,235,235, 54, 54, 54, 16};
+	static const uint8_t bars_b[] = {235, 54,235, 54,235, 54,235, 16};
+
+	uint32_t bar_w = w / 8;
+
+	for (uint32_t row = 0; row < h; row++) {
+		for (uint32_t col = 0; col < w; col++) {
+			int bar = (col / bar_w);
+			if (bar > 7) bar = 7;
+			uint8_t r = bars_r[bar], g = bars_g[bar], b = bars_b[bar];
+
+			/* Moving marker: white horizontal line */
+			uint32_t marker_y = (frame_num * 4) % h;
+			if (row >= marker_y && row < marker_y + 4) {
+				r = 235; g = 235; b = 235;
+			}
+
+			uint8_t y  = (uint8_t)(( 66*r + 129*g +  25*b + 128) / 256 + 16);
+			y_plane[row * w + col] = y;
+
+			if ((row & 1) == 0 && (col & 1) == 0) {
+				uint8_t u = (uint8_t)((-38*r -  74*g + 112*b + 128) / 256 + 128);
+				uint8_t v = (uint8_t)((112*r -  94*g -  18*b + 128) / 256 + 128);
+				uint32_t uv_idx = (row/2) * w + col;
+				uv_plane[uv_idx]     = u;
+				uv_plane[uv_idx + 1] = v;
+			}
+		}
+	}
+}
+
+static void *mpp_pattern_thread(void *arg)
+{
+	mpp_ctx_t *ctx = (mpp_ctx_t *)arg;
+	uint32_t w = ctx->actual_width;
+	uint32_t h = ctx->actual_height;
+	uint32_t y_size = w * h;
+	uint32_t uv_size = w * h / 2;
+	int frame_num = 0;
+	int fps = ctx->src->fps > 0 ? ctx->src->fps : 25;
+	uint32_t interval_us = 1000000 / (uint32_t)fps;
+
+	fprintf(stderr, "vcpd: test pattern %ux%u @ %d fps\n", w, h, fps);
+
+	while (!ctx->stop) {
+		MB_BLK mb_blk = RK_NULL;
+		RK_S32 ret = RK_MPI_SYS_MmzAlloc(&mb_blk, NULL, NULL, y_size + uv_size);
+		if (ret != RK_SUCCESS || !mb_blk) {
+			usleep(10000);
+			continue;
+		}
+
+		uint8_t *vaddr = (uint8_t *)RK_MPI_MB_Handle2VirAddr(mb_blk);
+		fill_color_bars_nv12(vaddr, vaddr + y_size, w, h, frame_num);
+
+		VIDEO_FRAME_INFO_S frame_info;
+		memset(&frame_info, 0, sizeof(frame_info));
+		frame_info.stVFrame.u32Width = w;
+		frame_info.stVFrame.u32Height = h;
+		frame_info.stVFrame.u32VirWidth = w;
+		frame_info.stVFrame.u32VirHeight = h;
+		frame_info.stVFrame.enPixelFormat = RK_FMT_YUV420SP;
+		frame_info.stVFrame.pMbBlk = mb_blk;
+
+		ret = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame_info, 1000);
+		if (ret == RK_SUCCESS) {
+			ctx->venc_stream.pstPack = &ctx->venc_pack;
+			ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
+			if (ret == RK_SUCCESS) {
+				void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_pack.pMbBlk);
+				RK_U32 nal_len = ctx->venc_pack.u32Len;
+				if (nal_data && nal_len > 0)
+					write(ctx->pipe_wr, nal_data, nal_len);
+				RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
+			}
+		}
+
+		RK_MPI_MB_ReleaseMB(mb_blk);
+		frame_num++;
+		usleep(interval_us);
+	}
+
+	if (ctx->pipe_wr >= 0) {
+		close(ctx->pipe_wr);
+		ctx->pipe_wr = -1;
+	}
+	return NULL;
 }
 
 static void *mpp_capture_thread(void *arg)
@@ -386,45 +481,60 @@ int video_source_mpp_start(video_source_mpp_t *src)
 		return -1;
 	}
 
-	if (v4l2_open(ctx) < 0)
-		goto fail;
-
-	ret = init_vdec(ctx->actual_width, ctx->actual_height);
-	if (ret != RK_SUCCESS)
-		goto fail;
-
-	ret = init_venc(ctx);
-	if (ret != RK_SUCCESS) {
-		deinit_vdec();
-		goto fail;
-	}
-
 	int pipefd[2];
 	if (pipe(pipefd) < 0) {
-		deinit_venc();
-		deinit_vdec();
-		goto fail;
+		RK_MPI_SYS_Exit();
+		free(ctx);
+		return -1;
 	}
-
 	src->pipe_fd = pipefd[0];
 	ctx->pipe_wr = pipefd[1];
 
-	if (v4l2_stream_on(ctx) < 0) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		deinit_venc();
-		deinit_vdec();
-		goto fail;
-	}
+	if (src->test_pattern) {
+		/* Test pattern mode: VENC only, no camera/VDEC */
+		ctx->actual_width = (uint32_t)src->width;
+		ctx->actual_height = (uint32_t)src->height;
 
-	ctx->stop = false;
-	if (pthread_create(&ctx->thread, NULL, mpp_capture_thread, ctx) != 0) {
-		v4l2_cleanup(ctx);
-		close(pipefd[0]);
-		close(pipefd[1]);
-		deinit_venc();
-		deinit_vdec();
-		goto fail;
+		ret = init_venc(ctx);
+		if (ret != RK_SUCCESS) {
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+
+		ctx->stop = false;
+		if (pthread_create(&ctx->thread, NULL, mpp_pattern_thread, ctx) != 0) {
+			deinit_venc();
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+	} else {
+		/* Camera mode: V4L2 → VDEC → VENC */
+		if (v4l2_open(ctx) < 0)
+			goto fail;
+
+		ret = init_vdec(ctx->actual_width, ctx->actual_height);
+		if (ret != RK_SUCCESS)
+			goto fail;
+
+		ret = init_venc(ctx);
+		if (ret != RK_SUCCESS) {
+			deinit_vdec();
+			goto fail;
+		}
+
+		if (v4l2_stream_on(ctx) < 0) {
+			close(pipefd[0]); close(pipefd[1]);
+			deinit_venc(); deinit_vdec();
+			goto fail;
+		}
+
+		ctx->stop = false;
+		if (pthread_create(&ctx->thread, NULL, mpp_capture_thread, ctx) != 0) {
+			v4l2_cleanup(ctx);
+			close(pipefd[0]); close(pipefd[1]);
+			deinit_venc(); deinit_vdec();
+			goto fail;
+		}
 	}
 
 	src->mpp_ctx = ctx;

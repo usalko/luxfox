@@ -1,10 +1,11 @@
 #!/bin/bash
 
 ##############################################################################
-# build.sh — Build and deploy all umbrella projects: ULAMA, UNOW, VCPD
+# build.sh — Auto-discover and build all subprojects, stage, sync to device
 #
-# Stages all artifacts into OEM and rootfs staging directories, then syncs
-# to the device via SSH.
+# For each subdirectory:
+#   - has ./build.sh  →  run it (project handles its own staging)
+#   - has Makefile     →  run make, then stage out/ into OEM & rootfs
 #
 # Both deployment paths work after running this script:
 #   - ./flash.sh          (full firmware flash via USB)
@@ -27,74 +28,72 @@ NC='\033[0m'
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-stage_file() {
-    local src="$1" dst="$2"
-    mkdir -p "$(dirname "$dst")"
-    cp -f "$src" "$dst"
+##############################################################################
+# Stage a Makefile project's out/ into both OEM and rootfs staging areas
+#   out/bin/*          → usr/bin/*   (executable)
+#   out/lib/*          → usr/lib/*
+#   out/etc/*          → etc/*
+#   out/etc/init.d/S*  → etc/init.d/S*  (executable)
+##############################################################################
+stage_project_out() {
+    local out_dir="$1" name="$2"
+    [ -d "$out_dir" ] || return 0
+
+    log_info "Staging $name..."
+    for staging in "$OEM_STAGING" "$MEDIA_ROOT_STAGING"; do
+        if [ -d "$out_dir/bin" ]; then
+            mkdir -p "$staging/usr/bin"
+            cp -f "$out_dir/bin/"* "$staging/usr/bin/" 2>/dev/null || true
+            chmod +x "$staging/usr/bin/"* 2>/dev/null || true
+        fi
+        if [ -d "$out_dir/lib" ]; then
+            mkdir -p "$staging/usr/lib"
+            cp -rf "$out_dir/lib/"* "$staging/usr/lib/" 2>/dev/null || true
+        fi
+        if [ -d "$out_dir/etc" ]; then
+            mkdir -p "$staging/etc"
+            cp -rf "$out_dir/etc/"* "$staging/etc/"
+            find "$staging/etc/init.d" -maxdepth 1 -type f -name 'S*' \
+                -exec chmod +x {} \; 2>/dev/null || true
+        fi
+    done
 }
 
-stage_executable() {
-    stage_file "$1" "$2"
-    chmod +x "$2"
-}
-
 ##############################################################################
-# 1. ULAMA (builds ulama + ulama-gw, stages ulama + unow scripts)
+# Build all subprojects (auto-discovery)
 ##############################################################################
-log_info "═══ [1/3] Building ULAMA ═══"
-cd "$SCRIPT_DIR/ulama" && ./build.sh
+for dir in "$SCRIPT_DIR"/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
 
-##############################################################################
-# 2. UNOW (builds unow library + diagnostic tools)
-##############################################################################
-log_info "═══ [2/3] Building UNOW ═══"
-cd "$SCRIPT_DIR/unow" && ./build.sh
-
-##############################################################################
-# 3. VCPD (build + stage)
-##############################################################################
-log_info "═══ [3/3] Building VCPD ═══"
-cd "$SCRIPT_DIR"
-make -C "$SCRIPT_DIR/vcpd"
-
-VCPD_OUT="$SCRIPT_DIR/vcpd/out"
-
-if [ ! -f "$VCPD_OUT/bin/vcpd" ]; then
-    log_error "vcpd binary not found: $VCPD_OUT/bin/vcpd"
-    exit 1
-fi
-
-log_info "Staging VCPD artifacts..."
-for dir in "$OEM_STAGING" "$MEDIA_ROOT_STAGING"; do
-    stage_executable "$VCPD_OUT/bin/vcpd"              "$dir/usr/bin/vcpd"
-    stage_file       "$VCPD_OUT/etc/vcpd.conf"         "$dir/etc/vcpd.conf"
-    stage_executable "$VCPD_OUT/etc/init.d/S97vcpd"    "$dir/etc/init.d/S97vcpd"
+    if [ -x "$dir/build.sh" ]; then
+        log_info "═══ $name (build.sh) ═══"
+        (cd "$dir" && ./build.sh)
+    elif [ -f "$dir/Makefile" ]; then
+        log_info "═══ $name (make) ═══"
+        make -C "$dir"
+        stage_project_out "$dir/out" "$name"
+    fi
 done
 
-log_info "✓ VCPD staged"
-
 ##############################################################################
-# 3b. Force-update rootfs staging (SDK rootfs may have stale copies)
+# Update rootfs staging init scripts (generic: all scripts/S* from subprojects)
 ##############################################################################
 ROOTFS_STAGING="$OUTPUT_ROOT/rootfs_uclibc_rv1106"
 if [ -d "$ROOTFS_STAGING/etc/init.d" ]; then
-    log_info "Updating rootfs staging with current init scripts + configs..."
-    stage_executable "$SCRIPT_DIR/ulama/scripts/S99ulama"    "$ROOTFS_STAGING/etc/init.d/S99ulama"
-    stage_executable "$SCRIPT_DIR/vcpd/scripts/S97vcpd"      "$ROOTFS_STAGING/etc/init.d/S97vcpd"
-    stage_executable "$SCRIPT_DIR/usb-watchdog/scripts/S90usb-watchdog" "$ROOTFS_STAGING/etc/init.d/S90usb-watchdog"
+    log_info "Updating rootfs init scripts..."
+    for initscript in "$SCRIPT_DIR"/*/scripts/S[0-9][0-9]*; do
+        [ -f "$initscript" ] || continue
+        cp -f "$initscript" "$ROOTFS_STAGING/etc/init.d/"
+        chmod +x "$ROOTFS_STAGING/etc/init.d/$(basename "$initscript")"
+    done
     log_info "✓ rootfs staging updated"
 fi
 
 ##############################################################################
-# 4. Buildspot (SSH infrastructure for sync)
-##############################################################################
-log_info "═══ Staging buildspot (SSH) ═══"
-cd "$SCRIPT_DIR/buildspot" && ./build.sh
-
-##############################################################################
-# 5. Sync to device via SSH
+# Sync to device via SSH
 ##############################################################################
 log_info "═══ Syncing to device ═══"
 cd "$PROJECT_ROOT" && ./build.sh sync
 
-log_info "✓ All umbrella projects built and deployed: ulama, unow, vcpd"
+log_info "✓ Done"

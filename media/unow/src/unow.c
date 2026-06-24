@@ -2,6 +2,8 @@
 
 #include <net/if.h>
 #include <string.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 unow_context_t g_unow = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
@@ -172,6 +174,107 @@ esp_err_t radio_espnow_send(const uint8_t *dst_mac, const uint8_t *payload, size
 	return ESP_OK;
 }
 
+esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payload, size_t len)
+{
+	uint8_t packet[sizeof(struct unow_radiotap_tx_header) + sizeof(struct unow_dot11_mgmt_header) + sizeof(struct unow_action_vendor_header) + 2U + ULAMA_ESPNOW_MAX_PAYLOAD];
+	uint8_t seq_payload[2U + ULAMA_ESPNOW_MAX_PAYLOAD];
+	const uint8_t *actual_dst = dst_mac != NULL ? dst_mac : k_broadcast_mac;
+	size_t packet_len;
+	uint16_t seq;
+	int attempt;
+	int attempts;
+	char dst_string[18];
+
+	if (payload == NULL || len == 0U || len > ULAMA_ESPNOW_MAX_PAYLOAD - 2U) {
+		return ESP_ERR_INVALID_ARG;
+	}
+	pthread_mutex_lock(&g_unow.lock);
+	g_unow.stats.tx_enqueue_attempts++;
+	if (!g_unow.initialized || g_unow.pcap == NULL) {
+		pthread_mutex_unlock(&g_unow.lock);
+		return ESP_ERR_INVALID_STATE;
+	}
+	g_unow.stats.tx_enqueue_ok++;
+	g_unow.stats.tx_dequeue++;
+
+	seq = ++g_unow.tx_seq;
+	seq_payload[0] = (uint8_t)(seq >> 8);
+	seq_payload[1] = (uint8_t)(seq & 0xFFU);
+	memcpy(seq_payload + 2U, payload, len);
+
+	packet_len = unow_build_action_frame_ex(packet, sizeof(packet), g_unow.iface.mac, actual_dst, seq_payload, len + 2U, UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_DATA_SEQ);
+	if (packet_len == 0U) {
+		g_unow.stats.tx_send_fail++;
+		pthread_mutex_unlock(&g_unow.lock);
+		return ESP_FAIL;
+	}
+
+	attempts = 1 + UNOW_ACK_MAX_RETRY;
+	for (attempt = 0; attempt < attempts; attempt++) {
+		struct timeval tv_start;
+		struct timeval tv_now;
+		int injected;
+		bool got_ack = false;
+
+		if (attempt > 0) {
+			g_unow.stats.tx_retries++;
+		}
+		g_unow.stats.tx_send_calls++;
+		injected = pcap_inject(g_unow.pcap, packet, packet_len);
+		if (injected < 0) {
+			g_unow.stats.tx_send_fail++;
+			unow_format_mac(actual_dst, dst_string, sizeof(dst_string));
+			UNOW_LOGE("pcap_inject failed dst=%s: %s", dst_string, pcap_geterr(g_unow.pcap));
+			pthread_mutex_unlock(&g_unow.lock);
+			return ESP_FAIL;
+		}
+
+		gettimeofday(&tv_start, NULL);
+		while (!got_ack) {
+			struct pcap_pkthdr *header;
+			const u_char *pkt_data;
+			int64_t elapsed_us;
+			int status;
+
+			gettimeofday(&tv_now, NULL);
+			elapsed_us = ((int64_t)tv_now.tv_sec - (int64_t)tv_start.tv_sec) * 1000000LL + ((int64_t)tv_now.tv_usec - (int64_t)tv_start.tv_usec);
+			if (elapsed_us >= UNOW_ACK_TIMEOUT_US) {
+				break;
+			}
+			status = pcap_next_ex(g_unow.pcap, &header, &pkt_data);
+			if (status == 1) {
+				unow_diag_frame_t frame;
+
+				if (unow_parse_action_frame(pkt_data, header->caplen, &frame) && frame.subtype == UNOW_VENDOR_SUBTYPE_ACK && frame.len >= 2U) {
+					uint16_t ack_seq = ((uint16_t)frame.payload[0] << 8) | (uint16_t)frame.payload[1];
+
+					if (ack_seq == seq) {
+						got_ack = true;
+					}
+				}
+			} else if (status == 0) {
+				usleep(100);
+			} else {
+				break;
+			}
+		}
+		if (got_ack) {
+			g_unow.stats.tx_send_ok++;
+			g_unow.stats.tx_ack_ok++;
+			pthread_mutex_unlock(&g_unow.lock);
+			UNOW_LOGD("reliable seq=%u acked attempt=%d", seq, attempt + 1);
+			return ESP_OK;
+		}
+	}
+
+	g_unow.stats.tx_send_ok++;
+	g_unow.stats.tx_ack_timeout++;
+	pthread_mutex_unlock(&g_unow.lock);
+	unow_format_mac(actual_dst, dst_string, sizeof(dst_string));
+	UNOW_LOGD("reliable seq=%u no ack after %d attempts dst=%s (fallback)", seq, attempts, dst_string);
+	return ESP_OK;
+}
+
 esp_err_t radio_espnow_add_peer(const uint8_t mac[6])
 {
 	if (mac == NULL) {
@@ -270,5 +373,11 @@ void unow_dump_state(FILE *stream)
 		stats.last_rssi,
 		stats.min_rssi,
 		stats.max_rssi);
+	fprintf(stream, "  ack tx_ack_ok=%u tx_ack_timeout=%u tx_retries=%u rx_ack_sent=%u rx_dedup_dropped=%u\n",
+		stats.tx_ack_ok,
+		stats.tx_ack_timeout,
+		stats.tx_retries,
+		stats.rx_ack_sent,
+		stats.rx_dedup_dropped);
 	pthread_mutex_unlock(&g_unow.lock);
 }

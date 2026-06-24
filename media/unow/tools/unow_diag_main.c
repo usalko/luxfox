@@ -12,7 +12,7 @@
 static void print_usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s [--iface mon0] [--node-id N] [--log-level LEVEL] [--send-hex HEX] [--send-text TEXT] [--dst aa:bb:cc:dd:ee:ff] [--listen N] [--no-dump]\n",
+		"Usage: %s [--iface mon0] [--node-id N] [--log-level LEVEL] [--send-hex HEX] [--send-text TEXT] [--dst aa:bb:cc:dd:ee:ff] [--reliable] [--listen N] [--no-dump]\n",
 		prog);
 }
 
@@ -103,6 +103,7 @@ int main(int argc, char **argv)
 	int listen_count = 0;
 	bool do_dump = true;
 	bool want_send = false;
+	bool reliable = false;
 	int i;
 
 	for (i = 1; i < argc; ++i) {
@@ -155,6 +156,10 @@ int main(int argc, char **argv)
 			listen_count = atoi(argv[++i]);
 			continue;
 		}
+		if (strcmp(argv[i], "--reliable") == 0) {
+			reliable = true;
+			continue;
+		}
 		if (strcmp(argv[i], "--no-dump") == 0) {
 			do_dump = false;
 			continue;
@@ -183,13 +188,18 @@ int main(int argc, char **argv)
 		unow_dump_state(stdout);
 	}
 	if (want_send) {
-		esp_err_t err = radio_espnow_send(dst_mac, payload, payload_len);
+		esp_err_t err;
 
+		if (reliable) {
+			err = radio_espnow_send_reliable(dst_mac, payload, payload_len);
+		} else {
+			err = radio_espnow_send(dst_mac, payload, payload_len);
+		}
 		if (err != ESP_OK) {
-			fprintf(stderr, "radio_espnow_send failed: %s\n", esp_err_to_name(err));
+			fprintf(stderr, "radio_espnow_send%s failed: %s\n", reliable ? "_reliable" : "", esp_err_to_name(err));
 			return 1;
 		}
-		fprintf(stdout, "sent %zu bytes\n", payload_len);
+		fprintf(stdout, "sent %zu bytes%s\n", payload_len, reliable ? " (reliable)" : "");
 	}
 	for (i = 0; i < listen_count; ++i) {
 		unow_diag_frame_t frame;

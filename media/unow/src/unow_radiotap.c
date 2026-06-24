@@ -23,7 +23,7 @@ static uint32_t unow_read_le32(const uint8_t *bytes)
 		((uint32_t)bytes[3] << 24);
 }
 
-size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps)
+size_t unow_build_action_frame_ex(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps, uint8_t subtype)
 {
 	struct unow_radiotap_tx_header *rt_header;
 	struct unow_dot11_mgmt_header *mgmt_header;
@@ -57,10 +57,15 @@ size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_
 	vendor_header = (struct unow_action_vendor_header *)(buffer + sizeof(*rt_header) + sizeof(*mgmt_header));
 	vendor_header->category = UNOW_VENDOR_CATEGORY;
 	memcpy(vendor_header->oui, k_unow_oui, sizeof(vendor_header->oui));
-	vendor_header->subtype = UNOW_VENDOR_SUBTYPE_DATA;
+	vendor_header->subtype = subtype;
 
 	memcpy(buffer + sizeof(*rt_header) + sizeof(*mgmt_header) + sizeof(*vendor_header), payload, payload_len);
 	return required_len;
+}
+
+size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps)
+{
+	return unow_build_action_frame_ex(buffer, buffer_size, src_mac, dst_mac, payload, payload_len, rate_500kbps, UNOW_VENDOR_SUBTYPE_DATA);
 }
 
 bool unow_radiotap_parse_dbm_signal(const uint8_t *packet, size_t packet_len, int8_t *out_rssi)
@@ -136,7 +141,9 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	if (memcmp(vendor_header->oui, k_unow_oui, sizeof(vendor_header->oui)) != 0) {
 		return false;
 	}
-	if (vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA) {
+	if (vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA &&
+	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_ACK &&
+	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA_SEQ) {
 		return false;
 	}
 	payload = packet + radiotap_len + sizeof(*mgmt_header) + sizeof(*vendor_header);
@@ -149,6 +156,7 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	memcpy(frame->dst_mac, mgmt_header->addr1, sizeof(frame->dst_mac));
 	memcpy(frame->payload, payload, payload_len);
 	frame->len = payload_len;
+	frame->subtype = vendor_header->subtype;
 	if (unow_radiotap_parse_dbm_signal(packet, packet_len, &rssi)) {
 		frame->rssi = rssi;
 	}

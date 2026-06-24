@@ -44,6 +44,11 @@ typedef struct {
 	uint32_t tx_queue_depth_peak;
 	uint32_t rx_queue_depth_peak;
 	uint8_t peer_known;
+	uint32_t tx_ack_ok;
+	uint32_t tx_ack_timeout;
+	uint32_t tx_retries;
+	uint32_t rx_ack_sent;
+	uint32_t rx_dedup_dropped;
 } radio_espnow_stats_t;
 
 esp_err_t unow_configure_iface(const char *iface);
@@ -53,6 +58,7 @@ void unow_deinit(void);
 
 esp_err_t radio_espnow_init(uint8_t node_id);
 esp_err_t radio_espnow_send(const uint8_t *dst_mac, const uint8_t *payload, size_t len);
+esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payload, size_t len);
 esp_err_t radio_espnow_add_peer(const uint8_t mac[6]);
 bool radio_espnow_peer_known(void);
 bool radio_espnow_get_peer_mac(uint8_t out_mac[6]);

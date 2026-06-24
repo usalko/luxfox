@@ -155,6 +155,41 @@ void unow_diag_dump_frame(FILE *stream, const unow_diag_frame_t *frame)
 	}
 }
 
+static bool unow_dedup_check_and_add(uint16_t seq)
+{
+	uint16_t i;
+	uint16_t n = g_unow.dedup_count;
+
+	for (i = 0; i < n; i++) {
+		uint16_t idx = (uint16_t)((g_unow.dedup_head + UNOW_DEDUP_WINDOW - 1U - i) % UNOW_DEDUP_WINDOW);
+
+		if (g_unow.dedup_ring[idx] == seq) {
+			return true;
+		}
+	}
+	g_unow.dedup_ring[g_unow.dedup_head] = seq;
+	g_unow.dedup_head = (uint16_t)((g_unow.dedup_head + 1U) % UNOW_DEDUP_WINDOW);
+	if (g_unow.dedup_count < UNOW_DEDUP_WINDOW) {
+		g_unow.dedup_count++;
+	}
+	return false;
+}
+
+static void unow_send_ack_frame(const uint8_t *dst_mac, uint16_t seq)
+{
+	uint8_t ack_pkt[sizeof(struct unow_radiotap_tx_header) + sizeof(struct unow_dot11_mgmt_header) + sizeof(struct unow_action_vendor_header) + 2U];
+	uint8_t seq_bytes[2];
+	size_t ack_len;
+
+	seq_bytes[0] = (uint8_t)(seq >> 8);
+	seq_bytes[1] = (uint8_t)(seq & 0xFFU);
+	ack_len = unow_build_action_frame_ex(ack_pkt, sizeof(ack_pkt), g_unow.iface.mac, dst_mac, seq_bytes, 2U, UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_ACK);
+	if (ack_len > 0U) {
+		pcap_inject(g_unow.pcap, ack_pkt, ack_len);
+		UNOW_LOGT("sent ack seq=%u", seq);
+	}
+}
+
 esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 {
 	int64_t deadline_ms;
@@ -179,6 +214,26 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 			if (memcmp(frame->src_mac, g_unow.iface.mac, sizeof(frame->src_mac)) == 0) {
 				UNOW_LOGT("dropping self-received frame on %s", g_unow.iface.name);
 				continue;
+			}
+			if (frame->subtype == UNOW_VENDOR_SUBTYPE_ACK) {
+				UNOW_LOGT("ignoring ack frame in recv path");
+				continue;
+			}
+			if (frame->subtype == UNOW_VENDOR_SUBTYPE_DATA_SEQ && frame->len >= 2U) {
+				uint16_t seq = ((uint16_t)frame->payload[0] << 8) | (uint16_t)frame->payload[1];
+
+				unow_send_ack_frame(frame->src_mac, seq);
+				pthread_mutex_lock(&g_unow.lock);
+				g_unow.stats.rx_ack_sent++;
+				if (unow_dedup_check_and_add(seq)) {
+					g_unow.stats.rx_dedup_dropped++;
+					pthread_mutex_unlock(&g_unow.lock);
+					UNOW_LOGT("dedup drop seq=%u", seq);
+					continue;
+				}
+				pthread_mutex_unlock(&g_unow.lock);
+				memmove(frame->payload, frame->payload + 2U, frame->len - 2U);
+				frame->len -= 2U;
 			}
 			pthread_mutex_lock(&g_unow.lock);
 			if (!g_unow.peer_known && memcmp(frame->src_mac, g_unow.iface.mac, sizeof(frame->src_mac)) != 0) {

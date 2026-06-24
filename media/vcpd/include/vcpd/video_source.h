@@ -33,6 +33,7 @@ typedef struct {
 	int height;
 	int fps;
 	bool running;
+	bool test_pattern;
 	void *mpp_ctx;
 } video_source_mpp_t;
 

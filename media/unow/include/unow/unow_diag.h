@@ -20,6 +20,7 @@ typedef struct {
 	uint8_t payload[ULAMA_ESPNOW_MAX_PAYLOAD];
 	size_t len;
 	int8_t rssi;
+	uint8_t subtype;
 } unow_diag_frame_t;
 
 void unow_diag_set_level(unow_log_level_t level);
