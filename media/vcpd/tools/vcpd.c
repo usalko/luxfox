@@ -121,6 +121,9 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 	return 0;
 }
 
+#define PARAM_NAL_MAX_SIZE 128
+#define PARAM_NAL_DUP_COUNT 3
+
 typedef struct {
 	video_source_t video;
 	lts_encoder_t lts_enc;
@@ -140,6 +143,9 @@ typedef struct {
 	char listen_addr[64];
 	char iface[32];
 	char dst_mac_str[32];
+	/* Cached HEVC parameter NALs: [0]=VPS(32), [1]=SPS(33), [2]=PPS(34) */
+	uint8_t cached_params[3][PARAM_NAL_MAX_SIZE];
+	size_t cached_params_len[3];
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -481,6 +487,40 @@ int main(int argc, char *argv[])
 				uint8_t *nal_data = nal_buf + sc1;
 				size_t nal_size = sc2 - sc1;
 
+				/* HEVC NAL type from first byte after start code */
+				uint8_t hevc_nal_type = (nal_data[sc1_len] >> 1) & 0x3f;
+
+				/* Cache VPS(32)/SPS(33)/PPS(34) */
+				if (hevc_nal_type >= 32 && hevc_nal_type <= 34 &&
+				    nal_size <= PARAM_NAL_MAX_SIZE) {
+					int idx = hevc_nal_type - 32;
+					memcpy(ctx.cached_params[idx], nal_data, nal_size);
+					ctx.cached_params_len[idx] = nal_size;
+				}
+
+				/* Before IDR(19,20): re-send VPS/SPS/PPS with duplication.
+				 * Each param NAL sent PARAM_NAL_DUP_COUNT times for
+				 * redundancy on lossy radio. At PER=50%, probability of
+				 * losing all 3 copies = 12.5% vs 50% for single send. */
+				if ((hevc_nal_type == 19 || hevc_nal_type == 20) &&
+				    ctx.cached_params_len[0] > 0) {
+					for (int dup = 0; dup < PARAM_NAL_DUP_COUNT; dup++) {
+						for (int p = 0; p < 3; p++) {
+							if (ctx.cached_params_len[p] == 0) continue;
+							lts_encoded_packet_t pp[4];
+							size_t np = lts_encoder_encode(&ctx.lts_enc,
+								ctx.cached_params[p], ctx.cached_params_len[p],
+								0, pp, 4);
+							for (size_t i = 0; i < np; i++)
+								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
+									send_ulama_video(&ctx, pp[i].data, pp[i].len);
+						}
+					}
+					if (ctx.verbose)
+						fprintf(stderr, "vcpd: sent VPS/SPS/PPS ×%d before IDR\n",
+							PARAM_NAL_DUP_COUNT);
+				}
+
 				lts_encoded_packet_t lts_pkts[64];
 				size_t max_pkts = nal_size / LTS_ENC_MAX_PAYLOAD + 2;
 				if (max_pkts > 64) max_pkts = 64;
@@ -493,7 +533,7 @@ int main(int argc, char *argv[])
 				}
 
 				if (ctx.verbose && npkts > 0)
-					fprintf(stderr, "vcpd: NAL %zu bytes → %zu LTS pkts\n", nal_size, npkts);
+					fprintf(stderr, "vcpd: NAL type=%u %zu bytes → %zu LTS pkts\n", hevc_nal_type, nal_size, npkts);
 
 				pos = sc2;
 			}
