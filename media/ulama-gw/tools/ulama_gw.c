@@ -97,6 +97,18 @@ typedef struct {
 } nal_assembler_t;
 
 typedef struct {
+	uint32_t nal_complete;
+	uint32_t nal_dropped;
+	uint32_t lts_rx;
+	uint32_t lts_gaps;
+	uint32_t ulama_rx_video;
+	uint32_t ulama_rx_telem;
+	uint32_t ulama_rx_ctrl;
+	uint64_t video_bytes_out;
+	uint64_t last_print_ms;
+} gw_stats_t;
+
+typedef struct {
 	gw_config_t gw;
 	char listen_addr[64];
 	char peer_addr[64];
@@ -113,6 +125,7 @@ typedef struct {
 	lts_decoder_t lts_dec;
 	uint16_t lts_video_src;
 	nal_assembler_t nal_asm;
+	gw_stats_t stats;
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -264,6 +277,8 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 		.payload_len = a->len,
 	};
 	send_cascade_frame(ctx, &cf);
+	ctx->stats.nal_complete++;
+	ctx->stats.video_bytes_out += a->len;
 
 	if (ctx->verbose)
 		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu\n",
@@ -276,6 +291,8 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 static void drop_nal(app_ctx_t *ctx, uint16_t expected, uint16_t got)
 {
 	nal_assembler_t *a = &ctx->nal_asm;
+	ctx->stats.nal_dropped++;
+	ctx->stats.lts_gaps++;
 	if (ctx->verbose)
 		fprintf(stderr, "gw: NAL DROPPED gap at seq expected=%u got=%u (had %zu bytes)\n",
 			expected, got, a->len);
@@ -365,6 +382,13 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	if (ctx->verbose) {
 		fprintf(stderr, "gw: ULAMA RX src=%u dst=%u class=%u flags=0x%02X payload=%zu\n",
 			uf.src_node, uf.dst_node, uf.traffic_class, uf.flags, uf.payload_len);
+	}
+
+	/* Per-class packet counters */
+	switch (uf.traffic_class) {
+	case ULAMA_CLASS_VIDEO:     ctx->stats.ulama_rx_video++; break;
+	case ULAMA_CLASS_TELEMETRY: ctx->stats.ulama_rx_telem++; break;
+	case ULAMA_CLASS_CTRL:      ctx->stats.ulama_rx_ctrl++; break;
 	}
 
 	uint16_t src_u16 = gw_addr_u8_to_u16(&ctx->gw, uf.src_node);
@@ -552,6 +576,19 @@ int main(int argc, char *argv[])
 
 		/* For UNOW: fd=-1, poll can't watch it; call recv with timeout=0 */
 		handle_ulama_rx(&ctx);
+
+		/* Print stats every 5 seconds */
+		if (ts - ctx.stats.last_print_ms >= 5000) {
+			gw_stats_t *s = &ctx.stats;
+			uint64_t dt = ts - s->last_print_ms;
+			uint32_t vbps = (uint32_t)(s->video_bytes_out * 8000 / (dt > 0 ? dt : 1));
+			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u | "
+				"NAL ok=%u drop=%u | video_out=%u Kbit/s\n",
+				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl,
+				s->nal_complete, s->nal_dropped, vbps / 1000);
+			memset(s, 0, sizeof(*s));
+			s->last_print_ms = ts;
+		}
 
 		frag_reassembly_expire(&ctx.reassembly, ts);
 
