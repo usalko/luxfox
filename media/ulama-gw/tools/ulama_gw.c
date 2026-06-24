@@ -303,11 +303,20 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 		 * If we are active, flush the complete NAL. */
 		if (pkt->flags & LTS_FLAG_LAST_OF_FRAME) {
 			if (a->active && a->len > 0) {
-				/* Append this last chunk */
+				/* Append this last chunk to multi-packet NAL */
 				if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
 					memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
 					a->len += pkt->payload_len;
 				}
+				flush_nal(ctx, src_u16);
+			} else if (!a->active && pkt->payload_len > 0) {
+				/* Single-packet NAL (VPS/SPS/PPS/short slice) —
+				 * complete NAL in one LTS packet */
+				memcpy(a->buf, pkt->payload, pkt->payload_len);
+				a->len = pkt->payload_len;
+				a->active = true;
+				a->first_seq = pkt->pkt_seq;
+				a->expect_seq = pkt->pkt_seq + 1;
 				flush_nal(ctx, src_u16);
 			} else {
 				/* Damaged NAL ended — just reset */
