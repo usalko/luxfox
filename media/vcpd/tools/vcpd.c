@@ -146,6 +146,8 @@ typedef struct {
 	/* Cached HEVC parameter NALs: [0]=VPS(32), [1]=SPS(33), [2]=PPS(34) */
 	uint8_t cached_params[3][PARAM_NAL_MAX_SIZE];
 	size_t cached_params_len[3];
+	lts_retx_buf_t *retx_buf;
+	uint32_t nack_retx_count;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -181,6 +183,20 @@ static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	}
 }
 
+static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
+{
+	for (int bit = 0; bit < 16; bit++) {
+		if (!(nack->bitmask & (1 << bit)))
+			continue;
+		uint16_t seq = nack->start_seq + (uint16_t)bit;
+		const lts_encoded_packet_t *pkt = lts_retx_buf_find(ctx->retx_buf, seq);
+		if (pkt) {
+			send_ulama_video(ctx, pkt->data, pkt->len);
+			ctx->nack_retx_count++;
+		}
+	}
+}
+
 static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 {
 	uint8_t buf[512];
@@ -194,6 +210,17 @@ static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 	ulama_frame_view_t uf;
 	if (!ulama_frame_unpack(buf, (size_t)n, &uf))
 		return;
+
+	if (lts_enc_is_nack(uf.payload, uf.payload_len)) {
+		lts_enc_nack_t nack;
+		if (lts_enc_decode_nack(uf.payload, uf.payload_len, &nack)) {
+			if (ctx->verbose)
+				fprintf(stderr, "vcpd: NACK rx start_seq=%u bitmask=0x%04x\n",
+					nack.start_seq, nack.bitmask);
+			handle_nack(ctx, &nack);
+		}
+		return;
+	}
 
 	if (!uvcp_is_control(uf.payload, uf.payload_len))
 		return;
@@ -335,6 +362,12 @@ int main(int argc, char *argv[])
 	}
 
 	lts_encoder_init(&ctx.lts_enc, ctx.stream_id);
+	ctx.retx_buf = (lts_retx_buf_t *)calloc(1, sizeof(lts_retx_buf_t));
+	if (!ctx.retx_buf) {
+		fprintf(stderr, "vcpd: failed to allocate retransmit buffer\n");
+		return 1;
+	}
+	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
 	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s)\n",
@@ -511,9 +544,11 @@ int main(int argc, char *argv[])
 							size_t np = lts_encoder_encode(&ctx.lts_enc,
 								ctx.cached_params[p], ctx.cached_params_len[p],
 								0, pp, 4);
-							for (size_t i = 0; i < np; i++)
+							for (size_t i = 0; i < np; i++) {
+								lts_retx_buf_store(ctx.retx_buf, &pp[i]);
 								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
 									send_ulama_video(&ctx, pp[i].data, pp[i].len);
+							}
 						}
 					}
 					if (ctx.verbose)
@@ -528,6 +563,7 @@ int main(int argc, char *argv[])
 								  0, lts_pkts, max_pkts);
 
 				for (size_t i = 0; i < npkts; i++) {
+					lts_retx_buf_store(ctx.retx_buf, &lts_pkts[i]);
 					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
 						send_ulama_video(&ctx, lts_pkts[i].data, lts_pkts[i].len);
 				}
@@ -588,10 +624,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	fprintf(stderr, "vcpd: shutting down\n");
+	fprintf(stderr, "vcpd: shutting down (nack_retx=%u)\n", ctx.nack_retx_count);
 	vsrc_stop(&ctx.video);
 	ulama_transport_tx_close(&ctx.ulama_tx);
 	ulama_transport_rx_close(&ctx.ulama_rx);
+	free(ctx.retx_buf);
 
 	return 0;
 }

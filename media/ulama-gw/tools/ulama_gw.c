@@ -104,6 +104,7 @@ typedef struct {
 	uint32_t ulama_rx_video;
 	uint32_t ulama_rx_telem;
 	uint32_t ulama_rx_ctrl;
+	uint32_t nack_sent;
 	uint64_t video_bytes_out;
 	uint64_t last_print_ms;
 } gw_stats_t;
@@ -124,6 +125,8 @@ typedef struct {
 	frag_reassembly_ctx_t reassembly;
 	lts_decoder_t lts_dec;
 	uint16_t lts_video_src;
+	uint8_t lts_video_src_node;
+	uint64_t last_nack_ms;
 	nal_assembler_t nal_asm;
 	gw_stats_t stats;
 } app_ctx_t;
@@ -362,6 +365,59 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 	}
 }
 
+#define NACK_MIN_INTERVAL_MS 20
+
+static void try_send_nack(app_ctx_t *ctx, uint64_t now)
+{
+	if (now - ctx->last_nack_ms < NACK_MIN_INTERVAL_MS)
+		return;
+
+	uint16_t gaps[16];
+	size_t ngaps = lts_decoder_detect_gaps(&ctx->lts_dec, gaps, 16);
+	if (ngaps == 0)
+		return;
+
+	lts_nack_t nack;
+	nack.stream_id = 0;
+	nack.start_seq = gaps[0];
+	nack.bitmask = 0;
+	for (size_t i = 0; i < ngaps; i++) {
+		uint16_t offset = gaps[i] - gaps[0];
+		if (offset < 16)
+			nack.bitmask |= (uint16_t)(1 << offset);
+	}
+
+	uint8_t nack_buf[LTS_NACK_SIZE];
+	size_t nack_len = lts_encode_nack(&nack, nack_buf, sizeof(nack_buf));
+	if (nack_len == 0)
+		return;
+
+	ulama_frame_view_t uf = {
+		.src_node = ctx->gw.node_id,
+		.dst_node = ctx->lts_video_src_node,
+		.flags = 0,
+		.traffic_class = ULAMA_CLASS_CTRL,
+		.seq = ctx->seq_counter++,
+		.frag_idx = 0,
+		.frag_total = 1,
+		.ttl = ULAMA_FRAME_DEFAULT_TTL,
+		.payload = nack_buf,
+		.payload_len = nack_len,
+	};
+
+	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+	size_t frame_len = 0;
+	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
+		ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+
+	ctx->last_nack_ms = now;
+	ctx->stats.nack_sent++;
+
+	if (ctx->verbose)
+		fprintf(stderr, "gw: NACK sent start_seq=%u bitmask=0x%04x (%zu gaps)\n",
+			nack.start_seq, nack.bitmask, ngaps);
+}
+
 static void handle_ulama_rx(app_ctx_t *ctx)
 {
 	uint8_t buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD + 64];
@@ -404,8 +460,11 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 				if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 					lts_packet_t pkt;
 					if (lts_decode_packet(reassembled, reassembled_len, &pkt)) {
-						lts_decoder_insert(&ctx->lts_dec, &pkt, now_ms());
+						uint64_t ts = now_ms();
+						ctx->lts_video_src_node = uf.src_node;
+						lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
 						emit_lts_to_cascade(ctx, src_u16);
+						try_send_nack(ctx, ts);
 					}
 				} else {
 					cascade_frame_view_t cf = {
@@ -426,8 +485,11 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 		lts_packet_t pkt;
 		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
-			lts_decoder_insert(&ctx->lts_dec, &pkt, now_ms());
+			uint64_t ts = now_ms();
+			ctx->lts_video_src_node = uf.src_node;
+			lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
 			emit_lts_to_cascade(ctx, src_u16);
+			try_send_nack(ctx, ts);
 		}
 		return;
 	}
@@ -583,9 +645,9 @@ int main(int argc, char *argv[])
 			uint64_t dt = ts - s->last_print_ms;
 			uint32_t vbps = (uint32_t)(s->video_bytes_out * 8000 / (dt > 0 ? dt : 1));
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u | "
-				"NAL ok=%u drop=%u | video_out=%u Kbit/s\n",
+				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl,
-				s->nal_complete, s->nal_dropped, vbps / 1000);
+				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}

@@ -57,3 +57,45 @@ size_t lts_encoder_encode(lts_encoder_t *enc, const uint8_t *payload, size_t pay
 
 	return count;
 }
+
+bool lts_enc_is_nack(const uint8_t *data, size_t len)
+{
+	return len >= 2 && data[0] == LTS_ENC_NACK_MAGIC0 && data[1] == LTS_ENC_NACK_MAGIC1;
+}
+
+bool lts_enc_decode_nack(const uint8_t *data, size_t len, lts_enc_nack_t *out)
+{
+	if (!data || !out || len < LTS_ENC_NACK_SIZE)
+		return false;
+	if (data[0] != LTS_ENC_NACK_MAGIC0 || data[1] != LTS_ENC_NACK_MAGIC1)
+		return false;
+
+	out->stream_id = data[2];
+	out->start_seq = ((uint16_t)data[3] << 8) | data[4];
+	out->bitmask = ((uint16_t)data[5] << 8) | data[6];
+	return true;
+}
+
+void lts_retx_buf_init(lts_retx_buf_t *buf)
+{
+	memset(buf, 0, sizeof(*buf));
+}
+
+void lts_retx_buf_store(lts_retx_buf_t *buf, const lts_encoded_packet_t *pkt)
+{
+	if (!buf || !pkt)
+		return;
+	int idx = pkt->pkt_seq % LTS_RETX_SLOTS;
+	buf->packets[idx] = *pkt;
+	buf->valid[idx] = true;
+}
+
+const lts_encoded_packet_t *lts_retx_buf_find(const lts_retx_buf_t *buf, uint16_t seq)
+{
+	if (!buf)
+		return NULL;
+	int idx = seq % LTS_RETX_SLOTS;
+	if (buf->valid[idx] && buf->packets[idx].pkt_seq == seq)
+		return &buf->packets[idx];
+	return NULL;
+}

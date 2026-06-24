@@ -239,6 +239,30 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 		return ret;
 	}
 
+	/* H.265 slice split: 4 slices per frame.
+	 * Each slice = separate NAL unit = smaller LTS group.
+	 * Loss of one slice causes a localized artifact, not a full frame drop.
+	 * CTU size is 64x64 for H.265. For height H: CTU_rows = ceil(H/64).
+	 * u32SplitSize = ceil(CTU_rows/4) gives ~4 slices. */
+	{
+		uint32_t ctu_rows = (ctx->actual_height + 63) / 64;
+		uint32_t rows_per_slice = (ctu_rows + 3) / 4;
+		if (rows_per_slice < 1) rows_per_slice = 1;
+
+		VENC_SLICE_SPLIT_S split;
+		memset(&split, 0, sizeof(split));
+		split.bSplitEnable = RK_TRUE;
+		split.u32SplitMode = 1;
+		split.u32SplitSize = rows_per_slice;
+
+		ret = RK_MPI_VENC_SetSliceSplit(VENC_CHN_ID, &split);
+		if (ret != RK_SUCCESS)
+			RK_LOGE("RK_MPI_VENC_SetSliceSplit failed %#X (non-fatal)", ret);
+		else
+			fprintf(stderr, "vcpd: H.265 slice split enabled: %u CTU rows/slice (~%u slices)\n",
+				rows_per_slice, (ctu_rows + rows_per_slice - 1) / rows_per_slice);
+	}
+
 	VENC_RECV_PIC_PARAM_S recv_param;
 	memset(&recv_param, 0, sizeof(recv_param));
 	recv_param.s32RecvPicNum = -1;

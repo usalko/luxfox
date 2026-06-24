@@ -41,3 +41,7 @@ __pycache__
 *.so
 ulamad
 .claude
+
+vcpd/vcpd
+ulama-gw/ulama-gw
+unow/unow_diag

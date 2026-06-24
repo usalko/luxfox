@@ -77,6 +77,14 @@ for dir in "$SCRIPT_DIR"/*/; do
 done
 
 ##############################################################################
+# Build host-side ulama_gw with UNOW support (requires libpcap-dev)
+##############################################################################
+if [ -f "$SCRIPT_DIR/ulama-gw/Makefile" ]; then
+    log_info "═══ ulama-gw (host-unow) ═══"
+    make -C "$SCRIPT_DIR/ulama-gw" host-unow || log_error "host-unow failed (libpcap-dev missing?)"
+fi
+
+##############################################################################
 # Update rootfs staging init scripts (generic: all scripts/S* from subprojects)
 ##############################################################################
 ROOTFS_STAGING="$OUTPUT_ROOT/rootfs_uclibc_rv1106"
