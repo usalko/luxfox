@@ -215,9 +215,9 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	VENC_CHN_ATTR_S chn_attr;
 	memset(&chn_attr, 0, sizeof(chn_attr));
 
-	chn_attr.stVencAttr.enType = RK_VIDEO_ID_AVC;
+	chn_attr.stVencAttr.enType = RK_VIDEO_ID_HEVC;
 	chn_attr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
-	chn_attr.stVencAttr.u32Profile = 100; /* High profile */
+	chn_attr.stVencAttr.u32Profile = 0;
 	chn_attr.stVencAttr.u32PicWidth = ctx->actual_width;
 	chn_attr.stVencAttr.u32PicHeight = ctx->actual_height;
 	chn_attr.stVencAttr.u32VirWidth = ctx->actual_width;
@@ -225,13 +225,13 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stVencAttr.u32StreamBufCnt = 4;
 	chn_attr.stVencAttr.u32BufSize = ctx->actual_width * ctx->actual_height / 2;
 
-	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
-	chn_attr.stRcAttr.stH264Cbr.u32Gop = 5;
-	chn_attr.stRcAttr.stH264Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
-	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateDen = 1;
-	chn_attr.stRcAttr.stH264Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
-	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
-	chn_attr.stRcAttr.stH264Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
+	chn_attr.stRcAttr.stH265Cbr.u32Gop = 5;
+	chn_attr.stRcAttr.stH265Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
 
 	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
 	if (ret != RK_SUCCESS) {
