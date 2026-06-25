@@ -15,8 +15,8 @@
 #define LTS_NACK_MAGIC1 0x4E
 #define LTS_NACK_SIZE   7
 
-#define LTS_REORDER_WINDOW 64
-#define LTS_EMIT_DEADLINE_MS 80
+#define LTS_REORDER_WINDOW 128
+#define LTS_EMIT_DEADLINE_MS 200
 
 typedef struct {
 	uint8_t stream_id;
