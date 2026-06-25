@@ -754,6 +754,12 @@ int main(int argc, char **argv)
 			goto keepalive;
 		}
 
+		/* LTS NACK from ulama-gw: magic 0x4C 0x4E ("LN"), not a CRSF frame */
+		if (view.payload_len >= 2 &&
+		    view.payload[0] == 0x4C && view.payload[1] == 0x4E) {
+			goto keepalive;
+		}
+
 		if (!ulama_crsf_parse_rc_channels_frame(view.payload, view.payload_len, &address, channels)) {
 			fprintf(stderr, "drop: invalid crsf payload len=%zu hex=", view.payload_len);
 			for (size_t di = 0; di < view.payload_len && di < 16; di++)

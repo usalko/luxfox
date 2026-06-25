@@ -109,6 +109,7 @@ typedef struct {
 	uint32_t ulama_rx_video;
 	uint32_t ulama_rx_telem;
 	uint32_t ulama_rx_ctrl;
+	uint32_t ctrl_tx;
 	uint32_t nack_sent;
 	uint64_t video_bytes_out;
 	uint64_t last_print_ms;
@@ -212,6 +213,9 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 
 	uint8_t ulama_class = gw_class_cascade_to_ulama(cf.traffic_class);
 	uint8_t dst_node = gw_addr_u16_to_u8(&ctx->gw, cf.dst);
+
+	if (ulama_class == ULAMA_CLASS_CTRL)
+		ctx->stats.ctrl_tx++;
 
 	if (cf.payload_len <= ULAMA_FRAME_MAX_PAYLOAD) {
 		ulama_frame_view_t uf = {
@@ -679,10 +683,10 @@ int main(int argc, char *argv[])
 				? (uint16_t)(s->lts_seq_max - s->lts_seq_min + 1) : 0;
 			uint32_t lost = (seq_range > s->lts_unique) ? seq_range - s->lts_unique : 0;
 			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
-			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u | "
+			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d\n",
-				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl,
+				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi);
 			memset(s, 0, sizeof(*s));
