@@ -124,19 +124,6 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 #define PARAM_NAL_MAX_SIZE 128
 #define PARAM_NAL_DUP_COUNT 3
 
-/* Delayed duplication: instead of sending two copies back-to-back
- * (which lose both to the same burst), we queue the duplicate and
- * send it DUP_DELAY packets later.  This spreads copies across time
- * so a short interference burst can only kill one copy. */
-#define DUP_RING_SIZE 32
-#define DUP_DELAY     8
-
-typedef struct {
-	uint8_t data[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
-	size_t len;
-	bool valid;
-} dup_slot_t;
-
 typedef struct {
 	video_source_t video;
 	lts_encoder_t lts_enc;
@@ -161,21 +148,10 @@ typedef struct {
 	size_t cached_params_len[3];
 	lts_retx_buf_t *retx_buf;
 	uint32_t nack_retx_count;
-	dup_slot_t dup_ring[DUP_RING_SIZE];
-	unsigned int dup_wr;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
 #define TX_FAIL_THRESHOLD 10
-
-static void send_raw_frame(vcpd_ctx_t *ctx, const uint8_t *frame, size_t len)
-{
-	int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame, len);
-	if (rc >= 0)
-		tx_fail_count = 0;
-	else
-		tx_fail_count++;
-}
 
 static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 {
@@ -194,26 +170,13 @@ static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
-	if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
-		return;
-
-	/* Send original immediately */
-	send_raw_frame(ctx, frame_buf, frame_len);
-
-	/* Emit delayed duplicate from DUP_DELAY packets ago */
-	unsigned int emit_idx = (ctx->dup_wr + DUP_RING_SIZE - DUP_DELAY) % DUP_RING_SIZE;
-	dup_slot_t *emit = &ctx->dup_ring[emit_idx];
-	if (emit->valid) {
-		send_raw_frame(ctx, emit->data, emit->len);
-		emit->valid = false;
+	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+		int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		if (rc >= 0)
+			tx_fail_count = 0;
+		else
+			tx_fail_count++;
 	}
-
-	/* Store current frame for future delayed send */
-	dup_slot_t *store = &ctx->dup_ring[ctx->dup_wr % DUP_RING_SIZE];
-	memcpy(store->data, frame_buf, frame_len);
-	store->len = frame_len;
-	store->valid = true;
-	ctx->dup_wr++;
 }
 
 static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
