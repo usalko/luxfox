@@ -755,7 +755,10 @@ int main(int argc, char **argv)
 		}
 
 		if (!ulama_crsf_parse_rc_channels_frame(view.payload, view.payload_len, &address, channels)) {
-			fprintf(stderr, "drop: invalid crsf payload len=%zu\n", view.payload_len);
+			fprintf(stderr, "drop: invalid crsf payload len=%zu hex=", view.payload_len);
+			for (size_t di = 0; di < view.payload_len && di < 16; di++)
+				fprintf(stderr, "%02x", view.payload[di]);
+			fprintf(stderr, "\n");
 			goto keepalive;
 		}
 		if (address != ULAMA_CRSF_ADDRESS_FLIGHT_CONTROLLER) {
