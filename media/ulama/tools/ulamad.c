@@ -21,7 +21,7 @@
 #include "ulama/ulama_frame.h"
 #include "ulama/ulama_version.h"
 
-#define MSP_POLL_INTERVAL_MS 200
+#define MSP_POLL_INTERVAL_MS 500
 #define MSP_POLL_CODES_COUNT 6
 static const uint16_t MSP_POLL_CODES[MSP_POLL_CODES_COUNT] = {
 	MSP_ATTITUDE, MSP_ALTITUDE, MSP_ANALOG, MSP_RAW_GPS, MSP_STATUS, MSP_BATTERY_STATE,
@@ -468,6 +468,7 @@ int main(int argc, char **argv)
 	bool has_msp = false;
 	uint16_t msp_poll_idx = 0;
 	uint16_t telem_seq = 0;
+	struct timespec last_telem_tx = {0, 0};
 
 	uint8_t last_crsf_frame[ULAMA_CRSF_RC_FRAME_SIZE];
 	size_t last_crsf_len = 0;
@@ -796,26 +797,32 @@ int main(int argc, char **argv)
 				msp_message_t msp_msg;
 				if (msp_parser_feed(&msp_parser, msp_byte, &msp_msg)) {
 					if (has_tx && msp_msg.direction == MSP_DIR_RESPONSE) {
-						uint8_t msp_wire[MSP_V2_OVERHEAD + MSP_MAX_PAYLOAD];
-						size_t wire_len = msp_v1_build_response(msp_msg.code, msp_msg.payload,
-								msp_msg.payload_len, msp_wire, sizeof(msp_wire));
-						if (wire_len > 0 && wire_len <= ULAMA_FRAME_MAX_PAYLOAD) {
-							ulama_frame_view_t tf = {
-								.src_node = cfg.node_id,
-								.dst_node = 0xFF,
-								.flags = ULAMA_FLAG_DUP_ALLOWED,
-								.traffic_class = ULAMA_CLASS_TELEMETRY,
-								.seq = telem_seq++,
-								.frag_idx = 0,
-								.frag_total = 1,
-								.ttl = ULAMA_FRAME_DEFAULT_TTL,
-								.payload = msp_wire,
-								.payload_len = wire_len,
-							};
-							uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
-							size_t telem_len = 0;
-							if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len))
-								ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+						struct timespec ts_telem;
+						clock_gettime(CLOCK_MONOTONIC, &ts_telem);
+						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= MSP_POLL_INTERVAL_MS * 1000000LL) {
+							uint8_t msp_wire[MSP_V2_OVERHEAD + MSP_MAX_PAYLOAD];
+							size_t wire_len = msp_v1_build_response(msp_msg.code, msp_msg.payload,
+									msp_msg.payload_len, msp_wire, sizeof(msp_wire));
+							if (wire_len > 0 && wire_len <= ULAMA_FRAME_MAX_PAYLOAD) {
+								ulama_frame_view_t tf = {
+									.src_node = cfg.node_id,
+									.dst_node = 0xFF,
+									.flags = ULAMA_FLAG_DUP_ALLOWED,
+									.traffic_class = ULAMA_CLASS_TELEMETRY,
+									.seq = telem_seq++,
+									.frag_idx = 0,
+									.frag_total = 1,
+									.ttl = ULAMA_FRAME_DEFAULT_TTL,
+									.payload = msp_wire,
+									.payload_len = wire_len,
+								};
+								uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+								size_t telem_len = 0;
+								if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len)) {
+									ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+									last_telem_tx = ts_telem;
+								}
+							}
 						}
 					}
 					if (cfg.verbose) {
@@ -828,22 +835,28 @@ int main(int argc, char **argv)
 				uint8_t crsf_len = 0;
 				if (crsf_telem_parser_feed(&crsf_telem_parser, msp_byte, crsf_frame, &crsf_len)) {
 					if (has_tx && crsf_len <= ULAMA_FRAME_MAX_PAYLOAD) {
-						ulama_frame_view_t tf = {
-							.src_node = cfg.node_id,
-							.dst_node = 0xFF,
-							.flags = ULAMA_FLAG_DUP_ALLOWED,
-							.traffic_class = ULAMA_CLASS_TELEMETRY,
-							.seq = telem_seq++,
-							.frag_idx = 0,
-							.frag_total = 1,
-							.ttl = ULAMA_FRAME_DEFAULT_TTL,
-							.payload = crsf_frame,
-							.payload_len = crsf_len,
-						};
-						uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
-						size_t telem_len = 0;
-						if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len))
-							ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+						struct timespec ts_telem;
+						clock_gettime(CLOCK_MONOTONIC, &ts_telem);
+						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= MSP_POLL_INTERVAL_MS * 1000000LL) {
+							ulama_frame_view_t tf = {
+								.src_node = cfg.node_id,
+								.dst_node = 0xFF,
+								.flags = ULAMA_FLAG_DUP_ALLOWED,
+								.traffic_class = ULAMA_CLASS_TELEMETRY,
+								.seq = telem_seq++,
+								.frag_idx = 0,
+								.frag_total = 1,
+								.ttl = ULAMA_FRAME_DEFAULT_TTL,
+								.payload = crsf_frame,
+								.payload_len = crsf_len,
+							};
+							uint8_t telem_frame[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+							size_t telem_len = 0;
+							if (ulama_frame_pack(&tf, telem_frame, sizeof(telem_frame), &telem_len)) {
+								ulama_transport_tx_send(&tx_transport, telem_frame, telem_len);
+								last_telem_tx = ts_telem;
+							}
+						}
 					}
 					if (cfg.verbose) {
 						fprintf(stderr, "[crsf-telem] type=0x%02x len=%u\n",
