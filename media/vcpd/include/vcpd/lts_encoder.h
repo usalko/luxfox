@@ -15,7 +15,7 @@
 #define LTS_ENC_NACK_MAGIC1 0x4E
 #define LTS_ENC_NACK_SIZE   7
 
-#define LTS_RETX_SLOTS 128
+#define LTS_RETX_SLOTS 512
 
 typedef struct {
 	uint8_t stream_id;

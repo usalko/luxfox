@@ -124,17 +124,22 @@ size_t lts_decoder_emit(lts_decoder_t *dec, lts_packet_t *out, size_t max_out, u
 		if (!lts_seq_lt(dec->next_emit, dec->last_received))
 			break;
 
+		/* If next_emit fell behind by more than window_size, its slot
+		 * has been overwritten by a newer packet.  Skip unconditionally
+		 * to avoid a permanent stall. */
+		uint16_t behind = dec->last_received - dec->next_emit;
+		if (behind >= (uint16_t)dec->window_size) {
+			dec->next_emit++;
+			continue;
+		}
+
 		bool deadline_expired = false;
-		if (slot->occupied && slot->pkt_seq != dec->next_emit) {
-			deadline_expired = (now_ms >= slot->deadline_ms);
-		} else {
-			for (uint16_t s = dec->next_emit; lts_seq_le(s, dec->last_received); s++) {
-				int si = slot_index(dec, s);
-				lts_reorder_slot_t *check = &dec->slots[si];
-				if (check->occupied && check->pkt_seq == s) {
-					deadline_expired = (now_ms >= check->deadline_ms);
-					break;
-				}
+		for (uint16_t s = dec->next_emit; lts_seq_le(s, dec->last_received); s++) {
+			int si = slot_index(dec, s);
+			lts_reorder_slot_t *check = &dec->slots[si];
+			if (check->occupied && check->pkt_seq == s) {
+				deadline_expired = (now_ms >= check->deadline_ms);
+				break;
 			}
 		}
 

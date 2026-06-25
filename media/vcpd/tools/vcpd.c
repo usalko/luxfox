@@ -193,61 +193,70 @@ static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
 		if (pkt) {
 			send_ulama_video(ctx, pkt->data, pkt->len);
 			ctx->nack_retx_count++;
+			if (ctx->verbose)
+				fprintf(stderr, "vcpd: RETX seq=%u (%zu bytes)\n", seq, pkt->len);
+		} else if (ctx->verbose) {
+			fprintf(stderr, "vcpd: RETX seq=%u MISS (cur=%u)\n", seq, ctx->lts_enc.next_seq);
 		}
 	}
 }
 
 static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 {
-	uint8_t buf[512];
-	uint8_t src_mac[6] = {0};
-	int8_t rssi = 0;
+	for (int drain = 0; drain < 128; drain++) {
+		uint8_t buf[512];
+		uint8_t src_mac[6] = {0};
+		int8_t rssi = 0;
 
-	ssize_t n = ulama_transport_rx_recv(&ctx->ulama_rx, buf, sizeof(buf), 0, src_mac, &rssi);
-	if (n <= 0)
-		return;
+		ssize_t n = ulama_transport_rx_recv(&ctx->ulama_rx, buf, sizeof(buf), 0, src_mac, &rssi);
+		if (n <= 0)
+			return;
 
-	ulama_frame_view_t uf;
-	if (!ulama_frame_unpack(buf, (size_t)n, &uf))
-		return;
+		ulama_frame_view_t uf;
+		if (!ulama_frame_unpack(buf, (size_t)n, &uf))
+			continue;
 
-	if (lts_enc_is_nack(uf.payload, uf.payload_len)) {
-		lts_enc_nack_t nack;
-		if (lts_enc_decode_nack(uf.payload, uf.payload_len, &nack)) {
-			if (ctx->verbose)
-				fprintf(stderr, "vcpd: NACK rx start_seq=%u bitmask=0x%04x\n",
-					nack.start_seq, nack.bitmask);
-			handle_nack(ctx, &nack);
+		/* Skip own packets (monitor mode captures outgoing frames too) */
+		if (uf.src_node == ctx->node_id)
+			continue;
+
+		if (lts_enc_is_nack(uf.payload, uf.payload_len)) {
+			lts_enc_nack_t nack;
+			if (lts_enc_decode_nack(uf.payload, uf.payload_len, &nack)) {
+				if (ctx->verbose)
+					fprintf(stderr, "vcpd: NACK rx start_seq=%u bitmask=0x%04x\n",
+						nack.start_seq, nack.bitmask);
+				handle_nack(ctx, &nack);
+			}
+			continue;
 		}
-		return;
-	}
 
-	if (!uvcp_is_control(uf.payload, uf.payload_len))
-		return;
+		if (!uvcp_is_control(uf.payload, uf.payload_len))
+			continue;
 
-	uvcp_message_t msg;
-	if (!uvcp_parse(uf.payload, uf.payload_len, &msg))
-		return;
+		uvcp_message_t msg;
+		if (!uvcp_parse(uf.payload, uf.payload_len, &msg))
+			continue;
 
-	if (ctx->verbose) {
-		fprintf(stderr, "vcpd: UVCP verb=%d from node %u\n", msg.verb, uf.src_node);
-	}
+		if (ctx->verbose)
+			fprintf(stderr, "vcpd: UVCP verb=%d from node %u\n", msg.verb, uf.src_node);
 
-	uvcp_state_t prev = ctx->uvcp_sess.state;
-	uvcp_session_handle(&ctx->uvcp_sess, &msg, now_ms());
+		uvcp_state_t prev = ctx->uvcp_sess.state;
+		uvcp_session_handle(&ctx->uvcp_sess, &msg, now_ms());
 
-	if (prev == UVCP_STATE_IDLE && ctx->uvcp_sess.state == UVCP_STATE_STREAMING) {
-		fprintf(stderr, "vcpd: stream started (READY from operator)\n");
-		if (!ctx->video.running)
-			vsrc_start(&ctx->video);
-	}
+		if (prev == UVCP_STATE_IDLE && ctx->uvcp_sess.state == UVCP_STATE_STREAMING) {
+			fprintf(stderr, "vcpd: stream started (READY from operator)\n");
+			if (!ctx->video.running)
+				vsrc_start(&ctx->video);
+		}
 
-	if (msg.verb == UVCP_VERB_PING) {
-		uint8_t pong_buf[64];
-		size_t pong_len = uvcp_build_pong(pong_buf, sizeof(pong_buf));
-		if (pong_len > 0) {
-			send_ulama_video(ctx, pong_buf, pong_len);
-			ctx->uvcp_sess.last_pong_ms = now_ms();
+		if (msg.verb == UVCP_VERB_PING) {
+			uint8_t pong_buf[64];
+			size_t pong_len = uvcp_build_pong(pong_buf, sizeof(pong_buf));
+			if (pong_len > 0) {
+				send_ulama_video(ctx, pong_buf, pong_len);
+				ctx->uvcp_sess.last_pong_ms = now_ms();
+			}
 		}
 	}
 }
@@ -412,6 +421,8 @@ int main(int argc, char *argv[])
 		}
 
 		if (pfds[0].revents & POLLIN)
+			handle_uvcp_rx(&ctx);
+		else if (ctx.ulama_rx.fd < 0)
 			handle_uvcp_rx(&ctx);
 
 		uint64_t ts = now_ms();

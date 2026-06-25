@@ -39,6 +39,8 @@ typedef struct {
 	size_t length;
 } mpp_v4l2_buffer_t;
 
+#define MAX_VENC_PACKS 8
+
 typedef struct {
 	video_source_mpp_t *src;
 
@@ -48,7 +50,7 @@ typedef struct {
 	uint32_t actual_height;
 
 	VENC_STREAM_S venc_stream;
-	VENC_PACK_S venc_pack;
+	VENC_PACK_S venc_packs[MAX_VENC_PACKS];
 
 	int pipe_wr;
 	pthread_t thread;
@@ -239,29 +241,9 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 		return ret;
 	}
 
-	/* H.265 slice split: 4 slices per frame.
-	 * Each slice = separate NAL unit = smaller LTS group.
-	 * Loss of one slice causes a localized artifact, not a full frame drop.
-	 * CTU size is 64x64 for H.265. For height H: CTU_rows = ceil(H/64).
-	 * u32SplitSize = ceil(CTU_rows/4) gives ~4 slices. */
-	{
-		uint32_t ctu_rows = (ctx->actual_height + 63) / 64;
-		uint32_t rows_per_slice = (ctu_rows + 3) / 4;
-		if (rows_per_slice < 1) rows_per_slice = 1;
-
-		VENC_SLICE_SPLIT_S split;
-		memset(&split, 0, sizeof(split));
-		split.bSplitEnable = RK_TRUE;
-		split.u32SplitMode = 1;
-		split.u32SplitSize = rows_per_slice;
-
-		ret = RK_MPI_VENC_SetSliceSplit(VENC_CHN_ID, &split);
-		if (ret != RK_SUCCESS)
-			RK_LOGE("RK_MPI_VENC_SetSliceSplit failed %#X (non-fatal)", ret);
-		else
-			fprintf(stderr, "vcpd: H.265 slice split enabled: %u CTU rows/slice (~%u slices)\n",
-				rows_per_slice, (ctu_rows + rows_per_slice - 1) / rows_per_slice);
-	}
+	/* Slice split disabled: RV1106 vepu540c triggers kernel panic
+	 * (NULL deref in vepu540c_h265_set_hw_address) when slice split
+	 * is enabled.  NACK retransmission handles reliability without it. */
 
 	VENC_RECV_PIC_PARAM_S recv_param;
 	memset(&recv_param, 0, sizeof(recv_param));
@@ -273,9 +255,9 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 		return ret;
 	}
 
-	memset(&ctx->venc_pack, 0, sizeof(ctx->venc_pack));
+	memset(ctx->venc_packs, 0, sizeof(ctx->venc_packs));
 	memset(&ctx->venc_stream, 0, sizeof(ctx->venc_stream));
-	ctx->venc_stream.pstPack = &ctx->venc_pack;
+	ctx->venc_stream.pstPack = ctx->venc_packs;
 
 	return RK_SUCCESS;
 }
@@ -399,13 +381,18 @@ static void *mpp_pattern_thread(void *arg)
 
 		ret = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame_info, 1000);
 		if (ret == RK_SUCCESS) {
-			ctx->venc_stream.pstPack = &ctx->venc_pack;
+			ctx->venc_stream.pstPack = ctx->venc_packs;
 			ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
 			if (ret == RK_SUCCESS) {
-				void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_pack.pMbBlk);
-				RK_U32 nal_len = ctx->venc_pack.u32Len;
-				if (nal_data && nal_len > 0)
-					write(ctx->pipe_wr, nal_data, nal_len);
+				RK_U32 npack = ctx->venc_stream.u32PackCount;
+				if (npack == 0) npack = 1;
+				if (npack > MAX_VENC_PACKS) npack = MAX_VENC_PACKS;
+				for (RK_U32 p = 0; p < npack; p++) {
+					void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
+					RK_U32 nal_len = ctx->venc_packs[p].u32Len;
+					if (nal_data && nal_len > 0)
+						write(ctx->pipe_wr, nal_data, nal_len);
+				}
 				RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
 			}
 		}
@@ -455,13 +442,18 @@ static void *mpp_capture_thread(void *arg)
 				RK_MPI_VDEC_ReleaseFrame(VDEC_CHN_ID, &decoded_frame);
 
 				if (ret == RK_SUCCESS) {
-					ctx->venc_stream.pstPack = &ctx->venc_pack;
+					ctx->venc_stream.pstPack = ctx->venc_packs;
 					ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
 					if (ret == RK_SUCCESS) {
-						void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_pack.pMbBlk);
-						RK_U32 nal_len = ctx->venc_pack.u32Len;
-						if (nal_data && nal_len > 0)
-							write(ctx->pipe_wr, nal_data, nal_len);
+						RK_U32 npack = ctx->venc_stream.u32PackCount;
+						if (npack == 0) npack = 1;
+						if (npack > MAX_VENC_PACKS) npack = MAX_VENC_PACKS;
+						for (RK_U32 p = 0; p < npack; p++) {
+							void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
+							RK_U32 nal_len = ctx->venc_packs[p].u32Len;
+							if (nal_data && nal_len > 0)
+								write(ctx->pipe_wr, nal_data, nal_len);
+						}
 						RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
 					}
 				}
@@ -488,10 +480,10 @@ int video_source_mpp_start(video_source_mpp_t *src)
 	if (!src->device[0])
 		strncpy(src->device, "/dev/video21", sizeof(src->device) - 1);
 	if (src->bitrate_kbps <= 0)
-		src->bitrate_kbps = 512;
-	if (src->width <= 0) src->width = 640;
-	if (src->height <= 0) src->height = 480;
-	if (src->fps <= 0) src->fps = 25;
+		src->bitrate_kbps = 256;
+	if (src->width <= 0) src->width = 480;
+	if (src->height <= 0) src->height = 320;
+	if (src->fps <= 0) src->fps = 15;
 
 	mpp_ctx_t *ctx = calloc(1, sizeof(mpp_ctx_t));
 	if (!ctx)
