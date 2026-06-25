@@ -458,6 +458,12 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	uint16_t src_u16 = gw_addr_u8_to_u16(&ctx->gw, uf.src_node);
 	uint8_t cascade_class = gw_class_ulama_to_cascade(uf.traffic_class);
 
+	/* ANNOUNCE payload over CTRL class → remap to MANAGEMENT for cascade-core */
+	if (uf.traffic_class == ULAMA_CLASS_CTRL && uf.payload_len > 9 &&
+	    memcmp(uf.payload, "ANNOUNCE:", 9) == 0) {
+		cascade_class = CASCADE_CLASS_MANAGEMENT;
+	}
+
 	if (uf.flags & ULAMA_FLAG_FRAGMENT) {
 		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, now_ms());
 		if (complete) {

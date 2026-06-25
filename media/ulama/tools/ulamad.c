@@ -727,6 +727,33 @@ int main(int argc, char **argv)
 		if (view.traffic_class != ULAMA_CLASS_CTRL) {
 			goto keepalive;
 		}
+
+		/* Handle DISCOVER broadcast: reply with ANNOUNCE */
+		if (view.payload_len == 8 && memcmp(view.payload, "DISCOVER", 8) == 0) {
+			if (has_tx) {
+				char announce[32];
+				int alen = snprintf(announce, sizeof(announce), "ANNOUNCE:C-%03d", cfg.node_id);
+				ulama_frame_view_t af = {
+					.src_node = cfg.node_id,
+					.dst_node = 0xFF,
+					.flags = ULAMA_FLAG_DUP_ALLOWED,
+					.traffic_class = ULAMA_CLASS_CTRL,
+					.seq = telem_seq++,
+					.frag_idx = 0,
+					.frag_total = 1,
+					.ttl = ULAMA_FRAME_DEFAULT_TTL,
+					.payload = (const uint8_t *)announce,
+					.payload_len = (size_t)alen,
+				};
+				uint8_t abuf[ULAMA_FRAME_HEADER_SIZE + 64];
+				size_t abuflen = 0;
+				if (ulama_frame_pack(&af, abuf, sizeof(abuf), &abuflen))
+					ulama_transport_tx_send(&tx_transport, abuf, abuflen);
+				fprintf(stderr, "[discover] replied: %s\n", announce);
+			}
+			goto keepalive;
+		}
+
 		if (!ulama_crsf_parse_rc_channels_frame(view.payload, view.payload_len, &address, channels)) {
 			fprintf(stderr, "drop: invalid crsf payload len=%zu\n", view.payload_len);
 			goto keepalive;
