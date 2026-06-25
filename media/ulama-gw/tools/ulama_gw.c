@@ -101,12 +101,19 @@ typedef struct {
 	uint32_t nal_dropped;
 	uint32_t lts_rx;
 	uint32_t lts_gaps;
+	uint32_t lts_unique;
+	uint32_t lts_dup;
+	uint16_t lts_seq_min;
+	uint16_t lts_seq_max;
+	bool lts_seq_valid;
 	uint32_t ulama_rx_video;
 	uint32_t ulama_rx_telem;
 	uint32_t ulama_rx_ctrl;
 	uint32_t nack_sent;
 	uint64_t video_bytes_out;
 	uint64_t last_print_ms;
+	int32_t rssi_sum;
+	uint32_t rssi_count;
 } gw_stats_t;
 
 typedef struct {
@@ -420,6 +427,7 @@ static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 
 static void handle_ulama_rx(app_ctx_t *ctx)
 {
+  for (int drain = 0; drain < 256; drain++) {
 	uint8_t buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD + 64];
 	uint8_t src_mac[6] = {0};
 	int8_t rssi = 0;
@@ -432,7 +440,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	if (!ulama_frame_unpack(buf, (size_t)n, &uf)) {
 		if (ctx->verbose)
 			fprintf(stderr, "gw: invalid ULAMA frame (%zd bytes)\n", n);
-		return;
+		continue;
 	}
 
 	if (ctx->verbose) {
@@ -479,7 +487,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 				}
 			}
 		}
-		return;
+		continue;
 	}
 
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
@@ -487,11 +495,27 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
 			uint64_t ts = now_ms();
 			ctx->lts_video_src_node = uf.src_node;
-			lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
+			ctx->stats.rssi_sum += rssi;
+			ctx->stats.rssi_count++;
+			bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
+			if (is_dup)
+				ctx->stats.lts_dup++;
+			else
+				ctx->stats.lts_unique++;
+			if (!ctx->stats.lts_seq_valid) {
+				ctx->stats.lts_seq_min = pkt.pkt_seq;
+				ctx->stats.lts_seq_max = pkt.pkt_seq;
+				ctx->stats.lts_seq_valid = true;
+			} else {
+				if (lts_seq_lt(pkt.pkt_seq, ctx->stats.lts_seq_min))
+					ctx->stats.lts_seq_min = pkt.pkt_seq;
+				if (lts_seq_lt(ctx->stats.lts_seq_max, pkt.pkt_seq))
+					ctx->stats.lts_seq_max = pkt.pkt_seq;
+			}
 			emit_lts_to_cascade(ctx, src_u16);
 			try_send_nack(ctx, ts);
 		}
-		return;
+		continue;
 	}
 
 	cascade_frame_view_t cf = {
@@ -503,6 +527,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 		.payload_len = uf.payload_len,
 	};
 	send_cascade_frame(ctx, &cf);
+  }
 }
 
 int main(int argc, char *argv[])
@@ -644,10 +669,16 @@ int main(int argc, char *argv[])
 			gw_stats_t *s = &ctx.stats;
 			uint64_t dt = ts - s->last_print_ms;
 			uint32_t vbps = (uint32_t)(s->video_bytes_out * 8000 / (dt > 0 ? dt : 1));
+			uint32_t seq_range = s->lts_seq_valid
+				? (uint16_t)(s->lts_seq_max - s->lts_seq_min + 1) : 0;
+			uint32_t lost = (seq_range > s->lts_unique) ? seq_range - s->lts_unique : 0;
+			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u | "
-				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s\n",
+				"LTS unique=%u dup=%u range=%u lost=%u | "
+				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl,
-				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000);
+				s->lts_unique, s->lts_dup, seq_range, lost,
+				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
