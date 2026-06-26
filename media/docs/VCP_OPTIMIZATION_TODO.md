@@ -227,7 +227,7 @@ Add configurable inter-packet delay:
   - Per second: 40 NALs * 1.8 ms = 72 ms total pacing overhead
   - Well within budget (25 ms per NAL at 40 NALs/s = 25 ms available)
 
-#### Task 1.4: Test matrix
+#### Task 1.4: Test matrix ✅ DONE
 
 Run the following test configurations and collect stats for 60 seconds each:
 
@@ -247,13 +247,20 @@ Run the following test configurations and collect stats for 60 seconds each:
 - video_out bitrate (must not decrease significantly)
 - Subjective video quality (visual artifacts)
 
-#### Task 1.5: Analyze results and tune
+#### Task 1.5: Analyze results and tune ✅ DONE
 
-Based on test matrix results:
-- If burst gaps dominate and pacing eliminates them — pacing is the fix
-- If single gaps dominate — radio-level reliability needed (Phase 2)
-- If NAL drops persist despite fewer LTS lost — NACK timing needs work (Phase 4)
-- Select optimal --pace-us value for default
+Results: pacing has minimal effect (~2.7 pp improvement at best).
+Losses are radio-level (50/50 burst/single), NOT TX queue overflow.
+NACK retransmissions arrive (~275/interval) but too late for NAL assembler.
+Decision: keep pace=300 as default, proceed to Phase 2 (reliable send).
+
+| pace-us | NAL drop% | LTS lost | burst | single | retx_ok |
+|---------|-----------|----------|-------|--------|---------|
+| 0       | 16.5%     | 29.8     | 24.9  | 19.3   | 272     |
+| 100     | 16.6%     | 35.7     | 25.5  | 19.4   | 268     |
+| 300     | 13.8%     | 25.0     | 21.8  | 16.6   | 275     |
+| 500     | 14.7%     | 28.1     | 21.2  | 20.3   | 281     |
+| 1000    | 16.4%     | 41.8     | 23.6  | 23.8   | 278     |
 
 ---
 
@@ -265,7 +272,7 @@ Based on test matrix results:
 **Prerequisite**: Phase 1 results showing that pacing alone doesn't eliminate
 losses (random single-packet losses remain).
 
-#### Task 2.1: Add transport-level reliable send option
+#### Task 2.1: Add transport-level reliable send option ✅ DONE (commit 5938534)
 
 **File**: `ulama/include/ulama/transport.h` and implementation
 
@@ -273,11 +280,11 @@ losses (random single-packet losses remain).
 - This must route through `radio_espnow_send_reliable()` instead of
   `radio_espnow_send()`
 
-#### Task 2.2: Selective reliable send in vcpd
+#### Task 2.2: Selective reliable send in vcpd ✅ DONE (commit 5938534)
 
 **File**: `vcpd/tools/vcpd.c`
 
-Three strategies to test (new CLI option `--reliable-mode`):
+Three strategies to test (new CLI option `--reliable`):
 
 - **Mode 0** (default): all unreliable (current behavior)
 - **Mode 1** (last-only): only LAST_OF_FRAME packet sent reliable
