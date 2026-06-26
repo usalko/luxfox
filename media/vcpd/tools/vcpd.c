@@ -78,7 +78,7 @@ static void usage(const char *prog)
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
-		"  --lts-mtu     N          LTS payload size in bytes              (default 1400)\n"
+		"  --lts-mtu     N          LTS payload size in bytes              (default 216)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -313,7 +313,7 @@ int main(int argc, char *argv[])
 	ctx.reliable_threshold = 3;
 	ctx.ack_timeout_us = 2000;
 	ctx.ack_max_retry = 2;
-	ctx.lts_mtu = 1400;
+	ctx.lts_mtu = 216;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;

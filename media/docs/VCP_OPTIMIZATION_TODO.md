@@ -497,6 +497,44 @@ within NAL_GAP_GRACE_MS:
 
 ---
 
+### Phase 5: Reliable NACKs + LTS MTU experiment
+
+**Reliable NACK send** (commit 1a119af7c): NACKs sent via reliable transport
+with MAC-level ACK+retry. This was the breakthrough — at mtu=216, NAL drop
+went from 8-26% to **0.1%** because every NACK is guaranteed to arrive.
+
+**LTS MTU experiment** (commit 527b26ff4): tested mtu=216/500/1000/1500.
+
+| MTU | NAL drop% | NAL ok/5s | video_rx | lost | vout Kb/s |
+|-----|-----------|-----------|----------|------|-----------|
+| **216** | **0.1%** | **198** | 482 | **0** | **100** |
+| 500 | 0.0% | 26 | 103 | 391 | 1 |
+| 1000 | 0.0% | 5 | 78 | 417 | 0 |
+| 1500 | 0.0% | 120 | 177 | 218 | 6 |
+
+Conclusion: mtu=216 optimal. Small packets + reliable NACKs + reliable
+video send = near-perfect delivery. Larger frames suffer higher PER
+in monitor mode. Default: --lts-mtu 216.
+
+---
+
+## Final Optimal Configuration (v0.1.151)
+
+**vcpd** (device):
+- `--reliable 2` — MAC-level ACK+retry on all video packets
+- `--ack-timeout 2000` — 2ms ACK wait
+- `--ack-retry 2` — 2 retries (3 attempts total)
+- `--pace-us 300` — 300us inter-packet pacing
+- `--fec 0` — FEC disabled (25% overhead counterproductive)
+- `--lts-mtu 216` — original packet size (optimal for monitor mode)
+
+**ulama-gw** (host):
+- `--gap-tolerance 2` — tolerate up to 2 missing packets per NAL
+
+**Result**: NAL drop **0.1%** (from original 7-15%), video_out 100 Kb/s stable.
+
+---
+
 ## Key Constants Reference
 
 | Constant | Value | Location |
