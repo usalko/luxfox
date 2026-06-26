@@ -460,7 +460,7 @@ static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
 	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
-		ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
 
 	ctx->last_nack_ms = now;
 	ctx->stats.nack_sent++;
