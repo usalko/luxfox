@@ -12,6 +12,7 @@
 #include <poll.h>
 
 #include "vcpd/lts_encoder.h"
+#include "vcpd/lts_fec_enc.h"
 #include "vcpd/uvcp.h"
 #include "vcpd/video_source.h"
 #include "ulama/ulama_frame.h"
@@ -76,6 +77,7 @@ static void usage(const char *prog)
 		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
+		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -166,6 +168,9 @@ typedef struct {
 	int reliable_threshold;
 	uint32_t ack_timeout_us;
 	uint32_t ack_max_retry;
+	int fec_group;
+	lts_fec_encoder_t fec_enc;
+	uint32_t fec_sent;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -338,6 +343,7 @@ int main(int argc, char *argv[])
 		{"reliable-threshold",   required_argument, NULL, 'Q'},
 		{"ack-timeout",          required_argument, NULL, 'K'},
 		{"ack-retry",            required_argument, NULL, 'Y'},
+		{"fec",                  required_argument, NULL, 'E'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -375,6 +381,7 @@ int main(int argc, char *argv[])
 		case 'Q': ctx.reliable_threshold = atoi(optarg); break;
 		case 'K': ctx.ack_timeout_us = (uint32_t)atoi(optarg); break;
 		case 'Y': ctx.ack_max_retry = (uint32_t)atoi(optarg); break;
+		case 'E': ctx.fec_group = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -419,6 +426,8 @@ int main(int argc, char *argv[])
 #endif
 
 	lts_encoder_init(&ctx.lts_enc, ctx.stream_id);
+	if (ctx.fec_group > 0)
+		lts_fec_encoder_init(&ctx.fec_enc, ctx.fec_group);
 	ctx.retx_buf = (lts_retx_buf_t *)calloc(1, sizeof(lts_retx_buf_t));
 	if (!ctx.retx_buf) {
 		fprintf(stderr, "vcpd: failed to allocate retransmit buffer\n");
@@ -427,11 +436,11 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry)\n",
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
 		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
 		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
-		ctx.ack_timeout_us, ctx.ack_max_retry);
+		ctx.ack_timeout_us, ctx.ack_max_retry, ctx.fec_group);
 
 	if (ctx.autostart) {
 		fprintf(stderr, "vcpd: autostart — starting video immediately\n");
@@ -635,6 +644,15 @@ int main(int argc, char *argv[])
 							(ctx.reliable_mode == 1 && i + 1 == npkts);
 						send_ulama_video_ex(&ctx, lts_pkts[i].data, lts_pkts[i].len, pkt_reliable);
 					}
+					if (ctx.fec_group > 0) {
+						lts_encoded_packet_t fec_pkt;
+						if (lts_fec_encoder_add(&ctx.fec_enc, &lts_pkts[i], &ctx.lts_enc, &fec_pkt)) {
+							lts_retx_buf_store(ctx.retx_buf, &fec_pkt);
+							if (fec_pkt.len <= ULAMA_FRAME_MAX_PAYLOAD)
+								send_ulama_video_ex(&ctx, fec_pkt.data, fec_pkt.len, use_reliable);
+							ctx.fec_sent++;
+						}
+					}
 					if (ctx.pace_us > 0 && i + 1 < npkts)
 						usleep(ctx.pace_us);
 				}
@@ -695,7 +713,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	fprintf(stderr, "vcpd: shutting down (nack_retx=%u retx_miss=%u)\n", ctx.nack_retx_count, ctx.nack_retx_miss);
+	fprintf(stderr, "vcpd: shutting down (nack_retx=%u retx_miss=%u fec_sent=%u)\n", ctx.nack_retx_count, ctx.nack_retx_miss, ctx.fec_sent);
 	vsrc_stop(&ctx.video);
 	ulama_transport_tx_close(&ctx.ulama_tx);
 	ulama_transport_rx_close(&ctx.ulama_rx);

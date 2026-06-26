@@ -17,6 +17,7 @@
 #include "ulama_gw/gateway.h"
 #include "ulama_gw/fragmentation.h"
 #include "ulama_gw/lts_decoder.h"
+#include "ulama_gw/lts_fec_dec.h"
 #include "ulama/ulama_frame.h"
 #include "ulama/transport.h"
 
@@ -122,6 +123,8 @@ typedef struct {
 	uint32_t burst_gaps;
 	uint32_t single_gaps;
 	uint32_t retx_arrived;
+	uint32_t fec_recovered;
+	uint32_t fec_unrecoverable;
 } gw_stats_t;
 
 typedef struct {
@@ -143,6 +146,7 @@ typedef struct {
 	uint8_t lts_video_src_node;
 	uint64_t last_nack_ms;
 	nal_assembler_t nal_asm;
+	lts_fec_decoder_t fec_dec;
 	gw_stats_t stats;
 } app_ctx_t;
 
@@ -531,13 +535,24 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			ctx->lts_video_src_node = uf.src_node;
 			ctx->stats.rssi_sum += rssi;
 			ctx->stats.rssi_count++;
-			bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
-			if (is_dup)
-				ctx->stats.lts_dup++;
-			else {
-				ctx->stats.lts_unique++;
-				if (pkt.flags & LTS_FLAG_RETX)
-					ctx->stats.retx_arrived++;
+
+			if (pkt.flags & LTS_FLAG_FEC) {
+				lts_packet_t recovered;
+				if (lts_fec_decoder_add_parity(&ctx->fec_dec, pkt.payload, pkt.payload_len, &recovered)) {
+					lts_decoder_insert(&ctx->lts_dec, &recovered, ts);
+					ctx->stats.fec_recovered++;
+				}
+				ctx->stats.fec_unrecoverable = ctx->fec_dec.unrecoverable;
+			} else {
+				bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
+				if (is_dup)
+					ctx->stats.lts_dup++;
+				else {
+					ctx->stats.lts_unique++;
+					if (pkt.flags & LTS_FLAG_RETX)
+						ctx->stats.retx_arrived++;
+				}
+				lts_fec_decoder_add_data(&ctx->fec_dec, &pkt, uf.payload, uf.payload_len);
 			}
 			if (!ctx->stats.lts_seq_valid) {
 				ctx->stats.lts_seq_min = pkt.pkt_seq;
@@ -667,6 +682,7 @@ int main(int argc, char *argv[])
 
 	frag_reassembly_init(&ctx.reassembly);
 	lts_decoder_init(&ctx.lts_dec, LTS_REORDER_WINDOW, LTS_EMIT_DEADLINE_MS);
+	lts_fec_decoder_init(&ctx.fec_dec);
 
 	fprintf(stderr, "ulama-gw: build=%s lts_max=%d started (node=%u, transport=%s)\n",
 		ULAMA_GW_BUILD_ID, LTS_MAX_PAYLOAD,
@@ -713,12 +729,13 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
-				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u\n",
+				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
 				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
-				s->burst_gaps, s->single_gaps, s->retx_arrived);
+				s->burst_gaps, s->single_gaps, s->retx_arrived,
+				s->fec_recovered, s->fec_unrecoverable);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
