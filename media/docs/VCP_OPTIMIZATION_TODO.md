@@ -342,7 +342,7 @@ retransmission, eliminating NACK round-trip latency entirely.
 solved by pacing + reliable send alone, or if reliable send adds too much
 latency.
 
-#### Task 3.1: Design FEC scheme
+#### Task 3.1: Design FEC scheme ✅ DONE
 
 **Parameters**:
 - Group size K (data packets per FEC group): 4-8
@@ -357,9 +357,9 @@ latency.
 
 **Bandwidth overhead**: K=4, R=1 -> 25% overhead; K=8, R=1 -> 12.5% overhead
 
-#### Task 3.2: Implement FEC encoder in vcpd
+#### Task 3.2: Implement FEC encoder in vcpd ✅ DONE (commit 8b21b5d)
 
-**New file**: `vcpd/src/lts_fec.c`
+**New file**: `vcpd/src/lts_fec_enc.c`
 
 ```
 lts_fec_encoder_t:
@@ -375,9 +375,9 @@ lts_fec_encoder_t:
 - When FEC encoder emits parity packet, send it via `send_ulama_video()`
 - New CLI option: `--fec K` (0=disabled, 4-8=group size)
 
-#### Task 3.3: Implement FEC decoder in ulama-gw
+#### Task 3.3: Implement FEC decoder in ulama-gw ✅ DONE (commit 8b21b5d)
 
-**New file**: `ulama-gw/src/lts_fec.c`
+**New file**: `ulama-gw/src/lts_fec_dec.c`
 
 ```
 lts_fec_decoder_t:
