@@ -65,6 +65,8 @@ static void usage(const char *prog)
 		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
 		"  --test-pattern           Use color bars instead of camera\n"
 		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
+		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 0)\n"
+		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -151,12 +153,14 @@ typedef struct {
 	uint32_t nack_retx_count;
 	uint32_t nack_retx_miss;
 	unsigned int pace_us;
+	int reliable_mode;
+	int reliable_threshold;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
 #define TX_FAIL_THRESHOLD 10
 
-static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
+static void send_ulama_video_ex(vcpd_ctx_t *ctx, const uint8_t *data, size_t len, bool reliable)
 {
 	ulama_frame_view_t uf = {
 		.src_node = ctx->node_id,
@@ -174,12 +178,21 @@ static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
 	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
-		int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		int rc;
+		if (reliable)
+			rc = ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
+		else
+			rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
 		if (rc >= 0)
 			tx_fail_count = 0;
 		else
 			tx_fail_count++;
 	}
+}
+
+static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+	send_ulama_video_ex(ctx, data, len, false);
 }
 
 static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
@@ -278,6 +291,8 @@ int main(int argc, char *argv[])
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
 	ctx.pace_us = 300;
+	ctx.reliable_mode = 0;
+	ctx.reliable_threshold = 3;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
@@ -305,8 +320,10 @@ int main(int argc, char *argv[])
 		{"test",         required_argument, NULL, 'T'},
 		{"test-pattern", no_argument,       NULL, 'P'},
 		{"test-frames",  required_argument, NULL, 'F'},
-		{"pace-us",      required_argument, NULL, 'Z'},
-		{"verbose",      no_argument,       NULL, 'v'},
+		{"pace-us",              required_argument, NULL, 'Z'},
+		{"reliable",             required_argument, NULL, 'R'},
+		{"reliable-threshold",   required_argument, NULL, 'Q'},
+		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
@@ -339,6 +356,8 @@ int main(int argc, char *argv[])
 		case 'P': ctx.video.test_pattern = true; break;
 		case 'F': ctx.test_frames = atoi(optarg); break;
 		case 'Z': ctx.pace_us = (unsigned int)atoi(optarg); break;
+		case 'R': ctx.reliable_mode = atoi(optarg); break;
+		case 'Q': ctx.reliable_threshold = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -386,9 +405,10 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us)\n",
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d)\n",
 		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
-		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk), ctx.pace_us);
+		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
+		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold);
 
 	if (ctx.autostart) {
 		fprintf(stderr, "vcpd: autostart — starting video immediately\n");
@@ -582,10 +602,16 @@ int main(int argc, char *argv[])
 				size_t npkts = lts_encoder_encode(&ctx.lts_enc, nal_data, nal_size,
 								  0, lts_pkts, max_pkts);
 
+				bool use_reliable = (ctx.reliable_mode == 2) ||
+					(ctx.reliable_mode == 3 && (int)npkts >= ctx.reliable_threshold);
+
 				for (size_t i = 0; i < npkts; i++) {
 					lts_retx_buf_store(ctx.retx_buf, &lts_pkts[i]);
-					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
-						send_ulama_video(&ctx, lts_pkts[i].data, lts_pkts[i].len);
+					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD) {
+						bool pkt_reliable = use_reliable ||
+							(ctx.reliable_mode == 1 && i + 1 == npkts);
+						send_ulama_video_ex(&ctx, lts_pkts[i].data, lts_pkts[i].len, pkt_reliable);
+					}
 					if (ctx.pace_us > 0 && i + 1 < npkts)
 						usleep(ctx.pace_us);
 				}

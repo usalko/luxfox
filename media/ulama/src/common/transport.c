@@ -192,6 +192,39 @@ ssize_t ulama_transport_tx_send(ulama_tx_transport_t *transport, const uint8_t *
 	}
 }
 
+ssize_t ulama_transport_tx_send_reliable(ulama_tx_transport_t *transport, const uint8_t *data, size_t len)
+{
+	if (transport == NULL || data == NULL || len == 0U) {
+		errno = EINVAL;
+		return -1;
+	}
+	switch (transport->kind) {
+	case ULAMA_TRANSPORT_KIND_UDP:
+		return sendto(transport->fd,
+			data,
+			len,
+			0,
+			(const struct sockaddr *)&transport->endpoint,
+			sizeof(transport->endpoint));
+	case ULAMA_TRANSPORT_KIND_UNOW: {
+		#if ULAMA_WITH_UNOW
+		esp_err_t err = radio_espnow_send_reliable(transport->has_dst_mac ? transport->dst_mac : NULL, data, len);
+		if (err != ESP_OK) {
+			errno = EIO;
+			return -1;
+		}
+		return (ssize_t)len;
+		#else
+		errno = ENOTSUP;
+		return -1;
+		#endif
+	}
+	default:
+		errno = EINVAL;
+		return -1;
+	}
+}
+
 void ulama_transport_tx_close(ulama_tx_transport_t *transport)
 {
 	if (transport == NULL) {

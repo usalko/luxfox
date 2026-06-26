@@ -35,6 +35,7 @@ bool ulama_transport_parse_mac(const char *text, uint8_t mac[6]);
 int ulama_transport_tx_init_udp(ulama_tx_transport_t *transport, const char *peer);
 int ulama_transport_tx_init_unow(ulama_tx_transport_t *transport, uint8_t node_id, const char *iface, const uint8_t *dst_mac);
 ssize_t ulama_transport_tx_send(ulama_tx_transport_t *transport, const uint8_t *data, size_t len);
+ssize_t ulama_transport_tx_send_reliable(ulama_tx_transport_t *transport, const uint8_t *data, size_t len);
 void ulama_transport_tx_close(ulama_tx_transport_t *transport);
 
 int ulama_transport_rx_init_udp(ulama_rx_transport_t *transport, const char *listen_addr);
