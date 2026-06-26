@@ -6,6 +6,7 @@ void lts_encoder_init(lts_encoder_t *enc, uint8_t stream_id)
 {
 	enc->stream_id = stream_id;
 	enc->next_seq = 0;
+	enc->max_payload = LTS_ENC_MAX_PAYLOAD;
 }
 
 size_t lts_encode_single(uint8_t stream_id, uint16_t pkt_seq, uint8_t flags,
@@ -36,10 +37,12 @@ size_t lts_encoder_encode(lts_encoder_t *enc, const uint8_t *payload, size_t pay
 	size_t offset = 0;
 	size_t count = 0;
 
+	size_t mtu = enc->max_payload > 0 ? enc->max_payload : LTS_ENC_MAX_PAYLOAD;
+
 	while (offset < payload_len && count < max_out) {
 		size_t chunk = payload_len - offset;
-		if (chunk > LTS_ENC_MAX_PAYLOAD)
-			chunk = LTS_ENC_MAX_PAYLOAD;
+		if (chunk > mtu)
+			chunk = mtu;
 
 		uint8_t pkt_flags = flags;
 		if (offset + chunk >= payload_len)

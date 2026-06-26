@@ -78,6 +78,7 @@ static void usage(const char *prog)
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
+		"  --lts-mtu     N          LTS payload size in bytes              (default 1400)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -171,6 +172,7 @@ typedef struct {
 	int fec_group;
 	lts_fec_encoder_t fec_enc;
 	uint32_t fec_sent;
+	int lts_mtu;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -311,6 +313,7 @@ int main(int argc, char *argv[])
 	ctx.reliable_threshold = 3;
 	ctx.ack_timeout_us = 2000;
 	ctx.ack_max_retry = 2;
+	ctx.lts_mtu = 1400;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
@@ -344,6 +347,7 @@ int main(int argc, char *argv[])
 		{"ack-timeout",          required_argument, NULL, 'K'},
 		{"ack-retry",            required_argument, NULL, 'Y'},
 		{"fec",                  required_argument, NULL, 'E'},
+		{"lts-mtu",              required_argument, NULL, 'M'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -382,6 +386,7 @@ int main(int argc, char *argv[])
 		case 'K': ctx.ack_timeout_us = (uint32_t)atoi(optarg); break;
 		case 'Y': ctx.ack_max_retry = (uint32_t)atoi(optarg); break;
 		case 'E': ctx.fec_group = atoi(optarg); break;
+		case 'M': ctx.lts_mtu = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -426,6 +431,8 @@ int main(int argc, char *argv[])
 #endif
 
 	lts_encoder_init(&ctx.lts_enc, ctx.stream_id);
+	if (ctx.lts_mtu > 0 && ctx.lts_mtu <= LTS_ENC_MAX_PAYLOAD)
+		ctx.lts_enc.max_payload = (size_t)ctx.lts_mtu;
 	if (ctx.fec_group > 0)
 		lts_fec_encoder_init(&ctx.fec_enc, ctx.fec_group);
 	ctx.retx_buf = (lts_retx_buf_t *)calloc(1, sizeof(lts_retx_buf_t));
@@ -436,8 +443,8 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
-		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%zu started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
+		VCPD_BUILD_ID, ctx.lts_enc.max_payload,
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
 		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
 		ctx.ack_timeout_us, ctx.ack_max_retry, ctx.fec_group);

@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define LTS_HEADER_SIZE 4
-#define LTS_MAX_PAYLOAD 216
+#define LTS_MAX_PAYLOAD 1482
 
 #define LTS_FLAG_LAST_OF_FRAME (1 << 0)
 #define LTS_FLAG_KEYFRAME      (1 << 1)

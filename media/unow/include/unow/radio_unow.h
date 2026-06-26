@@ -6,7 +6,7 @@
 
 #include "esp_err.h"
 
-#define ULAMA_ESPNOW_MAX_PAYLOAD 240
+#define ULAMA_ESPNOW_MAX_PAYLOAD 1500
 
 typedef struct {
 	uint8_t src_mac[6];
