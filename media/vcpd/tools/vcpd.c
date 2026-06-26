@@ -447,7 +447,9 @@ int main(int argc, char *argv[])
 		ctx.uvcp_sess.state = UVCP_STATE_STREAMING;
 		ctx.uvcp_sess.last_ready_ms = now_ms();
 		ctx.uvcp_sess.lease_ms = UINT64_MAX / 2;
-		vsrc_start(&ctx.video);
+		int vrc = vsrc_start(&ctx.video);
+		fprintf(stderr, "vcpd: vsrc_start returned %d, pipe_fd=%d, running=%d\n",
+			vrc, ctx.video.pipe_fd, ctx.video.running);
 	}
 
 	uint8_t ts_buf[VIDEO_TS_GROUP_BYTES];
@@ -457,6 +459,11 @@ int main(int argc, char *argv[])
 	uint8_t *nal_buf = malloc(64 * 1024);
 	size_t nal_len = 0;
 	const size_t nal_buf_cap = 64 * 1024;
+
+	uint64_t diag_last_ms = now_ms();
+	uint32_t diag_polls = 0;
+	uint32_t diag_poll_video = 0;
+	uint32_t diag_video_reads = 0;
 
 	while (g_running) {
 		struct pollfd pfds[2];
@@ -473,6 +480,18 @@ int main(int argc, char *argv[])
 		}
 
 		int ret = poll(pfds, (nfds_t)nfds, 100);
+		diag_polls++;
+
+		uint64_t diag_now = now_ms();
+		if (diag_now - diag_last_ms >= 5000) {
+			fprintf(stderr, "vcpd: [diag] polls=%u nfds=%d video_polled=%u video_reads=%u running=%d pipe_fd=%d\n",
+				diag_polls, nfds, diag_poll_video, diag_video_reads,
+				ctx.video.running, ctx.video.pipe_fd);
+			diag_polls = 0;
+			diag_poll_video = 0;
+			diag_video_reads = 0;
+			diag_last_ms = diag_now;
+		}
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -493,7 +512,9 @@ int main(int argc, char *argv[])
 		}
 
 		if (nfds > 1 && (pfds[1].revents & (POLLIN | POLLERR | POLLHUP)) && ctx.video.running) {
+			diag_poll_video++;
 			ssize_t n = vsrc_read(&ctx.video, ts_buf, sizeof(ts_buf));
+			if (n > 0) diag_video_reads++;
 			if (n <= 0) {
 				if (n == 0 || errno == ENODEV || errno == EIO) {
 					fprintf(stderr, "vcpd: video source lost (%s), entering recovery\n",

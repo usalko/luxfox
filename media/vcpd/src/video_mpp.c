@@ -363,6 +363,8 @@ static void *mpp_pattern_thread(void *arg)
 		MB_BLK mb_blk = RK_NULL;
 		RK_S32 ret = RK_MPI_SYS_MmzAlloc(&mb_blk, NULL, NULL, y_size + uv_size);
 		if (ret != RK_SUCCESS || !mb_blk) {
+			if (frame_num == 0)
+				fprintf(stderr, "vcpd: [mpp] MmzAlloc failed ret=%#X\n", ret);
 			usleep(10000);
 			continue;
 		}
@@ -380,25 +382,36 @@ static void *mpp_pattern_thread(void *arg)
 		frame_info.stVFrame.pMbBlk = mb_blk;
 
 		ret = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame_info, 1000);
+		if (ret != RK_SUCCESS) {
+			if (frame_num == 0)
+				fprintf(stderr, "vcpd: [mpp] VENC_SendFrame failed ret=%#X frame=%d\n", ret, frame_num);
+			RK_MPI_MB_ReleaseMB(mb_blk);
+			usleep(interval_us);
+			frame_num++;
+			continue;
+		}
+
+		ctx->venc_stream.pstPack = ctx->venc_packs;
+		ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
 		if (ret == RK_SUCCESS) {
-			ctx->venc_stream.pstPack = ctx->venc_packs;
-			ret = RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 1000);
-			if (ret == RK_SUCCESS) {
-				RK_U32 npack = ctx->venc_stream.u32PackCount;
-				if (npack == 0) npack = 1;
-				if (npack > MAX_VENC_PACKS) npack = MAX_VENC_PACKS;
-				for (RK_U32 p = 0; p < npack; p++) {
-					void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
-					RK_U32 nal_len = ctx->venc_packs[p].u32Len;
-					if (nal_data && nal_len > 0)
-						write(ctx->pipe_wr, nal_data, nal_len);
-				}
-				RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
+			RK_U32 npack = ctx->venc_stream.u32PackCount;
+			if (npack == 0) npack = 1;
+			if (npack > MAX_VENC_PACKS) npack = MAX_VENC_PACKS;
+			for (RK_U32 p = 0; p < npack; p++) {
+				void *nal_data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
+				RK_U32 nal_len = ctx->venc_packs[p].u32Len;
+				if (nal_data && nal_len > 0)
+					write(ctx->pipe_wr, nal_data, nal_len);
 			}
+			RK_MPI_VENC_ReleaseStream(VENC_CHN_ID, &ctx->venc_stream);
+		} else if (frame_num == 0) {
+			fprintf(stderr, "vcpd: [mpp] VENC_GetStream failed ret=%#X\n", ret);
 		}
 
 		RK_MPI_MB_ReleaseMB(mb_blk);
 		frame_num++;
+		if (frame_num == 1)
+			fprintf(stderr, "vcpd: [mpp] first frame encoded OK\n");
 		usleep(interval_us);
 	}
 
