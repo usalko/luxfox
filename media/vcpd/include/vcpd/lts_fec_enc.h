@@ -7,12 +7,14 @@
 #include "vcpd/lts_encoder.h"
 
 #define LTS_FEC_MAX_GROUP 8
-#define LTS_FEC_HEADER_SIZE 3
 #define LTS_ENC_FLAG_FEC (1 << 3)
+#define LTS_FEC_HEADER_SIZE 4
+#define LTS_FEC_MAX_XOR (LTS_ENC_MAX_PAYLOAD - LTS_FEC_HEADER_SIZE)
 
 typedef struct {
-	uint8_t xor_buf[LTS_ENC_HEADER_SIZE + LTS_ENC_MAX_PAYLOAD];
+	uint8_t xor_buf[LTS_FEC_MAX_XOR];
 	size_t max_len;
+	uint8_t flags_xor;
 	uint16_t group_start_seq;
 	int count;
 	int group_size;

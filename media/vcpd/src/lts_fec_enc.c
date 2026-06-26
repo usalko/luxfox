@@ -13,43 +13,54 @@ bool lts_fec_encoder_add(lts_fec_encoder_t *fec, const lts_encoded_packet_t *pkt
 {
 	if (!fec || !pkt || !enc || !fec_out || fec->group_size < 2)
 		return false;
+	if (pkt->len <= LTS_ENC_HEADER_SIZE)
+		return false;
+
+	const uint8_t *payload = pkt->data + LTS_ENC_HEADER_SIZE;
+	size_t payload_len = pkt->len - LTS_ENC_HEADER_SIZE;
+	if (payload_len > LTS_FEC_MAX_XOR)
+		payload_len = LTS_FEC_MAX_XOR;
+
+	uint8_t flags = pkt->data[3];
 
 	if (fec->count == 0) {
 		fec->group_start_seq = pkt->pkt_seq;
-		memcpy(fec->xor_buf, pkt->data, pkt->len);
-		fec->max_len = pkt->len;
+		memcpy(fec->xor_buf, payload, payload_len);
+		fec->max_len = payload_len;
+		fec->flags_xor = flags;
 	} else {
-		size_t xor_len = pkt->len > fec->max_len ? pkt->len : fec->max_len;
+		size_t xor_len = payload_len > fec->max_len ? payload_len : fec->max_len;
 		for (size_t i = 0; i < xor_len; i++) {
 			uint8_t a = (i < fec->max_len) ? fec->xor_buf[i] : 0;
-			uint8_t b = (i < pkt->len) ? pkt->data[i] : 0;
+			uint8_t b = (i < payload_len) ? payload[i] : 0;
 			fec->xor_buf[i] = a ^ b;
 		}
 		fec->max_len = xor_len;
+		fec->flags_xor ^= flags;
 	}
 	fec->count++;
 
 	if (fec->count < fec->group_size)
 		return false;
 
-	uint8_t payload[LTS_FEC_HEADER_SIZE + LTS_ENC_HEADER_SIZE + LTS_ENC_MAX_PAYLOAD];
-	payload[0] = (uint8_t)(fec->group_start_seq >> 8);
-	payload[1] = (uint8_t)(fec->group_start_seq & 0xFF);
-	payload[2] = (uint8_t)fec->count;
-	memcpy(payload + LTS_FEC_HEADER_SIZE, fec->xor_buf, fec->max_len);
+	uint8_t fec_payload[LTS_ENC_MAX_PAYLOAD];
+	fec_payload[0] = (uint8_t)(fec->group_start_seq >> 8);
+	fec_payload[1] = (uint8_t)(fec->group_start_seq & 0xFF);
+	fec_payload[2] = (uint8_t)fec->count;
+	fec_payload[3] = fec->flags_xor;
+	memcpy(fec_payload + LTS_FEC_HEADER_SIZE, fec->xor_buf, fec->max_len);
 
 	size_t total = LTS_FEC_HEADER_SIZE + fec->max_len;
-	if (total > LTS_ENC_MAX_PAYLOAD)
-		total = LTS_ENC_MAX_PAYLOAD;
 
 	uint16_t fec_seq = enc->next_seq++;
 	fec_out->pkt_seq = fec_seq;
 	fec_out->len = lts_encode_single(enc->stream_id, fec_seq, LTS_ENC_FLAG_FEC,
-					 payload, total,
+					 fec_payload, total,
 					 fec_out->data, sizeof(fec_out->data));
 
 	fec->count = 0;
 	fec->max_len = 0;
+	fec->flags_xor = 0;
 
 	return fec_out->len > 0;
 }

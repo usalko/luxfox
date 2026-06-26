@@ -539,7 +539,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			if (pkt.flags & LTS_FLAG_FEC) {
 				lts_packet_t recovered;
 				uint32_t unrec_before = ctx->fec_dec.unrecoverable;
-				if (lts_fec_decoder_add_parity(&ctx->fec_dec, pkt.payload, pkt.payload_len, &recovered)) {
+				if (lts_fec_decoder_add_parity(&ctx->fec_dec, pkt.stream_id,
+							       pkt.payload, pkt.payload_len, &recovered)) {
 					lts_decoder_insert(&ctx->lts_dec, &recovered, ts);
 					ctx->stats.fec_recovered++;
 				}
@@ -554,7 +555,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 					if (pkt.flags & LTS_FLAG_RETX)
 						ctx->stats.retx_arrived++;
 				}
-				lts_fec_decoder_add_data(&ctx->fec_dec, pkt.pkt_seq, uf.payload, uf.payload_len);
+				lts_fec_decoder_add_data(&ctx->fec_dec, pkt.pkt_seq, pkt.flags,
+							 pkt.payload, pkt.payload_len);
 			}
 			if (!ctx->stats.lts_seq_valid) {
 				ctx->stats.lts_seq_min = pkt.pkt_seq;
