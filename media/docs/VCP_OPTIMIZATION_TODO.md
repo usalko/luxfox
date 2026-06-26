@@ -419,6 +419,15 @@ than losing the entire frame.
 
 #### Task 4.1: Add gap tolerance to NAL assembler ✅ DONE (commit 40ad659)
 
+**Test results (Task 4.4):**
+
+| Config | NAL drop% | vout Kb/s | gap_skip |
+|--------|-----------|-----------|----------|
+| gap_tol=0 reliable=2 | 26.4% | 87 | 0 |
+| **gap_tol=2 reliable=2** | **8.0%** | **116** | 13.4 |
+
+Gap tolerance reduces NAL drop by 3.3x. Best overall result: 8.0% drop.
+
 **File**: `ulama-gw/tools/ulama_gw.c`, function `emit_lts_to_cascade()`
 
 Current behavior (line 328-330):
