@@ -297,15 +297,25 @@ Three strategies to test (new CLI option `--reliable`):
 - **Mode 3** (adaptive): reliable for NALs > N packets, unreliable for small
   - Threshold: `--reliable-threshold N` (default 3)
 
-#### Task 2.3: Tune UNOW ACK parameters
+#### Task 2.3: Tune UNOW ACK parameters ✅ DONE (commit dbff73e)
 
-**File**: `unow/src/unow_internal.h`
+**File**: `unow/src/unow_internal.h`, `unow/src/unow.c`, `unow/include/unow/radio_unow.h`
 
-Current values may be suboptimal for video:
-- UNOW_ACK_TIMEOUT_US=3000 (3 ms) — may be too long; try 1500 us
-- UNOW_ACK_MAX_RETRY=3 — try reducing to 1-2 for video (latency vs reliability)
+Added `unow_set_ack_params()` API. Runtime-configurable via vcpd CLI:
+- `--ack-timeout 1500` (default, was 3000)
+- `--ack-retry 1` (default, was 3)
+Worst-case per-packet time: 3 ms (was 12 ms).
 
-Add CLI passthrough or compile-time config for these values.
+Phase 2 test results (before ACK tuning):
+| Mode | NAL drop% | video_rx/5s | video_out |
+|------|-----------|-------------|-----------|
+| reliable=0 | 13.6% | 1379 | 266 Kb/s |
+| reliable=1 | 25.0% | 1179 | 169 Kb/s |
+| reliable=2 | 3.2% | 458 | 89 Kb/s |
+| reliable=3 | 4.2% | 465 | 87 Kb/s |
+
+Conclusion: reliable=2/3 cuts drops to 3-4% but kills throughput 3x.
+ACK tuning (1500us/1 retry) should recover throughput while keeping low drop.
 
 #### Task 2.4: Test and measure
 
