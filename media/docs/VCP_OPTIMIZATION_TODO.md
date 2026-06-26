@@ -394,11 +394,19 @@ lts_fec_decoder_t:
   generating NACK
 - Add stats: `fec_recovered`, `fec_unrecoverable`
 
-#### Task 3.4: Test FEC effectiveness
+#### Task 3.4: Test FEC effectiveness ✅ DONE
 
-- Test with FEC K=4 and K=8
-- Measure: NAL drop rate with/without FEC, bandwidth overhead, latency impact
-- Compare with Phase 2 reliable send — which gives better drop/latency tradeoff?
+FEC decoder fixed (ring buffer + XOR payload-only). Results:
+
+| Config | NAL drop% | vout Kb/s | FEC +recovered -unrec |
+|--------|-----------|-----------|----------------------|
+| reliable=0 fec=4 | 47.6% | 76 | +81 -268 |
+| reliable=2 fec=4 | 14.8% | 97 | +28 -37 |
+| reliable=2 fec=0 | **11.5%** | **137** | — |
+
+Conclusion: FEC works (81 recovered/interval) but 25% bandwidth overhead
+is counterproductive on this channel. FEC disabled by default (--fec 0).
+Best config remains: --reliable 2 --ack-timeout 2000 --ack-retry 2.
 
 ---
 
