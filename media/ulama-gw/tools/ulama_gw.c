@@ -538,11 +538,13 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 
 			if (pkt.flags & LTS_FLAG_FEC) {
 				lts_packet_t recovered;
+				uint32_t unrec_before = ctx->fec_dec.unrecoverable;
 				if (lts_fec_decoder_add_parity(&ctx->fec_dec, pkt.payload, pkt.payload_len, &recovered)) {
 					lts_decoder_insert(&ctx->lts_dec, &recovered, ts);
 					ctx->stats.fec_recovered++;
 				}
-				ctx->stats.fec_unrecoverable = ctx->fec_dec.unrecoverable;
+				if (ctx->fec_dec.unrecoverable > unrec_before)
+					ctx->stats.fec_unrecoverable += ctx->fec_dec.unrecoverable - unrec_before;
 			} else {
 				bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
 				if (is_dup)
@@ -552,7 +554,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 					if (pkt.flags & LTS_FLAG_RETX)
 						ctx->stats.retx_arrived++;
 				}
-				lts_fec_decoder_add_data(&ctx->fec_dec, &pkt, uf.payload, uf.payload_len);
+				lts_fec_decoder_add_data(&ctx->fec_dec, pkt.pkt_seq, uf.payload, uf.payload_len);
 			}
 			if (!ctx->stats.lts_seq_valid) {
 				ctx->stats.lts_seq_min = pkt.pkt_seq;
