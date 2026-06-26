@@ -10,6 +10,8 @@ unow_context_t g_unow = {
 	.iface = {
 		.name = UNOW_DEFAULT_IFACE,
 	},
+	.ack_timeout_us = UNOW_ACK_TIMEOUT_US,
+	.ack_max_retry = UNOW_ACK_MAX_RETRY,
 };
 
 static const uint8_t k_broadcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -209,7 +211,7 @@ esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payl
 		return ESP_FAIL;
 	}
 
-	attempts = 1 + UNOW_ACK_MAX_RETRY;
+	attempts = 1 + g_unow.ack_max_retry;
 	for (attempt = 0; attempt < attempts; attempt++) {
 		struct timeval tv_start;
 		struct timeval tv_now;
@@ -238,7 +240,7 @@ esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payl
 
 			gettimeofday(&tv_now, NULL);
 			elapsed_us = ((int64_t)tv_now.tv_sec - (int64_t)tv_start.tv_sec) * 1000000LL + ((int64_t)tv_now.tv_usec - (int64_t)tv_start.tv_usec);
-			if (elapsed_us >= UNOW_ACK_TIMEOUT_US) {
+			if (elapsed_us >= (int64_t)g_unow.ack_timeout_us) {
 				break;
 			}
 			status = pcap_next_ex(g_unow.pcap, &header, &pkt_data);
@@ -338,6 +340,14 @@ void radio_espnow_get_stats(radio_espnow_stats_t *out)
 	pthread_mutex_lock(&g_unow.lock);
 	g_unow.stats.peer_known = g_unow.peer_known ? 1U : 0U;
 	*out = g_unow.stats;
+	pthread_mutex_unlock(&g_unow.lock);
+}
+
+void unow_set_ack_params(uint32_t timeout_us, uint32_t max_retry)
+{
+	pthread_mutex_lock(&g_unow.lock);
+	g_unow.ack_timeout_us = timeout_us > 0 ? timeout_us : UNOW_ACK_TIMEOUT_US;
+	g_unow.ack_max_retry = max_retry;
 	pthread_mutex_unlock(&g_unow.lock);
 }
 

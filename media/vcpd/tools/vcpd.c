@@ -17,6 +17,13 @@
 #include "ulama/ulama_frame.h"
 #include "ulama/transport.h"
 
+#ifndef ULAMA_WITH_UNOW
+#define ULAMA_WITH_UNOW 0
+#endif
+#if ULAMA_WITH_UNOW
+#include "unow/radio_unow.h"
+#endif
+
 /* Unified video source API — delegates to MPP (HW) or ffmpeg (SW) */
 #ifdef VCPD_WITH_MPP
 #define vsrc_start(v)    video_source_mpp_start(v)
@@ -67,6 +74,8 @@ static void usage(const char *prog)
 		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
 		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 0)\n"
 		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
+		"  --ack-timeout US         UNOW ACK timeout in us                 (default 1500)\n"
+		"  --ack-retry   N          UNOW ACK max retries                   (default 1)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -155,6 +164,8 @@ typedef struct {
 	unsigned int pace_us;
 	int reliable_mode;
 	int reliable_threshold;
+	uint32_t ack_timeout_us;
+	uint32_t ack_max_retry;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -293,6 +304,8 @@ int main(int argc, char *argv[])
 	ctx.pace_us = 300;
 	ctx.reliable_mode = 0;
 	ctx.reliable_threshold = 3;
+	ctx.ack_timeout_us = 1500;
+	ctx.ack_max_retry = 1;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
@@ -323,6 +336,8 @@ int main(int argc, char *argv[])
 		{"pace-us",              required_argument, NULL, 'Z'},
 		{"reliable",             required_argument, NULL, 'R'},
 		{"reliable-threshold",   required_argument, NULL, 'Q'},
+		{"ack-timeout",          required_argument, NULL, 'K'},
+		{"ack-retry",            required_argument, NULL, 'Y'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -358,6 +373,8 @@ int main(int argc, char *argv[])
 		case 'Z': ctx.pace_us = (unsigned int)atoi(optarg); break;
 		case 'R': ctx.reliable_mode = atoi(optarg); break;
 		case 'Q': ctx.reliable_threshold = atoi(optarg); break;
+		case 'K': ctx.ack_timeout_us = (uint32_t)atoi(optarg); break;
+		case 'Y': ctx.ack_max_retry = (uint32_t)atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -396,6 +413,11 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+#if ULAMA_WITH_UNOW
+	if (tk == ULAMA_TRANSPORT_KIND_UNOW)
+		unow_set_ack_params(ctx.ack_timeout_us, ctx.ack_max_retry);
+#endif
+
 	lts_encoder_init(&ctx.lts_enc, ctx.stream_id);
 	ctx.retx_buf = (lts_retx_buf_t *)calloc(1, sizeof(lts_retx_buf_t));
 	if (!ctx.retx_buf) {
@@ -405,10 +427,11 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d)\n",
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry)\n",
 		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
-		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold);
+		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
+		ctx.ack_timeout_us, ctx.ack_max_retry);
 
 	if (ctx.autostart) {
 		fprintf(stderr, "vcpd: autostart — starting video immediately\n");

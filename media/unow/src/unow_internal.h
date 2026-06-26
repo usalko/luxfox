@@ -48,6 +48,8 @@ typedef struct {
 	uint16_t dedup_ring[UNOW_DEDUP_WINDOW];
 	uint16_t dedup_head;
 	uint16_t dedup_count;
+	uint32_t ack_timeout_us;
+	uint32_t ack_max_retry;
 } unow_context_t;
 
 extern unow_context_t g_unow;
