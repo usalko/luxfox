@@ -72,10 +72,10 @@ static void usage(const char *prog)
 		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
 		"  --test-pattern           Use color bars instead of camera\n"
 		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
-		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 0)\n"
+		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 2)\n"
 		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
-		"  --ack-timeout US         UNOW ACK timeout in us                 (default 1500)\n"
-		"  --ack-retry   N          UNOW ACK max retries                   (default 1)\n"
+		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
+		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -302,10 +302,10 @@ int main(int argc, char *argv[])
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
 	ctx.pace_us = 300;
-	ctx.reliable_mode = 0;
+	ctx.reliable_mode = 2;
 	ctx.reliable_threshold = 3;
-	ctx.ack_timeout_us = 1500;
-	ctx.ack_max_retry = 1;
+	ctx.ack_timeout_us = 2000;
+	ctx.ack_max_retry = 2;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;

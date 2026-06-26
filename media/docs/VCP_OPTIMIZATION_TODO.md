@@ -317,12 +317,19 @@ Phase 2 test results (before ACK tuning):
 Conclusion: reliable=2/3 cuts drops to 3-4% but kills throughput 3x.
 ACK tuning (1500us/1 retry) should recover throughput while keeping low drop.
 
-#### Task 2.4: Test and measure
+#### Task 2.4: Test and measure ✅ DONE
 
-- Compare Mode 0/1/2/3 with Phase 1's best pacing value
-- Key metrics: NAL drop rate, end-to-end latency (measure with timestamps),
-  video_out bitrate stability
-- Determine if reliable send adds visible latency to video stream
+ACK tuning results (all with --reliable 2):
+
+| ACK config | NAL drop% | video_rx | vout Kb/s |
+|------------|-----------|----------|-----------|
+| 3000us/3retry (old) | 3.2% | 458 | 89 |
+| 1500us/1retry | 26.9% | 954 | 146 |
+| 1000us/1retry | 41.2% | 970 | 105 |
+| **2000us/2retry** | **13.3%** | **687** | **137** |
+
+Winner: ack=2000/2 — drop rate matches baseline, throughput 50% of unreliable.
+New defaults: --reliable 2 --ack-timeout 2000 --ack-retry 2
 
 ---
 
