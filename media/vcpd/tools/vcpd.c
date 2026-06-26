@@ -64,6 +64,7 @@ static void usage(const char *prog)
 		"  --test        FILE       Capture raw encoder output to file and exit\n"
 		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
 		"  --test-pattern           Use color bars instead of camera\n"
+		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -148,6 +149,8 @@ typedef struct {
 	size_t cached_params_len[3];
 	lts_retx_buf_t *retx_buf;
 	uint32_t nack_retx_count;
+	uint32_t nack_retx_miss;
+	unsigned int pace_us;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -187,12 +190,17 @@ static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
 		uint16_t seq = nack->start_seq + (uint16_t)bit;
 		const lts_encoded_packet_t *pkt = lts_retx_buf_find(ctx->retx_buf, seq);
 		if (pkt) {
-			send_ulama_video(ctx, pkt->data, pkt->len);
+			uint8_t retx_data[LTS_ENC_HEADER_SIZE + LTS_ENC_MAX_PAYLOAD];
+			memcpy(retx_data, pkt->data, pkt->len);
+			retx_data[3] |= LTS_ENC_FLAG_RETX;
+			send_ulama_video(ctx, retx_data, pkt->len);
 			ctx->nack_retx_count++;
 			if (ctx->verbose)
 				fprintf(stderr, "vcpd: RETX seq=%u (%zu bytes)\n", seq, pkt->len);
-		} else if (ctx->verbose) {
-			fprintf(stderr, "vcpd: RETX seq=%u MISS (cur=%u)\n", seq, ctx->lts_enc.next_seq);
+		} else {
+			ctx->nack_retx_miss++;
+			if (ctx->verbose)
+				fprintf(stderr, "vcpd: RETX seq=%u MISS (cur=%u)\n", seq, ctx->lts_enc.next_seq);
 		}
 	}
 }
@@ -269,6 +277,7 @@ int main(int argc, char *argv[])
 	ctx.video.width = 640;
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
+	ctx.pace_us = 300;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
@@ -296,6 +305,7 @@ int main(int argc, char *argv[])
 		{"test",         required_argument, NULL, 'T'},
 		{"test-pattern", no_argument,       NULL, 'P'},
 		{"test-frames",  required_argument, NULL, 'F'},
+		{"pace-us",      required_argument, NULL, 'Z'},
 		{"verbose",      no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -328,6 +338,7 @@ int main(int argc, char *argv[])
 		case 'T': strncpy(ctx.test_output, optarg, sizeof(ctx.test_output) - 1); break;
 		case 'P': ctx.video.test_pattern = true; break;
 		case 'F': ctx.test_frames = atoi(optarg); break;
+		case 'Z': ctx.pace_us = (unsigned int)atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -375,9 +386,9 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s)\n",
+	fprintf(stderr, "vcpd: build=%s lts_mtu=%d started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us)\n",
 		VCPD_BUILD_ID, LTS_ENC_MAX_PAYLOAD,
-		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk));
+		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk), ctx.pace_us);
 
 	if (ctx.autostart) {
 		fprintf(stderr, "vcpd: autostart — starting video immediately\n");
@@ -555,6 +566,8 @@ int main(int argc, char *argv[])
 								lts_retx_buf_store(ctx.retx_buf, &pp[i]);
 								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
 									send_ulama_video(&ctx, pp[i].data, pp[i].len);
+								if (ctx.pace_us > 0 && i + 1 < np)
+									usleep(ctx.pace_us);
 							}
 						}
 					}
@@ -573,6 +586,8 @@ int main(int argc, char *argv[])
 					lts_retx_buf_store(ctx.retx_buf, &lts_pkts[i]);
 					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
 						send_ulama_video(&ctx, lts_pkts[i].data, lts_pkts[i].len);
+					if (ctx.pace_us > 0 && i + 1 < npkts)
+						usleep(ctx.pace_us);
 				}
 
 				if (ctx.verbose && npkts > 0)
@@ -631,7 +646,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	fprintf(stderr, "vcpd: shutting down (nack_retx=%u)\n", ctx.nack_retx_count);
+	fprintf(stderr, "vcpd: shutting down (nack_retx=%u retx_miss=%u)\n", ctx.nack_retx_count, ctx.nack_retx_miss);
 	vsrc_stop(&ctx.video);
 	ulama_transport_tx_close(&ctx.ulama_tx);
 	ulama_transport_rx_close(&ctx.ulama_rx);

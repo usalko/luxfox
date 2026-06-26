@@ -115,6 +115,13 @@ typedef struct {
 	uint64_t last_print_ms;
 	int32_t rssi_sum;
 	uint32_t rssi_count;
+	uint32_t nal_drop_1pkt;
+	uint32_t nal_drop_2_5pkt;
+	uint32_t nal_drop_6_15pkt;
+	uint32_t nal_drop_16plus;
+	uint32_t burst_gaps;
+	uint32_t single_gaps;
+	uint32_t retx_arrived;
 } gw_stats_t;
 
 typedef struct {
@@ -307,9 +314,26 @@ static void drop_nal(app_ctx_t *ctx, uint16_t expected, uint16_t got)
 	nal_assembler_t *a = &ctx->nal_asm;
 	ctx->stats.nal_dropped++;
 	ctx->stats.lts_gaps++;
+
+	uint16_t pkt_count = (uint16_t)(got - a->first_seq);
+	if (pkt_count <= 1)
+		ctx->stats.nal_drop_1pkt++;
+	else if (pkt_count <= 5)
+		ctx->stats.nal_drop_2_5pkt++;
+	else if (pkt_count <= 15)
+		ctx->stats.nal_drop_6_15pkt++;
+	else
+		ctx->stats.nal_drop_16plus++;
+
+	uint16_t gap_size = (uint16_t)(got - expected);
+	if (gap_size > 1)
+		ctx->stats.burst_gaps++;
+	else
+		ctx->stats.single_gaps++;
+
 	if (ctx->verbose)
-		fprintf(stderr, "gw: NAL DROPPED gap at seq expected=%u got=%u (had %zu bytes)\n",
-			expected, got, a->len);
+		fprintf(stderr, "gw: NAL DROPPED gap at seq expected=%u got=%u gap=%u nal_pkts=%u (had %zu bytes)\n",
+			expected, got, gap_size, pkt_count, a->len);
 	a->len = 0;
 	a->active = false;
 }
@@ -510,8 +534,11 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
 			if (is_dup)
 				ctx->stats.lts_dup++;
-			else
+			else {
 				ctx->stats.lts_unique++;
+				if (pkt.flags & LTS_FLAG_RETX)
+					ctx->stats.retx_arrived++;
+			}
 			if (!ctx->stats.lts_seq_valid) {
 				ctx->stats.lts_seq_min = pkt.pkt_seq;
 				ctx->stats.lts_seq_max = pkt.pkt_seq;
@@ -685,10 +712,13 @@ int main(int argc, char *argv[])
 			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u range=%u lost=%u | "
-				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d\n",
+				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
+				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, seq_range, lost,
-				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi);
+				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
+				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
+				s->burst_gaps, s->single_gaps, s->retx_arrived);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
