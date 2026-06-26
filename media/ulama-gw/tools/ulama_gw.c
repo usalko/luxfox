@@ -81,6 +81,7 @@ static void usage(const char *prog)
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
+		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 2)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -95,6 +96,8 @@ typedef struct {
 	uint16_t expect_seq;
 	bool active;
 	bool skip;
+	uint16_t gaps_tolerated;
+	uint16_t max_gap_tolerance;
 } nal_assembler_t;
 
 typedef struct {
@@ -125,6 +128,7 @@ typedef struct {
 	uint32_t retx_arrived;
 	uint32_t fec_recovered;
 	uint32_t fec_unrecoverable;
+	uint32_t nal_gap_skipped;
 } gw_stats_t;
 
 typedef struct {
@@ -352,25 +356,33 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 	for (size_t i = 0; i < n; i++) {
 		lts_packet_t *pkt = &emitted[i];
 
-		/* Gap detected — drop current NAL, wait for next LAST_OF_FRAME */
+		/* Gap detected — tolerate up to max_gap_tolerance skipped
+		 * packets per NAL instead of immediately dropping.
+		 * A partial NAL (with gaps) is better than a fully dropped one
+		 * because H.265 can decode partial slices. */
 		if (a->active && pkt->pkt_seq != a->expect_seq) {
-			drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+			uint16_t gap = (uint16_t)(pkt->pkt_seq - a->expect_seq);
+			if (a->gaps_tolerated + gap <= a->max_gap_tolerance) {
+				a->gaps_tolerated += gap;
+				ctx->stats.nal_gap_skipped += gap;
+				if (ctx->verbose)
+					fprintf(stderr, "gw: NAL gap tolerated seq expected=%u got=%u gap=%u (total=%u/%u)\n",
+						a->expect_seq, pkt->pkt_seq, gap,
+						a->gaps_tolerated, a->max_gap_tolerance);
+			} else {
+				drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+			}
 		}
 
-		/* LAST_OF_FRAME = end of a NAL from vcpd.
-		 * If we're not active (just dropped), this ends the damaged NAL.
-		 * If we are active, flush the complete NAL. */
+		/* LAST_OF_FRAME = end of a NAL from vcpd. */
 		if (pkt->flags & LTS_FLAG_LAST_OF_FRAME) {
 			if (a->active && a->len > 0) {
-				/* Append this last chunk to multi-packet NAL */
 				if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
 					memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
 					a->len += pkt->payload_len;
 				}
 				flush_nal(ctx, src_u16);
 			} else if (!a->active && pkt->payload_len > 0) {
-				/* Single-packet NAL (VPS/SPS/PPS/short slice) —
-				 * complete NAL in one LTS packet */
 				memcpy(a->buf, pkt->payload, pkt->payload_len);
 				a->len = pkt->payload_len;
 				a->active = true;
@@ -378,10 +390,10 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 				a->expect_seq = pkt->pkt_seq + 1;
 				flush_nal(ctx, src_u16);
 			} else {
-				/* Damaged NAL ended — just reset */
 				a->active = false;
 				a->len = 0;
 			}
+			a->gaps_tolerated = 0;
 			continue;
 		}
 
@@ -390,6 +402,7 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 			a->active = true;
 			a->len = 0;
 			a->first_seq = pkt->pkt_seq;
+			a->gaps_tolerated = 0;
 		}
 
 		if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
@@ -599,6 +612,7 @@ int main(int argc, char *argv[])
 	ctx.gw.node_id = 1;
 	ctx.verbose = false;
 	ctx.channel = 0;
+	ctx.nal_asm.max_gap_tolerance = 2;
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
@@ -609,8 +623,9 @@ int main(int argc, char *argv[])
 		{"iface",       required_argument, NULL, 'i'},
 		{"channel",     required_argument, NULL, 'c'},
 		{"node",        required_argument, NULL, 'n'},
-		{"dst-mac",     required_argument, NULL, 'm'},
-		{"verbose",     no_argument,       NULL, 'v'},
+		{"dst-mac",       required_argument, NULL, 'm'},
+		{"gap-tolerance", required_argument, NULL, 'G'},
+		{"verbose",       no_argument,       NULL, 'v'},
 		{"help",        no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
@@ -627,6 +642,7 @@ int main(int argc, char *argv[])
 		case 'c': ctx.channel = atoi(optarg); break;
 		case 'n': ctx.gw.node_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
+		case 'G': ctx.nal_asm.max_gap_tolerance = (uint16_t)atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -733,13 +749,13 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
-				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u\n",
+				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
 				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
 				s->burst_gaps, s->single_gaps, s->retx_arrived,
-				s->fec_recovered, s->fec_unrecoverable);
+				s->fec_recovered, s->fec_unrecoverable, s->nal_gap_skipped);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
