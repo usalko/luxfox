@@ -410,16 +410,14 @@ Best config remains: --reliable 2 --ack-timeout 2000 --ack-retry 2.
 
 ---
 
-### Phase 4: NAL assembler grace period (Path C)
+### Phase 4: NAL assembler gap tolerance (Path C)
 
-**Goal**: Give the NACK-retransmit pipeline time to work by not immediately
-dropping NALs when a gap is detected.
+**Goal**: Instead of dropping entire NAL on any packet gap, tolerate small
+gaps (1-2 missing packets) and deliver partial NAL to decoder.
+H.265 can decode partial slices with minor artifacts — much better
+than losing the entire frame.
 
-**Prerequisite**: Results from Phase 1-3 showing that residual gaps exist but
-NACK retransmissions arrive — they just arrive too late because the NAL
-assembler already dropped.
-
-#### Task 4.1: Add grace period to NAL assembler
+#### Task 4.1: Add gap tolerance to NAL assembler ✅ DONE (commit 40ad659)
 
 **File**: `ulama-gw/tools/ulama_gw.c`, function `emit_lts_to_cascade()`
 
