@@ -98,7 +98,7 @@ static void test_reassembly(void)
 			expect_true(complete, "should be complete after last fragment");
 	}
 
-	uint8_t reassembled[1500];
+	uint8_t reassembled[FRAG_MAX_REASSEMBLED];
 	size_t reassembled_len = 0;
 	expect_true(frag_reassembly_complete(&ctx, 5, 100, reassembled, sizeof(reassembled), &reassembled_len),
 		    "reassembly_complete should succeed");

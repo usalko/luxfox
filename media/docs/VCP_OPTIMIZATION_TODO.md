@@ -539,14 +539,18 @@ in monitor mode. Default: --lts-mtu 216.
 
 | Constant | Value | Location |
 |----------|-------|----------|
-| LTS_ENC_MAX_PAYLOAD | 216 bytes | vcpd/include/vcpd/lts_encoder.h:8 |
+| UNOW_DOT11_MAX_MSDU | 2304 bytes | unow/include/unow/radio_unow.h:9 (802.11 spec) |
+| UNOW_ACTION_VENDOR_OVERHEAD | 5 bytes | unow/include/unow/radio_unow.h:10 |
+| ULAMA_ESPNOW_MAX_PAYLOAD | 2299 bytes | unow/include/unow/radio_unow.h:11 (2304-5) |
+| ULAMA_FRAME_HEADER_SIZE | 14 bytes | ulama/include/ulama/ulama_frame.h:9 |
+| ULAMA_FRAME_MAX_PAYLOAD | 2285 bytes | ulama/include/ulama/ulama_frame.h:10 (2299-14) |
+| LTS_ENC_HEADER_SIZE | 4 bytes | vcpd/include/vcpd/lts_encoder.h:7 |
+| LTS_ENC_MAX_PAYLOAD | 2281 bytes | vcpd/include/vcpd/lts_encoder.h:8 (2285-4) |
 | LTS_HEADER_SIZE | 4 bytes | ulama-gw/include/ulama_gw/lts_decoder.h:7 |
+| LTS_MAX_PAYLOAD | 2281 bytes | ulama-gw/include/ulama_gw/lts_decoder.h:8 (2285-4) |
 | LTS_REORDER_WINDOW | 128 slots | ulama-gw/include/ulama_gw/lts_decoder.h:18 |
 | LTS_EMIT_DEADLINE_MS | 200 ms | ulama-gw/include/ulama_gw/lts_decoder.h:19 |
 | LTS_RETX_SLOTS | 512 | vcpd/include/vcpd/lts_encoder.h:18 |
-| ULAMA_FRAME_HEADER_SIZE | 14 bytes | ulama/include/ulama/ulama_frame.h:9 |
-| ULAMA_FRAME_MAX_PAYLOAD | 220 bytes | ulama/include/ulama/ulama_frame.h:10 |
-| ULAMA_ESPNOW_MAX_PAYLOAD | 240 bytes | unow/include/unow/radio_unow.h:9 |
 | UNOW_ACK_TIMEOUT_US | 3000 us | unow/src/unow_internal.h:21 |
 | UNOW_ACK_MAX_RETRY | 3 | unow/src/unow_internal.h:22 |
 | UNOW_DEDUP_WINDOW | 64 | unow/src/unow_internal.h:23 |

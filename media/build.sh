@@ -81,6 +81,7 @@ done
 ##############################################################################
 if [ -f "$SCRIPT_DIR/ulama-gw/Makefile" ]; then
     log_info "═══ ulama-gw (host-unow) ═══"
+    make -C "$SCRIPT_DIR/ulama-gw" clean
     make -C "$SCRIPT_DIR/ulama-gw" host-unow || log_error "host-unow failed (libpcap-dev missing?)"
 fi
 
