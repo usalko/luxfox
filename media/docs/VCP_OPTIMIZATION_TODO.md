@@ -518,7 +518,37 @@ in monitor mode. Default: --lts-mtu 216.
 
 ---
 
-## Final Optimal Configuration (v0.1.151)
+### Phase 6: Channel Bandwidth Benchmark (commit 660111b83)
+
+Added `--benchmark KBPS` to vcpd and `--nack-disable` to ulama-gw
+for measuring raw channel capacity.
+
+**Benchmark results (2026-06-27):**
+
+| Config | TX pps | RX pps | Loss% | RX Kbit/s |
+|--------|--------|--------|-------|-----------|
+| unreliable mtu=216 @1000 | 578 | **95** | 83.6% | **165** |
+| reliable mtu=216 @1000 | 145 | **69** | 52.4% | **122** |
+| unreliable mtu=500 @1000 | 250 | **61** | 75.6% | **248** |
+| unreliable mtu=216 @5000 | 1787 | **94** | 94.7% | **166** |
+
+**Critical discovery: channel has a fixed ~95 pps ceiling at mtu=216.**
+Sending more than ~95 pps is wasted — the radio/driver drops the excess.
+This is a hardware limitation of the 8192eu WiFi adapter in monitor mode.
+
+**mtu=500 delivers 50% more throughput** (248 vs 165 Kbit/s) because each
+received packet carries more payload. Fewer packets but more data per packet.
+
+**Reliable send overhead**: ACK blocking limits TX to 145 pps (vs 578
+unreliable), but only 69 pps arrive — worse throughput than unreliable.
+However, reliable + NACK recovery achieves 0% drop at the cost of throughput.
+
+**Optimal bitrate for video**: ~200-250 Kbit/s at mtu=500, or ~150 Kbit/s
+at mtu=216. Encoder `--bitrate` must not exceed channel capacity.
+
+---
+
+## Final Optimal Configuration
 
 **vcpd** (device):
 - `--reliable 2` — MAC-level ACK+retry on all video packets
@@ -526,12 +556,15 @@ in monitor mode. Default: --lts-mtu 216.
 - `--ack-retry 2` — 2 retries (3 attempts total)
 - `--pace-us 300` — 300us inter-packet pacing
 - `--fec 0` — FEC disabled (25% overhead counterproductive)
-- `--lts-mtu 216` — original packet size (optimal for monitor mode)
+- `--lts-mtu 500` — larger packets = more throughput per received packet
 
 **ulama-gw** (host):
 - `--gap-tolerance 2` — tolerate up to 2 missing packets per NAL
 
-**Result**: NAL drop **0.1%** (from original 7-15%), video_out 100 Kb/s stable.
+**Channel limits** (8192eu monitor mode, RSSI -36..-44 dBm):
+- Max ~95 pps at mtu=216 (~165 Kbit/s goodput)
+- Max ~61 pps at mtu=500 (~248 Kbit/s goodput)
+- Set `--bitrate` to ≤200 at mtu=500 to avoid saturating channel
 
 ---
 

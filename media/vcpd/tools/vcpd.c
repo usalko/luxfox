@@ -78,7 +78,7 @@ static void usage(const char *prog)
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
-		"  --lts-mtu     N          LTS payload size in bytes              (default 216)\n"
+		"  --lts-mtu     N          LTS payload size in bytes              (default 500)\n"
 		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
@@ -341,7 +341,7 @@ static int run_benchmark(vcpd_ctx_t *ctx)
 			uint64_t dt = now - last_report;
 			fprintf(stderr, "[bench-tx] pps=%u bps=%u Kbit/s total=%llu pkts %llu bytes\n",
 				(uint32_t)(rpt_pkts * 1000 / dt),
-				(uint32_t)(rpt_bytes * 8000 / dt / 1000),
+				(uint32_t)((uint64_t)rpt_bytes * 8000 / dt / 1000),
 				(unsigned long long)pkts_sent,
 				(unsigned long long)bytes_sent);
 			rpt_pkts = 0;
@@ -383,7 +383,7 @@ int main(int argc, char *argv[])
 	ctx.reliable_threshold = 3;
 	ctx.ack_timeout_us = 2000;
 	ctx.ack_max_retry = 2;
-	ctx.lts_mtu = 216;
+	ctx.lts_mtu = 500;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
