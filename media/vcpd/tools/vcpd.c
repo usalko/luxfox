@@ -75,7 +75,7 @@ static void usage(const char *prog)
 		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
 		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 2)\n"
 		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
-		"  --ack-timeout US         UNOW ACK timeout in us                 (default 2000)\n"
+		"  --ack-timeout US         UNOW ACK timeout in us                 (default 8000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
 		"  --lts-mtu     N          LTS payload size in bytes              (default 500)\n"
@@ -381,7 +381,7 @@ int main(int argc, char *argv[])
 	ctx.pace_us = 300;
 	ctx.reliable_mode = 2;
 	ctx.reliable_threshold = 3;
-	ctx.ack_timeout_us = 2000;
+	ctx.ack_timeout_us = 8000;
 	ctx.ack_max_retry = 2;
 	ctx.lts_mtu = 500;
 	ctx.node_id = 2;

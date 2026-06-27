@@ -206,6 +206,10 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 	}
 	deadline_ms = timeout_ms < 0 ? -1 : unow_diag_now_ms() + (int64_t)timeout_ms;
 	for (;;) {
+		pthread_mutex_lock(&g_unow.lock);
+		unow_async_tick_locked();
+		pthread_mutex_unlock(&g_unow.lock);
+
 		status = pcap_next_ex(g_unow.pcap, &header, &packet);
 		if (status == 1) {
 			if (!unow_parse_action_frame(packet, header->caplen, frame)) {
@@ -216,7 +220,13 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 				continue;
 			}
 			if (frame->subtype == UNOW_VENDOR_SUBTYPE_ACK) {
-				UNOW_LOGT("ignoring ack frame in recv path");
+				if (frame->len >= 2U) {
+					uint16_t ack_seq = ((uint16_t)frame->payload[0] << 8) |
+							   (uint16_t)frame->payload[1];
+					pthread_mutex_lock(&g_unow.lock);
+					unow_async_ack_locked(ack_seq);
+					pthread_mutex_unlock(&g_unow.lock);
+				}
 				continue;
 			}
 			if (frame->subtype == UNOW_VENDOR_SUBTYPE_DATA_SEQ && frame->len >= 2U) {

@@ -548,11 +548,40 @@ at mtu=216. Encoder `--bitrate` must not exceed channel capacity.
 
 ---
 
+### Phase 7: Async Reliable Send (2026-06-27)
+
+**Problem**: `radio_espnow_send_reliable()` was **blocking** — it held the
+global mutex and polled `pcap_next_ex()` for ACKs, silently consuming all
+non-ACK frames (including NACKs from the gateway). This caused two issues:
+
+1. **NACK starvation**: ~55% of NACKs were consumed and discarded during
+   ACK-wait loops, making NACK-based retransmission ineffective.
+2. **ACK timeout too short for large MTU**: at 1 Mbps, a 1000-byte packet
+   takes ~8.4ms wire time. With 2ms ACK timeout, ACKs could never arrive
+   in time, making reliable mode effectively unreliable while still blocking.
+
+**Solution**: Rewrote `radio_espnow_send_reliable()` as **non-blocking async**:
+- Sends packet once via `pcap_inject()`, stores in async slot buffer (32 slots)
+- Returns immediately (no blocking, no mutex held during wait)
+- ACKs processed transparently in `unow_diag_recv()` alongside other frames
+- Timeouts and retransmits handled by `unow_async_tick_locked()` called from recv loop
+- If async slots full, falls back to unreliable send
+
+**Files changed**:
+- `unow/src/unow_internal.h` — added `unow_async_slot_t`, buffer in context
+- `unow/src/unow.c` — rewrote `radio_espnow_send_reliable()`, added tick/ack helpers
+- `unow/src/unow_diag.c` — ACK frames now fed to async matcher, tick called each recv
+
+**Default ACK timeout increased**: 3000us → 8000us (safe since no longer blocking)
+**Default vcpd ACK timeout**: 2000us → 8000us
+
+---
+
 ## Final Optimal Configuration
 
 **vcpd** (device):
-- `--reliable 2` — MAC-level ACK+retry on all video packets
-- `--ack-timeout 2000` — 2ms ACK wait
+- `--reliable 2` — async MAC-level ACK+retry on all video packets
+- `--ack-timeout 8000` — 8ms ACK wait (non-blocking, safe for MTU up to 1000)
 - `--ack-retry 2` — 2 retries (3 attempts total)
 - `--pace-us 300` — 300us inter-packet pacing
 - `--fec 0` — FEC disabled (25% overhead counterproductive)
@@ -584,8 +613,9 @@ at mtu=216. Encoder `--bitrate` must not exceed channel capacity.
 | LTS_REORDER_WINDOW | 128 slots | ulama-gw/include/ulama_gw/lts_decoder.h:18 |
 | LTS_EMIT_DEADLINE_MS | 200 ms | ulama-gw/include/ulama_gw/lts_decoder.h:19 |
 | LTS_RETX_SLOTS | 512 | vcpd/include/vcpd/lts_encoder.h:18 |
-| UNOW_ACK_TIMEOUT_US | 3000 us | unow/src/unow_internal.h:21 |
-| UNOW_ACK_MAX_RETRY | 3 | unow/src/unow_internal.h:22 |
+| UNOW_ACK_TIMEOUT_US | 8000 us | unow/src/unow_internal.h:21 |
+| UNOW_ACK_MAX_RETRY | 2 | unow/src/unow_internal.h:22 |
+| UNOW_ASYNC_SLOTS | 32 | unow/src/unow_internal.h:24 |
 | UNOW_DEDUP_WINDOW | 64 | unow/src/unow_internal.h:23 |
 | NACK_MIN_INTERVAL_MS | 20 ms | ulama-gw/tools/ulama_gw.c:379 |
 | NAL_ASSEMBLE_MAX | 64 KB | ulama-gw/tools/ulama_gw.c:88 |
@@ -612,9 +642,11 @@ vcpd (LuckFox):
        |
   ULAMA frame pack (14-byte header + 220-byte payload max)
        |
-  send_ulama_video() -> ulama_transport_tx_send()
-       |                  -> radio_espnow_send()  [UNRELIABLE]
-       |                       -> pcap_inject() on monitor-mode interface
+  send_ulama_video_ex() -> ulama_transport_tx_send_reliable()
+       |                  -> radio_espnow_send_reliable()  [ASYNC: inject + track]
+       |                       -> pcap_inject() + store in async_slots[]
+       |                       -> ACKs matched in unow_diag_recv() loop
+       |                       -> retransmits on timeout via unow_async_tick_locked()
        |
   ~~~~ WiFi 2.4 GHz (action frames at 1 Mbps legacy rate) ~~~~
        |
@@ -636,7 +668,8 @@ ulama-gw (Host):
        |
   emit_lts_to_cascade() -> NAL assembler
        |  concatenate payloads until LAST_OF_FRAME
-       |  gap detected -> drop_nal() immediately  <-- PROBLEM
+       |  gap detected -> tolerate up to 2 (gap_tolerance)
+       |  larger gap -> drop_nal()
        |
   flush_nal() -> cascade_frame -> UDP to cascade-core:5600
 ```

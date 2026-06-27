@@ -18,9 +18,23 @@
 #include "unow/unow_diag.h"
 #include "unow/unow_wire.h"
 
-#define UNOW_ACK_TIMEOUT_US  3000
-#define UNOW_ACK_MAX_RETRY   3
+#define UNOW_ACK_TIMEOUT_US  8000
+#define UNOW_ACK_MAX_RETRY   2
 #define UNOW_DEDUP_WINDOW    64
+
+#define UNOW_ASYNC_SLOTS     32
+
+typedef struct {
+	uint8_t frame[sizeof(struct unow_radiotap_tx_header) +
+		      sizeof(struct unow_dot11_mgmt_header) +
+		      sizeof(struct unow_action_vendor_header) +
+		      2U + ULAMA_ESPNOW_MAX_PAYLOAD];
+	size_t frame_len;
+	uint16_t seq;
+	int64_t sent_us;
+	uint8_t attempts_left;
+	bool active;
+} unow_async_slot_t;
 
 typedef struct {
 	char name[IFNAMSIZ];
@@ -50,7 +64,12 @@ typedef struct {
 	uint16_t dedup_count;
 	uint32_t ack_timeout_us;
 	uint32_t ack_max_retry;
+	unow_async_slot_t async_slots[UNOW_ASYNC_SLOTS];
 } unow_context_t;
+
+int64_t unow_now_us(void);
+void unow_async_tick_locked(void);
+void unow_async_ack_locked(uint16_t ack_seq);
 
 extern unow_context_t g_unow;
 
