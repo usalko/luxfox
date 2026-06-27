@@ -776,8 +776,13 @@ int main(int argc, char *argv[])
 					}
 				}
 
-				if (ctx.verbose && npkts > 0)
-					fprintf(stderr, "vcpd: NAL type=%u %zu bytes → %zu LTS pkts\n", hevc_nal_type, nal_size, npkts);
+				{
+					uint32_t crc = 0;
+					for (size_t ci = 0; ci < nal_size; ci++)
+						crc = (crc << 1) ^ nal_data[ci];
+					fprintf(stderr, "vcpd: NAL type=%u %zu bytes → %zu LTS pkts crc=%08x\n",
+						hevc_nal_type, nal_size, npkts, crc);
+				}
 
 				pos = sc2;
 			}
