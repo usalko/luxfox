@@ -78,7 +78,7 @@ static void usage(const char *prog)
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 8000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
-		"  --lts-mtu     N          LTS payload size in bytes              (default 500)\n"
+		"  --lts-mtu     N          LTS payload size in bytes              (default 1440)\n"
 		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
 		"  --vps-repeat  N          VPS/SPS/PPS copies before each IDR      (default 1)\n"
 		"  --verbose                Verbose logging\n"
@@ -384,7 +384,7 @@ int main(int argc, char *argv[])
 	ctx.reliable_threshold = 3;
 	ctx.ack_timeout_us = 8000;
 	ctx.ack_max_retry = 2;
-	ctx.lts_mtu = 500;
+	ctx.lts_mtu = 1440;
 	ctx.param_dup_count = 1;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
