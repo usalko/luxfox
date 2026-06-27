@@ -48,6 +48,7 @@ typedef struct {
 	mpp_v4l2_buffer_t v4l2_bufs[V4L2_BUFFER_COUNT];
 	uint32_t actual_width;
 	uint32_t actual_height;
+	uint32_t actual_fps;
 
 	VENC_STREAM_S venc_stream;
 	VENC_PACK_S venc_packs[MAX_VENC_PACKS];
@@ -107,6 +108,8 @@ static int v4l2_open(mpp_ctx_t *ctx)
 	parm.parm.capture.timeperframe.numerator = 1;
 	parm.parm.capture.timeperframe.denominator = (unsigned)ctx->src->fps;
 	xioctl(ctx->v4l2_fd, VIDIOC_S_PARM, &parm);
+	ctx->actual_fps = parm.parm.capture.timeperframe.denominator > 0
+		? parm.parm.capture.timeperframe.denominator : (unsigned)ctx->src->fps;
 
 	memset(&req, 0, sizeof(req));
 	req.count = V4L2_BUFFER_COUNT;
@@ -233,7 +236,8 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
 	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;
 	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
-	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = (RK_U32)ctx->src->fps;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = ctx->actual_fps > 0
+		? (RK_U32)ctx->actual_fps : (RK_U32)ctx->src->fps;
 
 	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
 	if (ret != RK_SUCCESS) {
@@ -523,6 +527,7 @@ int video_source_mpp_start(video_source_mpp_t *src)
 		/* Test pattern mode: VENC only, no camera/VDEC */
 		ctx->actual_width = (uint32_t)src->width;
 		ctx->actual_height = (uint32_t)src->height;
+		ctx->actual_fps = (uint32_t)src->fps;
 
 		ret = init_venc(ctx);
 		if (ret != RK_SUCCESS) {
