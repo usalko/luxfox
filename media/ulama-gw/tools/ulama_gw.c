@@ -82,6 +82,7 @@ static void usage(const char *prog)
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
 		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 2)\n"
+		"  --nack-disable           Suppress NACK sending (for benchmarks)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -129,6 +130,8 @@ typedef struct {
 	uint32_t fec_recovered;
 	uint32_t fec_unrecoverable;
 	uint32_t nal_gap_skipped;
+	uint32_t lts_rx_total;
+	uint64_t lts_payload_bytes;
 } gw_stats_t;
 
 typedef struct {
@@ -152,6 +155,7 @@ typedef struct {
 	nal_assembler_t nal_asm;
 	lts_fec_decoder_t fec_dec;
 	gw_stats_t stats;
+	bool nack_disable;
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -421,6 +425,8 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 
 static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 {
+	if (ctx->nack_disable)
+		return;
 	if (now - ctx->last_nack_ms < NACK_MIN_INTERVAL_MS)
 		return;
 
@@ -548,6 +554,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			ctx->lts_video_src_node = uf.src_node;
 			ctx->stats.rssi_sum += rssi;
 			ctx->stats.rssi_count++;
+			ctx->stats.lts_rx_total++;
 
 			if (pkt.flags & LTS_FLAG_FEC) {
 				lts_packet_t recovered;
@@ -565,6 +572,7 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 					ctx->stats.lts_dup++;
 				else {
 					ctx->stats.lts_unique++;
+					ctx->stats.lts_payload_bytes += pkt.payload_len;
 					if (pkt.flags & LTS_FLAG_RETX)
 						ctx->stats.retx_arrived++;
 				}
@@ -624,7 +632,8 @@ int main(int argc, char *argv[])
 		{"channel",     required_argument, NULL, 'c'},
 		{"node",        required_argument, NULL, 'n'},
 		{"dst-mac",       required_argument, NULL, 'm'},
-		{"gap-tolerance", required_argument, NULL, 'G'},
+		{"gap-tolerance",  required_argument, NULL, 'G'},
+		{"nack-disable",   no_argument,       NULL, 'N'},
 		{"verbose",       no_argument,       NULL, 'v'},
 		{"help",        no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -643,6 +652,7 @@ int main(int argc, char *argv[])
 		case 'n': ctx.gw.node_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'G': ctx.nal_asm.max_gap_tolerance = (uint16_t)atoi(optarg); break;
+		case 'N': ctx.nack_disable = true; break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -746,16 +756,21 @@ int main(int argc, char *argv[])
 				? (uint16_t)(s->lts_seq_max - s->lts_seq_min + 1) : 0;
 			uint32_t lost = (seq_range > s->lts_unique) ? seq_range - s->lts_unique : 0;
 			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
+			uint32_t pps_in = (uint32_t)(s->lts_rx_total * 1000 / (dt > 0 ? dt : 1));
+			uint32_t pps_unique = (uint32_t)(s->lts_unique * 1000 / (dt > 0 ? dt : 1));
+			uint32_t bps_in = (uint32_t)(s->lts_payload_bytes * 8000 / (dt > 0 ? dt : 1));
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
-				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u\n",
+				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u | "
+				"pps_in=%u pps_uniq=%u bps_in=%u Kbit/s\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
 				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
 				s->burst_gaps, s->single_gaps, s->retx_arrived,
-				s->fec_recovered, s->fec_unrecoverable, s->nal_gap_skipped);
+				s->fec_recovered, s->fec_unrecoverable, s->nal_gap_skipped,
+				pps_in, pps_unique, bps_in / 1000);
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}

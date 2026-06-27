@@ -79,6 +79,7 @@ static void usage(const char *prog)
 		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
 		"  --lts-mtu     N          LTS payload size in bytes              (default 216)\n"
+		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -173,6 +174,7 @@ typedef struct {
 	lts_fec_encoder_t fec_enc;
 	uint32_t fec_sent;
 	int lts_mtu;
+	int benchmark_kbps;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -296,6 +298,74 @@ static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 	}
 }
 
+static int run_benchmark(vcpd_ctx_t *ctx)
+{
+	size_t mtu = ctx->lts_enc.max_payload;
+	uint64_t target_bps = (uint64_t)ctx->benchmark_kbps * 1000;
+	uint64_t target_Bps = target_bps / 8;
+	double pps_target = (double)target_Bps / (double)mtu;
+	uint64_t interval_us = pps_target > 0 ? (uint64_t)(1000000.0 / pps_target) : 10000;
+	bool use_reliable = (ctx->reliable_mode >= 2);
+
+	fprintf(stderr, "vcpd: BENCHMARK — target %d Kbit/s, mtu=%zu, reliable=%d, interval=%llu us (%.0f pps)\n",
+		ctx->benchmark_kbps, mtu, ctx->reliable_mode,
+		(unsigned long long)interval_us, pps_target);
+
+	uint8_t dummy[LTS_ENC_MAX_PAYLOAD];
+	for (size_t i = 0; i < sizeof(dummy); i++)
+		dummy[i] = (uint8_t)(i & 0xFF);
+
+	uint64_t t0 = now_ms();
+	uint64_t pkts_sent = 0, bytes_sent = 0;
+	uint64_t last_report = t0;
+	uint32_t rpt_pkts = 0, rpt_bytes = 0;
+
+	struct timespec next;
+	clock_gettime(CLOCK_MONOTONIC, &next);
+
+	while (g_running) {
+		handle_uvcp_rx(ctx);
+
+		lts_encoded_packet_t pkt;
+		size_t np = lts_encoder_encode(&ctx->lts_enc, dummy, mtu, 0, &pkt, 1);
+		if (np == 0) continue;
+
+		send_ulama_video_ex(ctx, pkt.data, pkt.len, use_reliable);
+		pkts_sent++;
+		bytes_sent += pkt.len;
+		rpt_pkts++;
+		rpt_bytes += pkt.len;
+
+		uint64_t now = now_ms();
+		if (now - last_report >= 5000) {
+			uint64_t dt = now - last_report;
+			fprintf(stderr, "[bench-tx] pps=%u bps=%u Kbit/s total=%llu pkts %llu bytes\n",
+				(uint32_t)(rpt_pkts * 1000 / dt),
+				(uint32_t)(rpt_bytes * 8000 / dt / 1000),
+				(unsigned long long)pkts_sent,
+				(unsigned long long)bytes_sent);
+			rpt_pkts = 0;
+			rpt_bytes = 0;
+			last_report = now;
+		}
+
+		next.tv_nsec += (long)(interval_us * 1000);
+		while (next.tv_nsec >= 1000000000L) {
+			next.tv_nsec -= 1000000000L;
+			next.tv_sec++;
+		}
+		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+	}
+
+	uint64_t elapsed = now_ms() - t0;
+	fprintf(stderr, "vcpd: BENCHMARK DONE — %llu pkts, %llu bytes, %llu ms, %u pps %u Kbit/s\n",
+		(unsigned long long)pkts_sent, (unsigned long long)bytes_sent,
+		(unsigned long long)elapsed,
+		elapsed > 0 ? (uint32_t)(pkts_sent * 1000 / elapsed) : 0,
+		elapsed > 0 ? (uint32_t)(bytes_sent * 8000 / elapsed / 1000) : 0);
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	vcpd_ctx_t ctx;
@@ -348,6 +418,7 @@ int main(int argc, char *argv[])
 		{"ack-retry",            required_argument, NULL, 'Y'},
 		{"fec",                  required_argument, NULL, 'E'},
 		{"lts-mtu",              required_argument, NULL, 'M'},
+		{"benchmark",            required_argument, NULL, 'B'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -387,6 +458,7 @@ int main(int argc, char *argv[])
 		case 'Y': ctx.ack_max_retry = (uint32_t)atoi(optarg); break;
 		case 'E': ctx.fec_group = atoi(optarg); break;
 		case 'M': ctx.lts_mtu = atoi(optarg); break;
+		case 'B': ctx.benchmark_kbps = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -448,6 +520,14 @@ int main(int argc, char *argv[])
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
 		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
 		ctx.ack_timeout_us, ctx.ack_max_retry, ctx.fec_group);
+
+	if (ctx.benchmark_kbps > 0) {
+		int rc = run_benchmark(&ctx);
+		ulama_transport_tx_close(&ctx.ulama_tx);
+		ulama_transport_rx_close(&ctx.ulama_rx);
+		free(ctx.retx_buf);
+		return rc;
+	}
 
 	if (ctx.autostart) {
 		fprintf(stderr, "vcpd: autostart — starting video immediately\n");

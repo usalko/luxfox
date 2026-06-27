@@ -38,27 +38,28 @@ static void test_exact_split(void)
 	size_t frag_sizes[FRAG_MAX_FRAGMENTS];
 
 	size_t n = frag_split(payload, sizeof(payload), frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
-	expect_true(n == 3, "660B payload should produce 3 fragments");
+	expect_true(n == 3, "3*MAX_PAYLOAD should produce 3 fragments");
 	for (size_t i = 0; i < n; i++)
-		expect_true(frag_sizes[i] == ULAMA_FRAME_MAX_PAYLOAD, "each fragment should be 220B");
+		expect_true(frag_sizes[i] == ULAMA_FRAME_MAX_PAYLOAD, "each fragment should be MAX_PAYLOAD");
 }
 
-static void test_1400_bytes(void)
+static void test_large_payload(void)
 {
-	uint8_t payload[1400];
-	for (size_t i = 0; i < sizeof(payload); i++)
+	size_t payload_size = ULAMA_FRAME_MAX_PAYLOAD * 2 + 100;
+	uint8_t payload[ULAMA_FRAME_MAX_PAYLOAD * 3];
+	for (size_t i = 0; i < payload_size; i++)
 		payload[i] = (uint8_t)(i & 0xFF);
 
 	uint8_t frag_payloads[FRAG_MAX_FRAGMENTS][ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frag_sizes[FRAG_MAX_FRAGMENTS];
 
-	size_t n = frag_split(payload, sizeof(payload), frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
-	expect_true(n == 7, "1400B payload should produce 7 fragments");
+	size_t n = frag_split(payload, payload_size, frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
+	expect_true(n == 3, "payload > 2*MAX should produce 3 fragments");
 
 	size_t total = 0;
 	for (size_t i = 0; i < n; i++)
 		total += frag_sizes[i];
-	expect_true(total == 1400, "total fragment sizes should equal 1400");
+	expect_true(total == payload_size, "total fragment sizes should equal payload");
 }
 
 static void test_reassembly(void)
@@ -73,7 +74,8 @@ static void test_reassembly(void)
 	uint8_t frag_payloads[FRAG_MAX_FRAGMENTS][ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frag_sizes[FRAG_MAX_FRAGMENTS];
 	size_t n = frag_split(original, sizeof(original), frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
-	expect_true(n == 3, "500B should split into 3 fragments");
+	size_t expected_frags = (sizeof(original) + ULAMA_FRAME_MAX_PAYLOAD - 1) / ULAMA_FRAME_MAX_PAYLOAD;
+	expect_true(n == expected_frags, "500B should split correctly");
 
 	for (size_t i = 0; i < n; i++) {
 		ulama_frame_view_t fv = {
@@ -108,7 +110,7 @@ int main(void)
 {
 	test_no_fragmentation_needed();
 	test_exact_split();
-	test_1400_bytes();
+	test_large_payload();
 	test_reassembly();
 
 	if (failures > 0) {
