@@ -89,6 +89,17 @@ static void usage(const char *prog)
 }
 
 #define NAL_ASSEMBLE_MAX (64 * 1024)
+#define HEVC_PARAM_MAX 256
+
+typedef struct {
+	uint8_t vps[HEVC_PARAM_MAX];
+	size_t vps_len;
+	uint8_t sps[HEVC_PARAM_MAX];
+	size_t sps_len;
+	uint8_t pps[HEVC_PARAM_MAX];
+	size_t pps_len;
+	bool valid;
+} hevc_param_cache_t;
 
 typedef struct {
 	uint8_t buf[NAL_ASSEMBLE_MAX];
@@ -156,6 +167,7 @@ typedef struct {
 	lts_fec_decoder_t fec_dec;
 	gw_stats_t stats;
 	bool nack_disable;
+	hevc_param_cache_t param_cache;
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -295,11 +307,67 @@ static void send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 	free(buf);
 }
 
+static uint8_t hevc_nal_type(const uint8_t *nal, size_t len)
+{
+	size_t off = 0;
+	if (len >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1)
+		off = 4;
+	else if (len >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1)
+		off = 3;
+	if (off >= len)
+		return 0xFF;
+	return (nal[off] >> 1) & 0x3F;
+}
+
+static void cache_hevc_param(hevc_param_cache_t *c, uint8_t type,
+			     const uint8_t *data, size_t len)
+{
+	if (len > HEVC_PARAM_MAX)
+		return;
+	switch (type) {
+	case 32: memcpy(c->vps, data, len); c->vps_len = len; break;
+	case 33: memcpy(c->sps, data, len); c->sps_len = len; break;
+	case 34: memcpy(c->pps, data, len); c->pps_len = len; c->valid = true; break;
+	}
+}
+
+static void inject_cached_params(app_ctx_t *ctx, uint16_t src_u16)
+{
+	hevc_param_cache_t *c = &ctx->param_cache;
+	if (!c->valid)
+		return;
+	const struct { const uint8_t *d; size_t l; } params[] = {
+		{c->vps, c->vps_len}, {c->sps, c->sps_len}, {c->pps, c->pps_len}
+	};
+	for (int i = 0; i < 3; i++) {
+		if (params[i].l == 0) continue;
+		cascade_frame_view_t cf = {
+			.version = CASCADE_FRAME_VERSION,
+			.src = src_u16,
+			.dst = 0,
+			.traffic_class = CASCADE_CLASS_VIDEO,
+			.payload = params[i].d,
+			.payload_len = params[i].l,
+		};
+		send_cascade_frame(ctx, &cf);
+	}
+}
+
 static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 {
 	nal_assembler_t *a = &ctx->nal_asm;
 	if (!a->active || a->len == 0)
 		return;
+
+	uint8_t nt = hevc_nal_type(a->buf, a->len);
+
+	if (nt >= 32 && nt <= 34) {
+		cache_hevc_param(&ctx->param_cache, nt, a->buf, a->len);
+	}
+
+	if (nt == 19 || nt == 20) {
+		inject_cached_params(ctx, src_u16);
+	}
 
 	cascade_frame_view_t cf = {
 		.version = CASCADE_FRAME_VERSION,
@@ -314,8 +382,8 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 	ctx->stats.video_bytes_out += a->len;
 
 	if (ctx->verbose)
-		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu\n",
-			a->first_seq, (uint16_t)(a->expect_seq - 1), a->len);
+		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu type=%u\n",
+			a->first_seq, (uint16_t)(a->expect_seq - 1), a->len, nt);
 
 	a->len = 0;
 	a->active = false;

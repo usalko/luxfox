@@ -80,6 +80,7 @@ static void usage(const char *prog)
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
 		"  --lts-mtu     N          LTS payload size in bytes              (default 500)\n"
 		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
+		"  --vps-repeat  N          VPS/SPS/PPS copies before each IDR      (default 1)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -138,7 +139,6 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 }
 
 #define PARAM_NAL_MAX_SIZE 128
-#define PARAM_NAL_DUP_COUNT 3
 
 typedef struct {
 	video_source_t video;
@@ -175,6 +175,7 @@ typedef struct {
 	uint32_t fec_sent;
 	int lts_mtu;
 	int benchmark_kbps;
+	int param_dup_count;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -384,6 +385,7 @@ int main(int argc, char *argv[])
 	ctx.ack_timeout_us = 8000;
 	ctx.ack_max_retry = 2;
 	ctx.lts_mtu = 500;
+	ctx.param_dup_count = 1;
 	ctx.node_id = 2;
 	ctx.dst_node = 1;
 	ctx.stream_id = 0;
@@ -419,6 +421,7 @@ int main(int argc, char *argv[])
 		{"fec",                  required_argument, NULL, 'E'},
 		{"lts-mtu",              required_argument, NULL, 'M'},
 		{"benchmark",            required_argument, NULL, 'B'},
+		{"vps-repeat",           required_argument, NULL, 'D'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -459,6 +462,7 @@ int main(int argc, char *argv[])
 		case 'E': ctx.fec_group = atoi(optarg); break;
 		case 'M': ctx.lts_mtu = atoi(optarg); break;
 		case 'B': ctx.benchmark_kbps = atoi(optarg); break;
+		case 'D': ctx.param_dup_count = atoi(optarg); break;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -710,12 +714,12 @@ int main(int argc, char *argv[])
 				}
 
 				/* Before IDR(19,20): re-send VPS/SPS/PPS with duplication.
-				 * Each param NAL sent PARAM_NAL_DUP_COUNT times for
+				 * Each param NAL sent ctx.param_dup_count times for
 				 * redundancy on lossy radio. At PER=50%, probability of
 				 * losing all 3 copies = 12.5% vs 50% for single send. */
 				if ((hevc_nal_type == 19 || hevc_nal_type == 20) &&
 				    ctx.cached_params_len[0] > 0) {
-					for (int dup = 0; dup < PARAM_NAL_DUP_COUNT; dup++) {
+					for (int dup = 0; dup < ctx.param_dup_count; dup++) {
 						for (int p = 0; p < 3; p++) {
 							if (ctx.cached_params_len[p] == 0) continue;
 							lts_encoded_packet_t pp[4];
@@ -733,7 +737,7 @@ int main(int argc, char *argv[])
 					}
 					if (ctx.verbose)
 						fprintf(stderr, "vcpd: sent VPS/SPS/PPS ×%d before IDR\n",
-							PARAM_NAL_DUP_COUNT);
+							ctx.param_dup_count);
 				}
 
 				lts_encoded_packet_t lts_pkts[64];
