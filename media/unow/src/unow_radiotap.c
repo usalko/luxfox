@@ -148,6 +148,12 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	}
 	payload = packet + radiotap_len + sizeof(*mgmt_header) + sizeof(*vendor_header);
 	payload_len = packet_len - radiotap_len - sizeof(*mgmt_header) - sizeof(*vendor_header);
+	/* Strip 802.11 FCS (4 bytes) if present at end of frame.
+	 * The 8192eu driver includes FCS in pcap captures. Without
+	 * stripping, 4 garbage bytes are appended to every LTS packet,
+	 * corrupting NAL data at packet boundaries. */
+	if (payload_len >= 4)
+		payload_len -= 4;
 	if (payload_len > ULAMA_ESPNOW_MAX_PAYLOAD) {
 		return false;
 	}
