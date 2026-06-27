@@ -765,8 +765,11 @@ int main(int argc, char *argv[])
 							ctx.fec_sent++;
 						}
 					}
-					if (ctx.pace_us > 0 && i + 1 < npkts)
-						usleep(ctx.pace_us);
+					if (i + 1 < npkts) {
+						handle_uvcp_rx(&ctx);
+						if (ctx.pace_us > 0)
+							usleep(ctx.pace_us);
+					}
 				}
 
 				if (ctx.verbose && npkts > 0)

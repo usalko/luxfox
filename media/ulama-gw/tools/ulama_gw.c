@@ -164,6 +164,8 @@ typedef struct {
 	uint16_t lts_video_src;
 	uint8_t lts_video_src_node;
 	uint64_t last_nack_ms;
+	uint16_t nack_horizon;
+	bool nack_horizon_valid;
 	nal_assembler_t nal_asm;
 	lts_fec_decoder_t fec_dec;
 	gw_stats_t stats;
@@ -504,20 +506,44 @@ static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 	if (now - ctx->last_nack_ms < NACK_MIN_INTERVAL_MS)
 		return;
 
+	/* Reset horizon when decoder has advanced past it */
+	if (ctx->nack_horizon_valid &&
+	    lts_seq_lt(ctx->nack_horizon, ctx->lts_dec.next_emit))
+		ctx->nack_horizon_valid = false;
+
 	uint16_t gaps[16];
 	size_t ngaps = lts_decoder_detect_gaps(&ctx->lts_dec, gaps, 16);
 	if (ngaps == 0)
 		return;
 
+	/* Filter out gaps at or below the NACK horizon (already NACKed once) */
+	if (ctx->nack_horizon_valid) {
+		size_t filtered = 0;
+		for (size_t i = 0; i < ngaps; i++) {
+			if (lts_seq_lt(ctx->nack_horizon, gaps[i]))
+				gaps[filtered++] = gaps[i];
+		}
+		ngaps = filtered;
+		if (ngaps == 0)
+			return;
+	}
+
 	lts_nack_t nack;
 	nack.stream_id = 0;
 	nack.start_seq = gaps[0];
 	nack.bitmask = 0;
+	uint16_t max_seq = gaps[0];
 	for (size_t i = 0; i < ngaps; i++) {
 		uint16_t offset = gaps[i] - gaps[0];
 		if (offset < 16)
 			nack.bitmask |= (uint16_t)(1 << offset);
+		if (lts_seq_lt(max_seq, gaps[i]))
+			max_seq = gaps[i];
 	}
+
+	/* Update horizon — don't NACK these seqs again */
+	ctx->nack_horizon = max_seq;
+	ctx->nack_horizon_valid = true;
 
 	uint8_t nack_buf[LTS_NACK_SIZE];
 	size_t nack_len = lts_encode_nack(&nack, nack_buf, sizeof(nack_buf));
