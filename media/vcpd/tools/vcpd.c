@@ -61,6 +61,7 @@ static void usage(const char *prog)
 		"  --width       W          Video width              (default 640)\n"
 		"  --height      H          Video height             (default 480)\n"
 		"  --fps         FPS        Frame rate               (default 25)\n"
+		"  --gop         N          GOP size (1=all IDR)     (default 5)\n"
 		"  --transport   udp|unow   ULAMA transport          (default udp)\n"
 		"  --peer        ADDR:PORT  ULAMA TX peer (UDP)      (default 127.0.0.1:5000)\n"
 		"  --listen      ADDR:PORT  ULAMA RX listen (UVCP)   (default 0.0.0.0:5002)\n"
@@ -379,6 +380,7 @@ int main(int argc, char *argv[])
 	ctx.video.width = 640;
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
+	ctx.video.gop = 5;
 	ctx.pace_us = 300;
 	ctx.reliable_mode = 2;
 	ctx.reliable_threshold = 3;
@@ -401,6 +403,7 @@ int main(int argc, char *argv[])
 		{"width",     required_argument, NULL, 'W'},
 		{"height",    required_argument, NULL, 'H'},
 		{"fps",       required_argument, NULL, 'f'},
+		{"gop",       required_argument, NULL, 'g'},
 		{"transport", required_argument, NULL, 't'},
 		{"peer",      required_argument, NULL, 'p'},
 		{"listen",    required_argument, NULL, 'l'},
@@ -442,6 +445,7 @@ int main(int argc, char *argv[])
 		case 'W': ctx.video.width = atoi(optarg); break;
 		case 'H': ctx.video.height = atoi(optarg); break;
 		case 'f': ctx.video.fps = atoi(optarg); break;
+		case 'g': ctx.video.gop = atoi(optarg); break;
 		case 't': strncpy(ctx.transport_str, optarg, sizeof(ctx.transport_str) - 1); break;
 		case 'p': strncpy(ctx.peer_addr, optarg, sizeof(ctx.peer_addr) - 1); break;
 		case 'l': strncpy(ctx.listen_addr, optarg, sizeof(ctx.listen_addr) - 1); break;

@@ -228,7 +228,7 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stVencAttr.u32BufSize = ctx->actual_width * ctx->actual_height / 2;
 
 	chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
-	chn_attr.stRcAttr.stH265Cbr.u32Gop = 5;
+	chn_attr.stRcAttr.stH265Cbr.u32Gop = (RK_U32)(ctx->src->gop > 0 ? ctx->src->gop : 5);
 	chn_attr.stRcAttr.stH265Cbr.u32BitRate = (RK_U32)ctx->src->bitrate_kbps;
 	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
 	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = (RK_U32)ctx->src->fps;

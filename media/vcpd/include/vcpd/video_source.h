@@ -32,6 +32,7 @@ typedef struct {
 	int width;
 	int height;
 	int fps;
+	int gop;
 	bool running;
 	bool test_pattern;
 	void *mpp_ctx;
