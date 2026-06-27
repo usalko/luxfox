@@ -78,6 +78,13 @@ bool lts_decoder_insert(lts_decoder_t *dec, const lts_packet_t *pkt, uint64_t no
 	if (dec->first_packet) {
 		dec->next_emit = pkt->pkt_seq;
 		dec->first_packet = false;
+	} else {
+		uint16_t gap = (uint16_t)(pkt->pkt_seq - dec->next_emit);
+		if (gap > (uint16_t)(dec->window_size * 8)) {
+			dec->next_emit = pkt->pkt_seq;
+			for (int i = 0; i < dec->window_size; i++)
+				dec->slots[i].occupied = false;
+		}
 	}
 
 	size_t copy_len = pkt->payload_len;

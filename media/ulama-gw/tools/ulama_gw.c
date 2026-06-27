@@ -81,7 +81,7 @@ static void usage(const char *prog)
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
-		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 2)\n"
+		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 0)\n"
 		"  --nack-disable           Suppress NACK sending (for benchmarks)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
@@ -688,7 +688,7 @@ int main(int argc, char *argv[])
 	ctx.gw.node_id = 1;
 	ctx.verbose = false;
 	ctx.channel = 0;
-	ctx.nal_asm.max_gap_tolerance = 2;
+	ctx.nal_asm.max_gap_tolerance = 0;
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
