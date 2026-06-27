@@ -45,6 +45,8 @@ size_t lts_encoder_encode(lts_encoder_t *enc, const uint8_t *payload, size_t pay
 			chunk = mtu;
 
 		uint8_t pkt_flags = flags;
+		if (offset == 0)
+			pkt_flags |= LTS_ENC_FLAG_FIRST_OF_FRAME;
 		if (offset + chunk >= payload_len)
 			pkt_flags |= LTS_ENC_FLAG_LAST_OF_FRAME;
 

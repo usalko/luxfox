@@ -7,9 +7,10 @@
 #define LTS_ENC_HEADER_SIZE 4
 #define LTS_ENC_MAX_PAYLOAD 2281
 
-#define LTS_ENC_FLAG_LAST_OF_FRAME (1 << 0)
-#define LTS_ENC_FLAG_KEYFRAME      (1 << 1)
-#define LTS_ENC_FLAG_RETX          (1 << 2)
+#define LTS_ENC_FLAG_LAST_OF_FRAME  (1 << 0)
+#define LTS_ENC_FLAG_KEYFRAME       (1 << 1)
+#define LTS_ENC_FLAG_RETX           (1 << 2)
+#define LTS_ENC_FLAG_FIRST_OF_FRAME (1 << 4)
 
 #define LTS_ENC_NACK_MAGIC0 0x4C
 #define LTS_ENC_NACK_MAGIC1 0x4E

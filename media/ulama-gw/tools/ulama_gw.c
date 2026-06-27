@@ -431,25 +431,28 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 	for (size_t i = 0; i < n; i++) {
 		lts_packet_t *pkt = &emitted[i];
 
-		/* Gap detected — tolerate up to max_gap_tolerance skipped
-		 * packets per NAL. Fill missing regions with 0x80 to preserve
-		 * byte alignment for H.265 decoder. 0x80 is safe (doesn't
-		 * create start code patterns like 0x00 0x00 0x0x would). */
+		/* Gap detected. If the packet after the gap is FIRST_OF_FRAME,
+		 * the gap crosses a NAL boundary (previous LAST_OF_FRAME was
+		 * lost). Drop the incomplete NAL and start fresh. */
 		if (a->active && pkt->pkt_seq != a->expect_seq) {
-			uint16_t gap = (uint16_t)(pkt->pkt_seq - a->expect_seq);
-			if (a->gaps_tolerated + gap <= a->max_gap_tolerance && a->chunk_size > 0) {
-				size_t fill_bytes = gap * a->chunk_size;
-				if (a->len + fill_bytes + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
-					memset(a->buf + a->len, 0x80, fill_bytes);
-					a->len += fill_bytes;
-				}
-				a->gaps_tolerated += gap;
-				ctx->stats.nal_gap_skipped += gap;
-				if (ctx->verbose)
-					fprintf(stderr, "gw: NAL gap filled seq expected=%u got=%u gap=%u fill=%zu bytes\n",
-						a->expect_seq, pkt->pkt_seq, gap, fill_bytes);
-			} else {
+			if (pkt->flags & LTS_FLAG_FIRST_OF_FRAME) {
 				drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+			} else {
+				uint16_t gap = (uint16_t)(pkt->pkt_seq - a->expect_seq);
+				if (a->gaps_tolerated + gap <= a->max_gap_tolerance && a->chunk_size > 0) {
+					size_t fill_bytes = gap * a->chunk_size;
+					if (a->len + fill_bytes + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
+						memset(a->buf + a->len, 0x80, fill_bytes);
+						a->len += fill_bytes;
+					}
+					a->gaps_tolerated += gap;
+					ctx->stats.nal_gap_skipped += gap;
+					if (ctx->verbose)
+						fprintf(stderr, "gw: NAL gap filled seq expected=%u got=%u gap=%u fill=%zu bytes\n",
+							a->expect_seq, pkt->pkt_seq, gap, fill_bytes);
+				} else {
+					drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
+				}
 			}
 		}
 
