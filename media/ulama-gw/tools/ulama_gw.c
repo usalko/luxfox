@@ -384,14 +384,10 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 	ctx->stats.nal_complete++;
 	ctx->stats.video_bytes_out += a->len;
 
-	{
-		uint32_t crc = 0;
-		for (size_t ci = 0; ci < a->len; ci++)
-			crc = (crc << 1) ^ a->buf[ci];
-		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu type=%u pkts=%u crc=%08x\n",
+	if (ctx->verbose)
+		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu type=%u pkts=%u\n",
 			a->first_seq, (uint16_t)(a->expect_seq - 1), a->len, nt,
-			(uint16_t)(a->expect_seq - a->first_seq), crc);
-	}
+			(uint16_t)(a->expect_seq - a->first_seq));
 
 	a->len = 0;
 	a->active = false;
