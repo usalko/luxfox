@@ -228,8 +228,9 @@ static int open_udp_sender(const char *addr_str, struct sockaddr_in *dst)
 
 static void handle_cascade_rx(app_ctx_t *ctx)
 {
+  for (int drain = 0; drain < 16; drain++) {
 	uint8_t buf[CASCADE_FRAME_HEADER_SIZE + CASCADE_FRAME_MAX_PAYLOAD];
-	ssize_t n = recv(ctx->cascade_rx_fd, buf, sizeof(buf), 0);
+	ssize_t n = recv(ctx->cascade_rx_fd, buf, sizeof(buf), MSG_DONTWAIT);
 	if (n <= 0)
 		return;
 
@@ -295,6 +296,7 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 				ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
 		}
 	}
+  }
 }
 
 static void send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
@@ -582,7 +584,7 @@ static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 
 static void handle_ulama_rx(app_ctx_t *ctx)
 {
-  for (int drain = 0; drain < 256; drain++) {
+  for (int drain = 0; drain < 4; drain++) {
 	uint8_t buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD + 64];
 	uint8_t src_mac[6] = {0};
 	int8_t rssi = 0;
@@ -845,11 +847,14 @@ int main(int argc, char *argv[])
 
 		uint64_t ts = now_ms();
 
-		if (pfds[0].revents & POLLIN)
-			handle_cascade_rx(&ctx);
+		/* Control has highest priority — process before and after video */
+		handle_cascade_rx(&ctx);
 
 		/* For UNOW: fd=-1, poll can't watch it; call recv with timeout=0 */
 		handle_ulama_rx(&ctx);
+
+		/* Process any control frames that arrived during video ACK burst */
+		handle_cascade_rx(&ctx);
 
 		/* Print stats every 5 seconds */
 		if (ts - ctx.stats.last_print_ms >= 5000) {
