@@ -81,7 +81,7 @@ static void usage(const char *prog)
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
-		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 0)\n"
+		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 2)\n"
 		"  --nack-disable           Suppress NACK sending (for benchmarks)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
@@ -110,6 +110,7 @@ typedef struct {
 	bool skip;
 	uint16_t gaps_tolerated;
 	uint16_t max_gap_tolerance;
+	size_t chunk_size;
 } nal_assembler_t;
 
 typedef struct {
@@ -429,18 +430,22 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 		lts_packet_t *pkt = &emitted[i];
 
 		/* Gap detected — tolerate up to max_gap_tolerance skipped
-		 * packets per NAL instead of immediately dropping.
-		 * A partial NAL (with gaps) is better than a fully dropped one
-		 * because H.265 can decode partial slices. */
+		 * packets per NAL. Fill missing regions with 0x80 to preserve
+		 * byte alignment for H.265 decoder. 0x80 is safe (doesn't
+		 * create start code patterns like 0x00 0x00 0x0x would). */
 		if (a->active && pkt->pkt_seq != a->expect_seq) {
 			uint16_t gap = (uint16_t)(pkt->pkt_seq - a->expect_seq);
-			if (a->gaps_tolerated + gap <= a->max_gap_tolerance) {
+			if (a->gaps_tolerated + gap <= a->max_gap_tolerance && a->chunk_size > 0) {
+				size_t fill_bytes = gap * a->chunk_size;
+				if (a->len + fill_bytes + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
+					memset(a->buf + a->len, 0x80, fill_bytes);
+					a->len += fill_bytes;
+				}
 				a->gaps_tolerated += gap;
 				ctx->stats.nal_gap_skipped += gap;
 				if (ctx->verbose)
-					fprintf(stderr, "gw: NAL gap tolerated seq expected=%u got=%u gap=%u (total=%u/%u)\n",
-						a->expect_seq, pkt->pkt_seq, gap,
-						a->gaps_tolerated, a->max_gap_tolerance);
+					fprintf(stderr, "gw: NAL gap filled seq expected=%u got=%u gap=%u fill=%zu bytes\n",
+						a->expect_seq, pkt->pkt_seq, gap, fill_bytes);
 			} else {
 				drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
 			}
@@ -475,6 +480,7 @@ static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
 			a->len = 0;
 			a->first_seq = pkt->pkt_seq;
 			a->gaps_tolerated = 0;
+			a->chunk_size = pkt->payload_len;
 		}
 
 		if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
@@ -688,7 +694,7 @@ int main(int argc, char *argv[])
 	ctx.gw.node_id = 1;
 	ctx.verbose = false;
 	ctx.channel = 0;
-	ctx.nal_asm.max_gap_tolerance = 0;
+	ctx.nal_asm.max_gap_tolerance = 2;
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
