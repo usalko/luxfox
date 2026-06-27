@@ -61,7 +61,7 @@ static void usage(const char *prog)
 		"  --width       W          Video width              (default 640)\n"
 		"  --height      H          Video height             (default 480)\n"
 		"  --fps         FPS        Frame rate               (default 25)\n"
-		"  --gop         N          GOP size (1=all IDR)     (default 5)\n"
+		"  --gop         N          GOP size (1=all IDR)     (adaptive: =fps)\n"
 		"  --transport   udp|unow   ULAMA transport          (default udp)\n"
 		"  --peer        ADDR:PORT  ULAMA TX peer (UDP)      (default 127.0.0.1:5000)\n"
 		"  --listen      ADDR:PORT  ULAMA RX listen (UVCP)   (default 0.0.0.0:5002)\n"
@@ -73,11 +73,11 @@ static void usage(const char *prog)
 		"  --test        FILE       Capture raw encoder output to file and exit\n"
 		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
 		"  --test-pattern           Use color bars instead of camera\n"
-		"  --pace-us     US         Inter-packet pacing delay in us    (default 300)\n"
+		"  --pace-us     US         Inter-packet pacing delay in us    (adaptive: 300-3000)\n"
 		"  --reliable    MODE       0=unreliable 1=last-pkt 2=all 3=adaptive (default 2)\n"
 		"  --reliable-threshold N   Min NAL packets for adaptive mode 3    (default 3)\n"
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 8000)\n"
-		"  --ack-retry   N          UNOW ACK max retries                   (default 2)\n"
+		"  --ack-retry   N          UNOW ACK max retries                   (adaptive: 3-5)\n"
 		"  --fec         K          FEC group size (0=disabled, 2-8)       (default 0)\n"
 		"  --lts-mtu     N          LTS payload size in bytes              (default 1440)\n"
 		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
@@ -380,12 +380,12 @@ int main(int argc, char *argv[])
 	ctx.video.width = 640;
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
-	ctx.video.gop = 5;
-	ctx.pace_us = 300;
+	ctx.video.gop = 0;
+	ctx.pace_us = 0;
 	ctx.reliable_mode = 2;
 	ctx.reliable_threshold = 3;
-	ctx.ack_timeout_us = 8000;
-	ctx.ack_max_retry = 2;
+	ctx.ack_timeout_us = 2000;
+	ctx.ack_max_retry = 0;
 	ctx.lts_mtu = 1440;
 	ctx.param_dup_count = 1;
 	ctx.node_id = 2;
@@ -476,6 +476,17 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 	signal(SIGPIPE, SIG_IGN);
+
+	/* Adaptive defaults based on fps if not explicitly set */
+	int fps = ctx.video.fps > 0 ? ctx.video.fps : 25;
+	if (ctx.video.gop == 0)
+		ctx.video.gop = fps > 5 ? fps : 5;
+	if (ctx.ack_max_retry == 0)
+		ctx.ack_max_retry = fps <= 5 ? 5 : 3;
+	if (ctx.pace_us == 0)
+		ctx.pace_us = fps <= 5 ? 3000 : 300;
+	fprintf(stderr, "vcpd: adaptive defaults for %d fps: gop=%d ack_retry=%u pace=%u us\n",
+		fps, ctx.video.gop, ctx.ack_max_retry, ctx.pace_us);
 
 	if (ctx.test_output[0]) {
 		return run_test_capture(&ctx.video, ctx.test_output, ctx.test_frames);
