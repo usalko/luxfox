@@ -178,7 +178,7 @@ while (running) {
 - RX_SLOT_US = 2000 мкс (2 мс приём)
 - Цикл: ~3-5 мс (200-330 итераций/сек)
 
-#### Task 1.5: Адаптация vcpd
+#### ~~Task 1.5: Адаптация vcpd~~ ✅ DONE
 
 **Файл**: `vcpd/tools/vcpd.c`, `ulama/src/common/transport.c`
 
@@ -188,7 +188,7 @@ while (running) {
 - vcpd больше НЕ открывает pcap напрямую
 - Reliable/unreliable решает radiod, не vcpd
 
-#### Task 1.6: Адаптация ulamad
+#### ~~Task 1.6: Адаптация ulamad~~ ✅ DONE
 
 **Файл**: `ulama/tools/ulamad.c`
 

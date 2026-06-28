@@ -517,7 +517,12 @@ int main(int argc, char **argv)
 		out_file = stdout;
 	}
 
-	if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
+	if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_RADIOD) {
+		if (ulama_transport_rx_init_radiod(&transport, cfg.node_id, NULL, "ulamad_rx") != 0) {
+			fprintf(stderr, "failed to connect to radiod: %s\n", strerror(errno));
+			goto cleanup;
+		}
+	} else if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
 		if (ulama_transport_rx_init_udp(&transport, cfg.listen_addr) != 0) {
 			fprintf(stderr, "failed to bind udp %s: %s\n", cfg.listen_addr, strerror(errno));
 			goto cleanup;
@@ -548,7 +553,13 @@ int main(int argc, char **argv)
 		has_msp = true;
 		fprintf(stderr, "ulamad msp: uart=%s baud=%u\n", cfg.msp_uart_path, (unsigned)cfg.msp_uart_baud);
 
-		if (cfg.tx_peer != NULL) {
+		if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_RADIOD) {
+			if (ulama_transport_tx_init_radiod(&tx_transport, cfg.node_id, NULL, "ulamad_tx") != 0) {
+				fprintf(stderr, "failed to connect to radiod for tx: %s\n", strerror(errno));
+				goto cleanup;
+			}
+			has_tx = true;
+		} else if (cfg.tx_peer != NULL) {
 			if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
 				if (ulama_transport_tx_init_udp(&tx_transport, cfg.tx_peer) != 0) {
 					fprintf(stderr, "failed to init tx peer %s: %s\n", cfg.tx_peer, strerror(errno));
@@ -683,7 +694,9 @@ int main(int argc, char **argv)
 				}
 
 				int rc;
-				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
+				if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_RADIOD) {
+					rc = ulama_transport_rx_init_radiod(&transport, cfg.node_id, NULL, "ulamad_rx");
+				} else if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UDP) {
 					rc = ulama_transport_rx_init_udp(&transport, cfg.listen_addr);
 				} else {
 					rc = ulama_transport_rx_init_unow(&transport, cfg.node_id, cfg.iface);
@@ -705,7 +718,9 @@ int main(int argc, char **argv)
 					/* Also reinit TX if needed */
 					if (has_tx) {
 						ulama_transport_tx_close(&tx_transport);
-						if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
+						if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_RADIOD) {
+							ulama_transport_tx_init_radiod(&tx_transport, cfg.node_id, NULL, "ulamad_tx");
+						} else if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
 							ulama_transport_tx_init_unow(&tx_transport, cfg.node_id, cfg.iface, NULL);
 						}
 					}
