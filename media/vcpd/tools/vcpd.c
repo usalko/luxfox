@@ -494,7 +494,10 @@ int main(int argc, char *argv[])
 
 	ulama_transport_kind_t tk = ulama_transport_parse_kind(ctx.transport_str);
 	int rc;
-	if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
+	if (tk == ULAMA_TRANSPORT_KIND_RADIOD) {
+		rc = ulama_transport_tx_init_radiod(&ctx.ulama_tx, ctx.node_id,
+						    NULL, "vcpd_tx");
+	} else if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
 		uint8_t dst_mac[6];
 		bool has_mac = (ctx.dst_mac_str[0] && ulama_transport_parse_mac(ctx.dst_mac_str, dst_mac));
 		rc = ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface,
@@ -507,7 +510,10 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	if (tk == ULAMA_TRANSPORT_KIND_UNOW)
+	if (tk == ULAMA_TRANSPORT_KIND_RADIOD)
+		rc = ulama_transport_rx_init_radiod(&ctx.ulama_rx, ctx.node_id,
+						    NULL, "vcpd_rx");
+	else if (tk == ULAMA_TRANSPORT_KIND_UNOW)
 		rc = ulama_transport_rx_init_unow(&ctx.ulama_rx, ctx.node_id, ctx.iface);
 	else
 		rc = ulama_transport_rx_init_udp(&ctx.ulama_rx, ctx.listen_addr);
@@ -570,6 +576,14 @@ int main(int argc, char *argv[])
 	uint32_t diag_polls = 0;
 	uint32_t diag_poll_video = 0;
 	uint32_t diag_video_reads = 0;
+	uint32_t diag_nals = 0;
+	uint32_t diag_nal_bytes = 0;
+	uint32_t diag_lts_pkts = 0;
+	uint32_t diag_tx_bytes = 0;
+	uint32_t diag_tx_ok = 0;
+	uint32_t diag_tx_fail = 0;
+	uint32_t diag_fec_pkts = 0;
+	uint32_t diag_pipe_bytes = 0;
 
 	while (g_running) {
 		struct pollfd pfds[2];
@@ -590,12 +604,23 @@ int main(int argc, char *argv[])
 
 		uint64_t diag_now = now_ms();
 		if (diag_now - diag_last_ms >= 5000) {
-			fprintf(stderr, "vcpd: [diag] polls=%u nfds=%d video_polled=%u video_reads=%u running=%d pipe_fd=%d\n",
+			fprintf(stderr, "vcpd: [diag] polls=%u nfds=%d video_polled=%u video_reads=%u running=%d pipe_fd=%d"
+				" | pipe=%u B nals=%u nal_bytes=%u lts=%u tx=%u/%u B fec=%u\n",
 				diag_polls, nfds, diag_poll_video, diag_video_reads,
-				ctx.video.running, ctx.video.pipe_fd);
+				ctx.video.running, ctx.video.pipe_fd,
+				diag_pipe_bytes, diag_nals, diag_nal_bytes,
+				diag_lts_pkts, diag_tx_ok, diag_tx_bytes, diag_fec_pkts);
 			diag_polls = 0;
 			diag_poll_video = 0;
 			diag_video_reads = 0;
+			diag_nals = 0;
+			diag_nal_bytes = 0;
+			diag_lts_pkts = 0;
+			diag_tx_bytes = 0;
+			diag_tx_ok = 0;
+			diag_tx_fail = 0;
+			diag_fec_pkts = 0;
+			diag_pipe_bytes = 0;
 			diag_last_ms = diag_now;
 		}
 		if (ret < 0) {
@@ -620,7 +645,7 @@ int main(int argc, char *argv[])
 		if (nfds > 1 && (pfds[1].revents & (POLLIN | POLLERR | POLLHUP)) && ctx.video.running) {
 			diag_poll_video++;
 			ssize_t n = vsrc_read(&ctx.video, ts_buf, sizeof(ts_buf));
-			if (n > 0) diag_video_reads++;
+			if (n > 0) { diag_video_reads++; diag_pipe_bytes += (uint32_t)n; }
 			if (n <= 0) {
 				if (n == 0 || errno == ENODEV || errno == EIO) {
 					fprintf(stderr, "vcpd: video source lost (%s), entering recovery\n",
@@ -716,6 +741,8 @@ int main(int argc, char *argv[])
 				/* Complete NAL: nal_buf[sc1..sc2) */
 				uint8_t *nal_data = nal_buf + sc1;
 				size_t nal_size = sc2 - sc1;
+				diag_nals++;
+				diag_nal_bytes += (uint32_t)nal_size;
 
 				/* HEVC NAL type from first byte after start code */
 				uint8_t hevc_nal_type = (nal_data[sc1_len] >> 1) & 0x3f;
@@ -764,12 +791,17 @@ int main(int argc, char *argv[])
 				bool use_reliable = (ctx.reliable_mode == 2) ||
 					(ctx.reliable_mode == 3 && (int)npkts >= ctx.reliable_threshold);
 
+				diag_lts_pkts += (uint32_t)npkts;
 				for (size_t i = 0; i < npkts; i++) {
 					lts_retx_buf_store(ctx.retx_buf, &lts_pkts[i]);
 					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD) {
 						bool pkt_reliable = use_reliable ||
 							(ctx.reliable_mode == 1 && i + 1 == npkts);
 						send_ulama_video_ex(&ctx, lts_pkts[i].data, lts_pkts[i].len, pkt_reliable);
+						diag_tx_ok++;
+						diag_tx_bytes += (uint32_t)lts_pkts[i].len;
+					} else {
+						diag_tx_fail++;
 					}
 					if (ctx.fec_group > 0) {
 						lts_encoded_packet_t fec_pkt;
@@ -778,6 +810,7 @@ int main(int argc, char *argv[])
 							if (fec_pkt.len <= ULAMA_FRAME_MAX_PAYLOAD)
 								send_ulama_video_ex(&ctx, fec_pkt.data, fec_pkt.len, use_reliable);
 							ctx.fec_sent++;
+							diag_fec_pkts++;
 						}
 					}
 					if (i + 1 < npkts) {

@@ -70,7 +70,7 @@ LuckFox (device):                    Host (ground station):
 
 ### Phase 1: radiod daemon (device side)
 
-#### Task 1.1: IPC протокол между приложениями и radiod
+#### ~~Task 1.1: IPC протокол между приложениями и radiod~~ ✅ DONE
 
 **Файлы**: `radiod/include/radiod/ipc.h`, `radiod/src/ipc.c`
 
@@ -97,7 +97,7 @@ typedef struct {
 
 Приложения фильтруют входящие фреймы по traffic_class самостоятельно.
 
-#### Task 1.2: TX Scheduler с приоритетами
+#### ~~Task 1.2: TX Scheduler с приоритетами~~ ✅ DONE
 
 **Файлы**: `radiod/src/tx_scheduler.c`
 
@@ -121,7 +121,7 @@ Rate limiting:
 - После TX slot: обязательный RX slot (минимум 2ms)
 - CTRL пакеты обходят rate limit (всегда отправляются немедленно)
 
-#### Task 1.3: RX Dispatcher
+#### ~~Task 1.3: RX Dispatcher~~ ✅ DONE
 
 **Файлы**: `radiod/src/rx_dispatcher.c`
 
@@ -137,7 +137,7 @@ Dispatch по traffic_class:
 - TELEMETRY → ulamad socket
 - ALL → broadcast (если получатель не указан)
 
-#### Task 1.4: TDMA Scheduling Loop
+#### ~~Task 1.4: TDMA Scheduling Loop~~ ✅ DONE
 
 **Файлы**: `radiod/src/main.c`
 
@@ -230,7 +230,7 @@ ulama-gw должен разделить их по приоритету:
 
 ### Phase 3: Мониторинг и безопасность
 
-#### Task 3.1: Control link watchdog
+#### ~~Task 3.1: Control link watchdog~~ ✅ DONE
 
 **Файл**: `radiod/src/watchdog.c`
 
@@ -243,7 +243,7 @@ ulama-gw должен разделить их по приоритету:
 Это FAILSAFE: если видео забило канал, radiod автоматически
 освобождает его для восстановления управления.
 
-#### Task 3.2: Radio utilization metrics
+#### ~~Task 3.2: Radio utilization metrics~~ ✅ DONE
 
 Добавить в radiod stats:
 - TX utilization % (время в TX / общее время)

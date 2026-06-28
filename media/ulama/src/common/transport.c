@@ -1,4 +1,5 @@
 #include "ulama/transport.h"
+#include "ulama/ulama_frame.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -9,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #ifndef ULAMA_WITH_UNOW
@@ -71,6 +73,9 @@ ulama_transport_kind_t ulama_transport_parse_kind(const char *text)
 	if (strcasecmp(text, "unow") == 0) {
 		return ULAMA_TRANSPORT_KIND_UNOW;
 	}
+	if (strcasecmp(text, "radiod") == 0) {
+		return ULAMA_TRANSPORT_KIND_RADIOD;
+	}
 	return ULAMA_TRANSPORT_KIND_UNSPEC;
 }
 
@@ -81,6 +86,8 @@ const char *ulama_transport_kind_name(ulama_transport_kind_t kind)
 		return "udp";
 	case ULAMA_TRANSPORT_KIND_UNOW:
 		return "unow";
+	case ULAMA_TRANSPORT_KIND_RADIOD:
+		return "radiod";
 	default:
 		return "unspec";
 	}
@@ -102,6 +109,222 @@ bool ulama_transport_parse_mac(const char *text, uint8_t mac[6])
 	}
 	return true;
 }
+
+/* ================================================================
+ * radiod IPC transport backend
+ *
+ * Wire protocol (Unix SOCK_DGRAM):
+ *   TX request:  [03] [priority] [reliability] [00] [len_lo] [len_hi] [payload...]
+ *   RX frame:    [04] [rssi]     [mac×6]             [len_lo] [len_hi] [payload...]
+ *   Register:    [01] [name×16]
+ *   Unregister:  [02] ...
+ * ================================================================ */
+
+#define RADIOD_DEFAULT_SOCK   "/var/run/radiod.sock"
+#define RADIOD_MSG_REGISTER   0x01
+#define RADIOD_MSG_UNREGISTER 0x02
+#define RADIOD_MSG_TX_REQUEST 0x03
+#define RADIOD_MSG_RX_FRAME   0x04
+
+static uint8_t ulama_class_to_radio_prio(uint8_t traffic_class)
+{
+	switch (traffic_class) {
+	case 0: return 0; /* CTRL  → P0 */
+	case 1: return 1; /* TELEM → P1 */
+	case 3: return 2; /* VIDEO → P2 */
+	case 2: return 3; /* BULK  → P3 */
+	default: return 3;
+	}
+}
+
+static uint8_t frame_traffic_class(const uint8_t *data, size_t len)
+{
+	if (data == NULL || len < ULAMA_FRAME_HEADER_SIZE)
+		return 3;
+	return data[5];
+}
+
+static struct sockaddr_un g_radiod_addr;
+static bool g_radiod_addr_init = false;
+
+static void radiod_ensure_addr(const char *sock_path)
+{
+	if (g_radiod_addr_init)
+		return;
+	memset(&g_radiod_addr, 0, sizeof(g_radiod_addr));
+	g_radiod_addr.sun_family = AF_UNIX;
+	strncpy(g_radiod_addr.sun_path,
+		sock_path != NULL ? sock_path : RADIOD_DEFAULT_SOCK,
+		sizeof(g_radiod_addr.sun_path) - 1);
+	g_radiod_addr_init = true;
+}
+
+static int radiod_create_client_socket(const char *client_name)
+{
+	struct sockaddr_un addr;
+	int fd;
+
+	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return -1;
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	addr.sun_path[0] = '\0';
+	snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 2,
+		 "radiod_%s_%d", client_name ? client_name : "anon", getpid());
+	socklen_t bind_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
+			      + 1 + strlen(addr.sun_path + 1));
+	if (bind(fd, (struct sockaddr *)&addr, bind_len) < 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static void radiod_send_register(int fd, const char *name)
+{
+	uint8_t msg[1 + 16];
+
+	memset(msg, 0, sizeof(msg));
+	msg[0] = RADIOD_MSG_REGISTER;
+	if (name != NULL)
+		strncpy((char *)msg + 1, name, 15);
+	sendto(fd, msg, sizeof(msg), MSG_DONTWAIT,
+	       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
+}
+
+static void radiod_send_unregister(int fd)
+{
+	uint8_t msg[1 + 16];
+
+	memset(msg, 0, sizeof(msg));
+	msg[0] = RADIOD_MSG_UNREGISTER;
+	sendto(fd, msg, sizeof(msg), MSG_DONTWAIT,
+	       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
+}
+
+static ssize_t radiod_tx_send(int fd, const uint8_t *data, size_t len,
+			      uint8_t reliability)
+{
+	uint8_t buf[6 + 2400];
+	uint8_t prio;
+	size_t total;
+
+	if (len > 2400) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+
+	prio = ulama_class_to_radio_prio(frame_traffic_class(data, len));
+
+	buf[0] = RADIOD_MSG_TX_REQUEST;
+	buf[1] = prio;
+	buf[2] = reliability;
+	buf[3] = 0;
+	buf[4] = (uint8_t)(len & 0xFF);
+	buf[5] = (uint8_t)((len >> 8) & 0xFF);
+	memcpy(buf + 6, data, len);
+	total = 6 + len;
+
+	ssize_t n = sendto(fd, buf, total, MSG_DONTWAIT,
+			   (struct sockaddr *)&g_radiod_addr,
+			   sizeof(g_radiod_addr));
+	if (n < 0)
+		return -1;
+	return (ssize_t)len;
+}
+
+static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
+			      int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
+{
+	uint8_t buf[10 + 2400];
+	ssize_t n;
+
+	struct pollfd pfd = { .fd = fd, .events = POLLIN };
+	int rc = poll(&pfd, 1, timeout_ms);
+	if (rc < 0)
+		return -1;
+	if (rc == 0)
+		return 0;
+
+	n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+	if (n < 10)
+		return 0;
+	if (buf[0] != RADIOD_MSG_RX_FRAME)
+		return 0;
+
+	uint16_t payload_len = (uint16_t)buf[8] | ((uint16_t)buf[9] << 8);
+	if ((size_t)n < 10U + payload_len)
+		return 0;
+	if (payload_len > capacity) {
+		errno = EMSGSIZE;
+		return -1;
+	}
+
+	if (rssi != NULL)
+		*rssi = (int8_t)buf[1];
+	if (src_mac != NULL)
+		memcpy(src_mac, buf + 2, 6);
+	memcpy(data, buf + 10, payload_len);
+	return (ssize_t)payload_len;
+}
+
+int ulama_transport_tx_init_radiod(ulama_tx_transport_t *transport,
+				   uint8_t node_id,
+				   const char *sock_path,
+				   const char *client_name)
+{
+	int fd;
+
+	if (transport == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	memset(transport, 0, sizeof(*transport));
+	transport->fd = -1;
+	radiod_ensure_addr(sock_path);
+
+	fd = radiod_create_client_socket(client_name ? client_name : "tx");
+	if (fd < 0)
+		return -1;
+
+	transport->kind = ULAMA_TRANSPORT_KIND_RADIOD;
+	transport->node_id = node_id;
+	transport->fd = fd;
+
+	radiod_send_register(fd, client_name);
+	return 0;
+}
+
+int ulama_transport_rx_init_radiod(ulama_rx_transport_t *transport,
+				   uint8_t node_id,
+				   const char *sock_path,
+				   const char *client_name)
+{
+	int fd;
+
+	if (transport == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	memset(transport, 0, sizeof(*transport));
+	transport->fd = -1;
+	radiod_ensure_addr(sock_path);
+
+	fd = radiod_create_client_socket(client_name ? client_name : "rx");
+	if (fd < 0)
+		return -1;
+
+	transport->kind = ULAMA_TRANSPORT_KIND_RADIOD;
+	transport->node_id = node_id;
+	transport->fd = fd;
+
+	radiod_send_register(fd, client_name);
+	return 0;
+}
+
+/* ================================================================ */
 
 int ulama_transport_tx_init_udp(ulama_tx_transport_t *transport, const char *peer)
 {
@@ -186,6 +409,8 @@ ssize_t ulama_transport_tx_send(ulama_tx_transport_t *transport, const uint8_t *
 		return -1;
 		#endif
 	}
+	case ULAMA_TRANSPORT_KIND_RADIOD:
+		return radiod_tx_send(transport->fd, data, len, 0);
 	default:
 		errno = EINVAL;
 		return -1;
@@ -219,6 +444,8 @@ ssize_t ulama_transport_tx_send_reliable(ulama_tx_transport_t *transport, const 
 		return -1;
 		#endif
 	}
+	case ULAMA_TRANSPORT_KIND_RADIOD:
+		return radiod_tx_send(transport->fd, data, len, 1);
 	default:
 		errno = EINVAL;
 		return -1;
@@ -231,6 +458,10 @@ void ulama_transport_tx_close(ulama_tx_transport_t *transport)
 		return;
 	}
 	if (transport->kind == ULAMA_TRANSPORT_KIND_UDP && transport->fd >= 0) {
+		close(transport->fd);
+	}
+	if (transport->kind == ULAMA_TRANSPORT_KIND_RADIOD && transport->fd >= 0) {
+		radiod_send_unregister(transport->fd);
 		close(transport->fd);
 	}
 	memset(transport, 0, sizeof(*transport));
@@ -354,6 +585,9 @@ ssize_t ulama_transport_rx_recv(ulama_rx_transport_t *transport, uint8_t *data, 
 		return -1;
 		#endif
 	}
+	case ULAMA_TRANSPORT_KIND_RADIOD:
+		return radiod_rx_recv(transport->fd, data, capacity,
+				      timeout_ms, src_mac, rssi);
 	default:
 		errno = EINVAL;
 		return -1;
@@ -374,6 +608,10 @@ void ulama_transport_rx_close(ulama_rx_transport_t *transport)
 		return;
 	}
 	if (transport->kind == ULAMA_TRANSPORT_KIND_UDP && transport->fd >= 0) {
+		close(transport->fd);
+	}
+	if (transport->kind == ULAMA_TRANSPORT_KIND_RADIOD && transport->fd >= 0) {
+		radiod_send_unregister(transport->fd);
 		close(transport->fd);
 	}
 	#if ULAMA_WITH_UNOW
