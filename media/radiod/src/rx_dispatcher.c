@@ -2,6 +2,7 @@
 #include "radiod/tx_scheduler.h"
 
 #include <pcap/pcap.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -231,7 +232,21 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 	/* Reset per-cycle feedback counters */
 	rxd->ctrl_for_us = 0;
 
+	/* Use poll() on pcap fd instead of busy-spinning.
+	 * pcap_next_ex in nonblock mode returns 0 immediately when no
+	 * packet is available — without poll this burns 100% CPU. */
+	int pcap_fd = pcap_get_selectable_fd(pcap);
+
 	while (now_us() < deadline_us) {
+		/* Sleep until packet arrives or deadline */
+		if (pcap_fd >= 0) {
+			int remaining_ms = (int)((deadline_us - now_us()) / 1000);
+			if (remaining_ms <= 0)
+				break;
+			struct pollfd pfd = { .fd = pcap_fd, .events = POLLIN };
+			poll(&pfd, 1, remaining_ms > 0 ? remaining_ms : 1);
+		}
+
 		status = pcap_next_ex(pcap, &header, &packet);
 
 		if (status == 0)
