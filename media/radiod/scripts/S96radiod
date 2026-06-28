@@ -25,21 +25,22 @@
 
 set -u
 
+# Binaries live on /oem, configs on rootfs (/)
 # ---- radiod ----
 RADIOD_BIN="/oem/usr/bin/radiod"
-RADIOD_CONF="/oem/etc/radiod.conf"
+RADIOD_CONF="/etc/radiod.conf"
 RADIOD_PID="/var/run/radiod.pid"
 RADIOD_LOG="/var/log/radiod"
 
 # ---- ulamad ----
 ULAMAD_BIN="/oem/usr/bin/ulamad"
-ULAMAD_CONF="/oem/etc/ulama.conf"
+ULAMAD_CONF="/etc/ulama.conf"
 ULAMAD_PID="/var/run/ulama.pid"
 ULAMAD_LOG="/var/log/ulama"
 
 # ---- vcpd ----
 VCPD_BIN="/oem/usr/bin/vcpd"
-VCPD_CONF="/oem/etc/vcpd.conf"
+VCPD_CONF="/etc/vcpd.conf"
 VCPD_PID="/var/run/vcpd.pid"
 VCPD_LOG="/var/log/vcpd"
 

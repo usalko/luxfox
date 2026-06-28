@@ -29,34 +29,36 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 ##############################################################################
-# Stage a Makefile project's out/ into both OEM and rootfs staging areas
-#   out/bin/*          → usr/bin/*   (executable)
-#   out/lib/*          → usr/lib/*
-#   out/etc/*          → etc/*
-#   out/etc/init.d/S*  → etc/init.d/S*  (executable)
+# Stage a Makefile project's out/ — no duplication:
+#   out/bin/*          → OEM only    (usr/bin/*)
+#   out/lib/*          → OEM only    (usr/lib/*)
+#   out/etc/*          → rootfs only (etc/*)
+#   out/etc/init.d/S*  → rootfs only (etc/init.d/S*, executable)
 ##############################################################################
 stage_project_out() {
     local out_dir="$1" name="$2"
     [ -d "$out_dir" ] || return 0
 
     log_info "Staging $name..."
-    for staging in "$OEM_STAGING" "$MEDIA_ROOT_STAGING"; do
-        if [ -d "$out_dir/bin" ]; then
-            mkdir -p "$staging/usr/bin"
-            cp -f "$out_dir/bin/"* "$staging/usr/bin/" 2>/dev/null || true
-            chmod +x "$staging/usr/bin/"* 2>/dev/null || true
-        fi
-        if [ -d "$out_dir/lib" ]; then
-            mkdir -p "$staging/usr/lib"
-            cp -rf "$out_dir/lib/"* "$staging/usr/lib/" 2>/dev/null || true
-        fi
-        if [ -d "$out_dir/etc" ]; then
-            mkdir -p "$staging/etc"
-            cp -rf "$out_dir/etc/"* "$staging/etc/"
-            find "$staging/etc/init.d" -maxdepth 1 -type f -name 'S*' \
-                -exec chmod +x {} \; 2>/dev/null || true
-        fi
-    done
+
+    # Binaries and libraries → OEM partition only
+    if [ -d "$out_dir/bin" ]; then
+        mkdir -p "$OEM_STAGING/usr/bin"
+        cp -f "$out_dir/bin/"* "$OEM_STAGING/usr/bin/" 2>/dev/null || true
+        chmod +x "$OEM_STAGING/usr/bin/"* 2>/dev/null || true
+    fi
+    if [ -d "$out_dir/lib" ]; then
+        mkdir -p "$OEM_STAGING/usr/lib"
+        cp -rf "$out_dir/lib/"* "$OEM_STAGING/usr/lib/" 2>/dev/null || true
+    fi
+
+    # Configs and init scripts → rootfs only
+    if [ -d "$out_dir/etc" ]; then
+        mkdir -p "$MEDIA_ROOT_STAGING/etc"
+        cp -rf "$out_dir/etc/"* "$MEDIA_ROOT_STAGING/etc/"
+        find "$MEDIA_ROOT_STAGING/etc/init.d" -maxdepth 1 -type f -name 'S*' \
+            -exec chmod +x {} \; 2>/dev/null || true
+    fi
 }
 
 ##############################################################################
