@@ -252,14 +252,137 @@ ulama-gw должен разделить их по приоритету:
 - Queue depths per priority
 - ACK success rate per class
 
-### Phase 4: Mesh networking (future)
+### Phase 4: Mesh relay
 
-#### Task 4.1: Multi-node routing
+Relay mode: radiod пересылает пакеты, адресованные другим узлам.
+ACK модель: **hop-by-hop** — каждый hop подтверждает приём на L2 (UNOW),
+end-to-end гарантий нет. Для дронов это приемлемо: CTRL идёт с
+reliable=1 на каждом hop, потери VIDEO восстанавливаются через NACK.
 
-radiod знает topology — может маршрутизировать фреймы через relay nodes.
-TTL в ULAMA header уже поддерживается.
+#### Task 4.1: Relay engine в rx_dispatcher
 
-#### Task 4.2: Channel hopping
+**Файлы**: `radiod/src/rx_dispatcher.c`, `radiod/include/radiod/rx_dispatcher.h`
+
+Сейчас rx_dispatcher слепо отдаёт ВСЕ RX фреймы в IPC broadcast.
+Для relay нужно после парсинга UNOW payload распаковать ULAMA header
+и принять решение:
+
+```
+RX frame → unpack ULAMA header → проверить dst_node:
+
+  dst_node == my_node:
+      → dispatch to IPC clients (как сейчас)
+
+  dst_node == 0xFF (broadcast):
+      → dispatch to IPC clients
+      → relay: decrement TTL, set MESH_RELAY flag, re-enqueue в TX scheduler
+
+  dst_node == другой узел:
+      → НЕ dispatch локально
+      → relay: decrement TTL, set MESH_RELAY flag, re-enqueue в TX scheduler
+      → если TTL == 0 после декремента — drop (loop protection)
+```
+
+Добавить в `radio_rx_dispatcher_t`:
+- `uint8_t own_node_id` — наш node_id для фильтрации dst_node
+- `radio_tx_scheduler_t *relay_sched` — указатель на TX scheduler для relay
+- `bool relay_enabled` — включение relay mode (по умолчанию off)
+
+Relay пакет сохраняет исходный traffic_class → приоритет в TX scheduler.
+Relay CTRL → P0, relay VIDEO → P2. Свой и чужой трафик конкурируют
+в одних очередях — TDMA scheduler обеспечивает fairness.
+
+#### Task 4.2: ULAMA-level dedup
+
+**Файлы**: `radiod/src/rx_dispatcher.c`
+
+Текущий dedup работает по UNOW seq (2 bytes из DATA_SEQ subtype).
+При relay один и тот же ULAMA frame приходит с РАЗНЫМИ unow_seq
+(оригинал от A с seq=42, relay от B с seq=100).
+
+Нужен второй dedup-слой по ключу `(src_node, ulama_seq)`:
+
+```c
+#define RADIO_ULAMA_DEDUP_WINDOW 128
+
+typedef struct {
+    uint8_t  src_node;
+    uint16_t ulama_seq;
+} radio_ulama_dedup_key_t;
+
+radio_ulama_dedup_key_t ulama_dedup_ring[RADIO_ULAMA_DEDUP_WINDOW];
+```
+
+Проверяется ПОСЛЕ UNOW-level dedup, ПЕРЕД relay/dispatch решением.
+Если `(src_node, seq)` уже видели — drop (не relay, не dispatch).
+
+Без этого: broadcast storm при 3+ узлах (A→B→C→A→B→...).
+
+#### Task 4.3: Route table (auto-learning)
+
+**Файлы**: `radiod/include/radiod/route_table.h`, `radiod/src/route_table.c`
+
+Таблица маршрутизации для выбора next-hop MAC при relay TX:
+
+```c
+#define RADIO_MAX_ROUTES 32
+#define RADIO_ROUTE_EXPIRE_US 30000000  /* 30 секунд без пакетов → expired */
+
+typedef struct {
+    uint8_t  dst_node;
+    uint8_t  next_hop_mac[6];
+    uint8_t  hop_count;
+    int8_t   rssi;
+    int64_t  last_seen_us;
+    bool     active;
+} radio_route_entry_t;
+
+typedef struct {
+    radio_route_entry_t entries[RADIO_MAX_ROUTES];
+} radio_route_table_t;
+```
+
+Auto-learning: при каждом RX фрейме:
+- `route[frame.src_node] = { next_hop = rx_src_mac, hops = 1, rssi }`
+- Если фрейм с `MESH_RELAY` flag и оригинальный `src_node`:
+  - `route[src_node] = { next_hop = relay_mac, hops = TTL_DEFAULT - frame.ttl + 1 }`
+
+Выбор next-hop при TX:
+- Есть route к `dst_node` → unicast на `next_hop_mac`
+- Нет route → broadcast (0xff:ff:ff:ff:ff:ff)
+
+Expire: удалять routes старше 30 секунд.
+
+Route discovery (ROUTE_DISC flag) — НЕ реализуем на этом этапе,
+auto-learning по RX трафику достаточно для star/chain topology.
+
+#### Task 4.4: Watchdog — фильтрация по dst_node
+
+**Файлы**: `radiod/tools/radiod.c`
+
+Сейчас watchdog кормится на ЛЮБОЙ RX активности. При relay через
+узел идут CTRL фреймы ЧУЖИХ дронов — watchdog не должен на них
+реагировать.
+
+Изменение: кормить watchdog только когда получен CTRL фрейм
+с `dst_node == my_node` или `dst_node == 0xFF` (broadcast).
+
+Для этого rx_dispatcher при dispatch должен сообщать caller'у
+traffic_class и dst_node полученного фрейма.
+
+#### Task 4.5: Relay metrics в stats
+
+**Файлы**: `radiod/include/radiod/stats.h`, `radiod/src/stats.c`
+
+Дополнительные счётчики для мониторинга relay:
+- `relay_forwarded` — пакеты пересланные через нас
+- `relay_dropped_ttl` — пакеты с TTL=0 (loop или слишком длинный путь)
+- `relay_dropped_dedup` — дубликаты на ULAMA level
+- `relay_by_prio[4]` — пересланные пакеты по классам
+- `route_table_size` — количество известных маршрутов
+- `route_table_expired` — маршруты удалённые по timeout
+
+#### Task 4.6: Channel hopping (future, не в этой фазе)
 
 radiod может переключать WiFi channel при интерференции.
 Координация через CTRL class beacon.
@@ -288,14 +411,48 @@ radiod может переключать WiFi channel при интерфере�
 
 ## Implementation Order
 
-1. **Phase 1.4** — TDMA loop prototype (standalone, no IPC)
-2. **Phase 1.1** — IPC protocol
-3. **Phase 1.2 + 1.3** — TX scheduler + RX dispatcher
-4. **Phase 1.5** — vcpd adaptation
-5. **Phase 1.6** — ulamad adaptation
-6. **Phase 2.1** — ulama-gw TDMA
-7. **Phase 3.1** — Watchdog (SAFETY CRITICAL)
-8. **Phase 3.2** — Monitoring
+1. ~~**Phase 1.4** — TDMA loop prototype~~ ✅
+2. ~~**Phase 1.1** — IPC protocol~~ ✅
+3. ~~**Phase 1.2 + 1.3** — TX scheduler + RX dispatcher~~ ✅
+4. ~~**Phase 1.5** — vcpd adaptation~~ ✅
+5. ~~**Phase 1.6** — ulamad adaptation~~ ✅
+6. ~~**Phase 2.1** — ulama-gw TDMA~~ ✅
+7. ~~**Phase 3.1** — Watchdog (SAFETY CRITICAL)~~ ✅
+8. ~~**Phase 3.2** — Monitoring~~ ✅
+9. **Phase 4.2** — ULAMA-level dedup (нужен ДО relay, иначе broadcast storm)
+10. **Phase 4.3** — Route table (auto-learning)
+11. **Phase 4.1** — Relay engine в rx_dispatcher
+12. **Phase 4.4** — Watchdog фильтрация по dst_node
+13. **Phase 4.5** — Relay metrics
+
+## Key Constants for Mesh Relay
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| ULAMA_DEDUP_WINDOW | 128 | Больше чем UNOW (64), т.к. relay удваивает трафик |
+| ROUTE_MAX_ENTRIES | 32 | До 32 узлов в сети |
+| ROUTE_EXPIRE_US | 30 000 000 | 30 сек без пакетов → route expired |
+| RELAY_MAX_HOPS | 8 | = ULAMA_FRAME_DEFAULT_TTL, макс. глубина цепочки |
+| RELAY_REQUEUE_PRIO | same | Relay сохраняет исходный priority class |
+
+## Mesh Topology Examples
+
+```
+Star (один relay):           Chain (два relay):
+    Drone-A                    Drone-A
+       ↕                         ↕
+    Relay-B ←→ GW            Relay-B
+       ↕                         ↕
+    Drone-C                  Relay-C ←→ GW
+```
+
+При hop-by-hop ACK в chain topology:
+- A→B: reliable (ACK from B) ✓
+- B→C: reliable (ACK from C) ✓
+- C→GW: reliable (ACK from GW) ✓
+- Если B→C потерян: B retry, A не знает об этом
+- Worst case: A считает "доставлено" хотя GW не получил
+- Для CTRL допустимо: CRSF шлёт 150 Hz, потеря одного фрейма некритична
 
 ## Quick Win (before full refactor)
 
