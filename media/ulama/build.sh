@@ -200,8 +200,8 @@ stage_files() {
     fi
     cp -f "$ULAMA_ROOT/out/bin/ulamad" "$OEM_STAGING/usr/bin/ulamad"
     chmod +x "$OEM_STAGING/usr/bin/ulamad"
-    cp -f "$ULAMA_ROOT/out/bin/ulamad" "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
-    chmod +x "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
+    # cp -f "$ULAMA_ROOT/out/bin/ulamad" "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
+    # chmod +x "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
     
     # Stage /etc/ulama.conf
     log_debug "Staging /etc/ulama.conf"
@@ -210,18 +210,18 @@ stage_files() {
         return 1
     fi
     cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$MEDIA_ROOT_STAGING/etc/ulama.conf"
-    cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$OEM_STAGING/etc/ulama.conf"
+    # cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$OEM_STAGING/etc/ulama.conf"
     
-    # Stage /etc/init.d/S99ulama
-    log_debug "Staging /etc/init.d/S99ulama"
-    if [ ! -f "$ULAMA_ROOT/scripts/S99ulama" ]; then
-        log_error "Init script not found: $ULAMA_ROOT/scripts/S99ulama"
-        return 1
-    fi
-    cp -f "$ULAMA_ROOT/scripts/S99ulama" "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
-    chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
-    cp -f "$ULAMA_ROOT/scripts/S99ulama" "$OEM_STAGING/etc/init.d/S99ulama"
-    chmod +x "$OEM_STAGING/etc/init.d/S99ulama"
+    # # Stage /etc/init.d/S99ulama
+    # log_debug "Staging /etc/init.d/S99ulama"
+    # if [ ! -f "$ULAMA_ROOT/scripts/S99ulama" ]; then
+    #     log_error "Init script not found: $ULAMA_ROOT/scripts/S99ulama"
+    #     return 1
+    # fi
+    # cp -f "$ULAMA_ROOT/scripts/S99ulama" "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
+    # chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
+    # cp -f "$ULAMA_ROOT/scripts/S99ulama" "$OEM_STAGING/etc/init.d/S99ulama"
+    # chmod +x "$OEM_STAGING/etc/init.d/S99ulama"
     
     # Stage /usr/bin/scripts/unow-mon.sh
     log_debug "Staging /usr/bin/scripts/unow-mon.sh"
