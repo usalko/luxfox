@@ -268,6 +268,19 @@ int main(int argc, char **argv)
 	return 1;
 #else
 
+	/* ---- Initialize IPC FIRST (before interface wait) ----
+	 * Clients (ulamad, vcpd) start shortly after radiod and send
+	 * registration messages. The socket must exist before they try
+	 * to connect — messages accumulate in the kernel buffer while
+	 * we wait for the radio interface. */
+
+	if (radio_ipc_server_init(&ipc, cfg.sock_path) < 0) {
+		fprintf(stderr, "radiod: IPC init failed (%s): %s\n",
+			cfg.sock_path, strerror(errno));
+		return 1;
+	}
+	fprintf(stderr, "radiod: IPC listening on %s\n", cfg.sock_path);
+
 	/* ---- Wait for radio interface ---- */
 
 	unow_iface_info_t iface_info;
@@ -279,6 +292,9 @@ int main(int argc, char **argv)
 
 	for (int attempt = 1; g_running; attempt++) {
 		memset(error_buf, 0, sizeof(error_buf));
+
+		/* Drain IPC while waiting — accept client registrations early */
+		radio_ipc_drain(&ipc, NULL, NULL);
 
 		if (unow_iface_query(cfg.iface, &iface_info,
 				     error_buf, sizeof(error_buf)) != 0) {
@@ -306,7 +322,6 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		/* Interface is ready */
 		break;
 	}
 
@@ -314,27 +329,18 @@ int main(int argc, char **argv)
 		fprintf(stderr, "radiod: interrupted while waiting for interface\n");
 		if (pcap_handle != NULL)
 			unow_iface_close_pcap(&pcap_handle);
+		radio_ipc_server_close(&ipc);
 		return 0;
 	}
 
 	fprintf(stderr,
-		"radiod: started iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x "
+		"radiod: radio ready iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x "
 		"node_id=%u tx_slot=%u rx_slot=%u µs relay=%s\n",
 		cfg.iface,
 		iface_info.mac[0], iface_info.mac[1], iface_info.mac[2],
 		iface_info.mac[3], iface_info.mac[4], iface_info.mac[5],
 		cfg.node_id, cfg.tx_slot_size, cfg.rx_slot_us,
 		cfg.relay ? "on" : "off");
-
-	/* ---- Initialize IPC ---- */
-
-	if (radio_ipc_server_init(&ipc, cfg.sock_path) < 0) {
-		fprintf(stderr, "radiod: IPC init failed (%s): %s\n",
-			cfg.sock_path, strerror(errno));
-		unow_iface_close_pcap(&pcap_handle);
-		return 1;
-	}
-	fprintf(stderr, "radiod: IPC listening on %s\n", cfg.sock_path);
 
 	/* ---- Initialize subsystems ---- */
 
