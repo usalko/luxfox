@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# radiod — unified radio multiplexer daemon.
+# Starts BEFORE ulamad (S99) and vcpd (S97) so they can connect via IPC.
+#
+
+DAEMON=/usr/bin/radiod
+PIDFILE=/var/run/radiod.pid
+CONF=/etc/radiod.conf
+
+. /etc/init.d/functions 2>/dev/null || true
+
+start() {
+    printf "Starting radiod: "
+    if [ -f "$CONF" ]; then
+        IFACE=$(grep -m1 '^iface=' "$CONF" | cut -d= -f2)
+        NODE_ID=$(grep -m1 '^node_id=' "$CONF" | cut -d= -f2)
+    fi
+    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- \
+        ${IFACE:+--iface "$IFACE"} \
+        ${NODE_ID:+--node-id "$NODE_ID"}
+    echo "OK"
+}
+
+stop() {
+    printf "Stopping radiod: "
+    start-stop-daemon -K -p "$PIDFILE" -x "$DAEMON"
+    rm -f "$PIDFILE"
+    echo "OK"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    *)       echo "Usage: $0 {start|stop|restart}" ; exit 1 ;;
+esac
