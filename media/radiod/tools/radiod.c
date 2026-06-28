@@ -71,7 +71,7 @@ typedef struct {
 static void config_defaults(radiod_config_t *cfg)
 {
 	memset(cfg, 0, sizeof(*cfg));
-	cfg->iface = "mon0";
+	cfg->iface = "wlan0";
 	cfg->sock_path = RADIO_IPC_SOCK_PATH;
 	cfg->node_id = 1;
 	cfg->tx_slot_size = TX_SLOT_SIZE;
