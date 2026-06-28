@@ -81,6 +81,10 @@ typedef struct {
 	int                 server_fd;
 	radio_ipc_client_t  clients[RADIO_MAX_CLIENTS];
 	int                 client_count;
+	/* Diagnostic counters */
+	uint32_t            tx_ok;     /* successful sendto to clients  */
+	uint32_t            tx_fail;   /* failed sendto (EAGAIN, etc.)  */
+	uint32_t            tx_disc;   /* client disconnected (removed) */
 } radio_ipc_server_t;
 
 /* ---- Server API ---- */

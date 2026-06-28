@@ -475,7 +475,7 @@ int main(int argc, char **argv)
 		/* ---- 8. Stats reporting ---- */
 
 		radio_stats_add_cycle(&stats);
-		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes);
+		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes, &ipc);
 
 		/* Micro-sleep if cycle was too fast */
 		int64_t cycle_elapsed = now_us() - cycle_start;

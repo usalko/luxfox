@@ -41,7 +41,8 @@ void radio_stats_add_tx_packet(radio_stats_t *st, uint8_t priority)
 int radio_stats_report(radio_stats_t *st, int64_t now_us,
 		       const radio_tx_scheduler_t *sched,
 		       const radio_rx_dispatcher_t *rxd,
-		       const radio_route_table_t *rt)
+		       const radio_route_table_t *rt,
+		       const radio_ipc_server_t *ipc)
 {
 	int64_t elapsed_us;
 	double elapsed_s;
@@ -101,6 +102,14 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	if (rt != NULL) {
 		fprintf(stderr, " routes=%d", radio_route_count(rt));
+	}
+
+	if (ipc != NULL) {
+		int active = 0;
+		for (int i = 0; i < ipc->client_count; i++)
+			if (ipc->clients[i].active) active++;
+		fprintf(stderr, " ipc[clients=%d tx_ok=%u tx_fail=%u]",
+			active, ipc->tx_ok, ipc->tx_fail);
 	}
 
 	fprintf(stderr, "\n");

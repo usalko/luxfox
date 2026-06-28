@@ -194,13 +194,15 @@ int radio_ipc_broadcast_rx(radio_ipc_server_t *srv,
 		ssize_t n = sendto(srv->server_fd, buf, total_len, MSG_DONTWAIT,
 				   (struct sockaddr *)&c->addr, c->addr_len);
 		if (n < 0) {
-			/* Client socket gone — remove it */
+			srv->tx_fail++;
 			if (errno == ECONNREFUSED || errno == ENOENT) {
 				fprintf(stderr, "radiod: client '%s' disconnected\n", c->name);
 				c->active = false;
+				srv->tx_disc++;
 			}
 			continue;
 		}
+		srv->tx_ok++;
 		sent++;
 	}
 	return sent;
