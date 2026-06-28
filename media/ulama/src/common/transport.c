@@ -255,6 +255,8 @@ static ssize_t radiod_tx_send(int fd, const uint8_t *data, size_t len,
 	return (ssize_t)len;
 }
 
+static uint32_t radiod_rx_dbg_count = 0;
+
 static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 			      int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
 {
@@ -269,6 +271,15 @@ static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 		return 0;
 
 	n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+
+	/* Diagnostic: log first few receives */
+	if (radiod_rx_dbg_count < 5) {
+		fprintf(stderr, "[radiod_rx_recv] fd=%d poll_rc=%d n=%zd "
+			"buf[0]=0x%02x capacity=%zu\n",
+			fd, rc, n, n > 0 ? buf[0] : 0, capacity);
+		radiod_rx_dbg_count++;
+	}
+
 	if (n < 10)
 		return 0;
 	if (buf[0] != RADIOD_MSG_RX_FRAME)
