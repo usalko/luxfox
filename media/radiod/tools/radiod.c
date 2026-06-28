@@ -268,31 +268,53 @@ int main(int argc, char **argv)
 	return 1;
 #else
 
-	/* ---- Initialize pcap / radio ---- */
+	/* ---- Wait for radio interface ---- */
 
 	unow_iface_info_t iface_info;
 	pcap_t *pcap_handle = NULL;
 	int datalink = 0;
 	char error_buf[256] = {0};
 
-	if (unow_iface_query(cfg.iface, &iface_info, error_buf, sizeof(error_buf)) != 0) {
-		fprintf(stderr, "radiod: interface probe failed for %s: %s\n",
-			cfg.iface, error_buf);
-		return 1;
+	fprintf(stderr, "radiod: waiting for interface %s...\n", cfg.iface);
+
+	for (int attempt = 1; g_running; attempt++) {
+		memset(error_buf, 0, sizeof(error_buf));
+
+		if (unow_iface_query(cfg.iface, &iface_info,
+				     error_buf, sizeof(error_buf)) != 0) {
+			if (attempt == 1 || attempt % 10 == 0)
+				fprintf(stderr, "radiod: [%d] %s not found, retrying...\n",
+					attempt, cfg.iface);
+			sleep(1);
+			continue;
+		}
+
+		if (unow_iface_open_pcap(cfg.iface, &pcap_handle, &datalink,
+					 error_buf, sizeof(error_buf)) != 0) {
+			if (attempt == 1 || attempt % 10 == 0)
+				fprintf(stderr, "radiod: [%d] pcap open failed: %s\n",
+					attempt, error_buf);
+			sleep(1);
+			continue;
+		}
+
+		if (datalink != DLT_IEEE802_11_RADIO) {
+			fprintf(stderr, "radiod: [%d] %s not in monitor mode (datalink=%d), retrying...\n",
+				attempt, cfg.iface, datalink);
+			unow_iface_close_pcap(&pcap_handle);
+			sleep(2);
+			continue;
+		}
+
+		/* Interface is ready */
+		break;
 	}
 
-	if (unow_iface_open_pcap(cfg.iface, &pcap_handle, &datalink,
-				 error_buf, sizeof(error_buf)) != 0) {
-		fprintf(stderr, "radiod: pcap open failed for %s: %s\n",
-			cfg.iface, error_buf);
-		return 1;
-	}
-
-	if (datalink != DLT_IEEE802_11_RADIO) {
-		fprintf(stderr, "radiod: %s is not in monitor mode (datalink=%d)\n",
-			cfg.iface, datalink);
-		unow_iface_close_pcap(&pcap_handle);
-		return 1;
+	if (!g_running) {
+		fprintf(stderr, "radiod: interrupted while waiting for interface\n");
+		if (pcap_handle != NULL)
+			unow_iface_close_pcap(&pcap_handle);
+		return 0;
 	}
 
 	fprintf(stderr,
