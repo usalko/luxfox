@@ -226,33 +226,19 @@ static int open_udp_sender(const char *addr_str, struct sockaddr_in *dst)
 	return fd;
 }
 
-static void handle_cascade_rx(app_ctx_t *ctx)
+/*
+ * Send a single cascade frame over ULAMA radio.
+ * Handles fragmentation for large payloads.
+ */
+static void cascade_to_ulama_tx(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 {
-  for (int drain = 0; drain < 16; drain++) {
-	uint8_t buf[CASCADE_FRAME_HEADER_SIZE + CASCADE_FRAME_MAX_PAYLOAD];
-	ssize_t n = recv(ctx->cascade_rx_fd, buf, sizeof(buf), MSG_DONTWAIT);
-	if (n <= 0)
-		return;
-
-	cascade_frame_view_t cf;
-	if (!cascade_frame_unpack(buf, (size_t)n, &cf)) {
-		if (ctx->verbose)
-			fprintf(stderr, "gw: invalid cascade-frame (%zd bytes)\n", n);
-		return;
-	}
-
-	if (ctx->verbose) {
-		fprintf(stderr, "gw: cascade RX v=%u src=%u dst=%u class=%u payload=%zu\n",
-			cf.version, cf.src, cf.dst, cf.traffic_class, cf.payload_len);
-	}
-
-	uint8_t ulama_class = gw_class_cascade_to_ulama(cf.traffic_class);
-	uint8_t dst_node = gw_addr_u16_to_u8(&ctx->gw, cf.dst);
+	uint8_t ulama_class = gw_class_cascade_to_ulama(cf->traffic_class);
+	uint8_t dst_node = gw_addr_u16_to_u8(&ctx->gw, cf->dst);
 
 	if (ulama_class == ULAMA_CLASS_CTRL)
 		ctx->stats.ctrl_tx++;
 
-	if (cf.payload_len <= ULAMA_FRAME_MAX_PAYLOAD) {
+	if (cf->payload_len <= ULAMA_FRAME_MAX_PAYLOAD) {
 		ulama_frame_view_t uf = {
 			.src_node = ctx->gw.node_id,
 			.dst_node = dst_node,
@@ -262,18 +248,23 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 			.frag_idx = 0,
 			.frag_total = 1,
 			.ttl = ULAMA_FRAME_DEFAULT_TTL,
-			.payload = cf.payload,
-			.payload_len = cf.payload_len,
+			.payload = cf->payload,
+			.payload_len = cf->payload_len,
 		};
 
 		uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 		size_t frame_len = 0;
-		if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
-			ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+			/* CTRL → reliable, everything else → unreliable */
+			if (ulama_class == ULAMA_CLASS_CTRL)
+				ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
+			else
+				ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+		}
 	} else {
 		uint8_t frag_payloads[FRAG_MAX_FRAGMENTS][ULAMA_FRAME_MAX_PAYLOAD];
 		size_t frag_sizes[FRAG_MAX_FRAGMENTS];
-		size_t nfrags = frag_split(cf.payload, cf.payload_len, frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
+		size_t nfrags = frag_split(cf->payload, cf->payload_len, frag_payloads, frag_sizes, FRAG_MAX_FRAGMENTS);
 
 		uint16_t base_seq = ctx->seq_counter++;
 		for (size_t i = 0; i < nfrags; i++) {
@@ -296,6 +287,36 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 				ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
 		}
 	}
+}
+
+/*
+ * TDMA-prioritized cascade RX: process CTRL frames first (immediate),
+ * then other classes (rate-limited by the caller's TX budget).
+ *
+ * ctrl_only: when true, only CTRL frames are transmitted;
+ *            non-CTRL are silently consumed but not forwarded.
+ */
+static void handle_cascade_rx(app_ctx_t *ctx)
+{
+  for (int drain = 0; drain < 16; drain++) {
+	uint8_t buf[CASCADE_FRAME_HEADER_SIZE + CASCADE_FRAME_MAX_PAYLOAD];
+	ssize_t n = recv(ctx->cascade_rx_fd, buf, sizeof(buf), MSG_DONTWAIT);
+	if (n <= 0)
+		return;
+
+	cascade_frame_view_t cf;
+	if (!cascade_frame_unpack(buf, (size_t)n, &cf)) {
+		if (ctx->verbose)
+			fprintf(stderr, "gw: invalid cascade-frame (%zd bytes)\n", n);
+		return;
+	}
+
+	if (ctx->verbose) {
+		fprintf(stderr, "gw: cascade RX v=%u src=%u dst=%u class=%u payload=%zu\n",
+			cf.version, cf.src, cf.dst, cf.traffic_class, cf.payload_len);
+	}
+
+	cascade_to_ulama_tx(ctx, &cf);
   }
 }
 
@@ -847,13 +868,15 @@ int main(int argc, char *argv[])
 
 		uint64_t ts = now_ms();
 
-		/* Control has highest priority — process before and after video */
+		/* TDMA schedule: CTRL first → cascade TX → ulama RX → cascade again.
+		 * CTRL frames from cascade are sent with reliable delivery,
+		 * other classes are sent unreliably (rate-limited by drain count). */
 		handle_cascade_rx(&ctx);
 
-		/* For UNOW: fd=-1, poll can't watch it; call recv with timeout=0 */
+		/* RX slot: receive ULAMA frames from device */
 		handle_ulama_rx(&ctx);
 
-		/* Process any control frames that arrived during video ACK burst */
+		/* Second pass: catch any cascade frames that arrived during RX */
 		handle_cascade_rx(&ctx);
 
 		/* Print stats every 5 seconds */

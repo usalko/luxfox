@@ -202,7 +202,7 @@ while (running) {
 На хосте ulama-gw уже единственный radio процесс. Но нужно
 добавить TDMA scheduling в его main loop.
 
-#### Task 2.1: TDMA в main loop ulama-gw
+#### ~~Task 2.1: TDMA в main loop ulama-gw~~ ✅ DONE
 
 **Файл**: `ulama-gw/tools/ulama_gw.c`
 
@@ -221,7 +221,7 @@ while (running) {
 }
 ```
 
-#### Task 2.2: Приоритизация cascade TX
+#### ~~Task 2.2: Приоритизация cascade TX~~ ✅ DONE
 
 Cascade-core отправляет и CTRL и VIDEO (NACKs) фреймы.
 ulama-gw должен разделить их по приоритету:
