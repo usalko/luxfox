@@ -373,14 +373,67 @@ int main(int argc, char **argv)
 
 	/* ================================================================
 	 * TDMA Main Loop
+	 *
+	 * Outer loop handles pcap recovery after USB disconnect.
+	 * Inner loop runs TDMA scheduling while pcap is healthy.
+	 * IPC stays alive throughout — clients keep their connections.
 	 * ================================================================ */
 
+	uint32_t pcap_error_count = 0;
+
 	while (g_running) {
+
+		/* ---- PCAP recovery: reopen after USB disconnect ---- */
+
+		if (pcap_handle == NULL) {
+			fprintf(stderr, "radiod: radio lost, waiting for %s...\n",
+				cfg.iface);
+
+			while (g_running) {
+				/* Keep draining IPC during recovery so clients
+				 * don't get EAGAIN and TX queues don't stall */
+				radio_ipc_drain(&ipc, on_ipc_tx_request, &ipc_ctx);
+
+				memset(error_buf, 0, sizeof(error_buf));
+
+				if (unow_iface_query(cfg.iface, &iface_info,
+						     error_buf, sizeof(error_buf)) != 0) {
+					sleep(1);
+					continue;
+				}
+				if (unow_iface_open_pcap(cfg.iface, &pcap_handle,
+							 &datalink, error_buf,
+							 sizeof(error_buf)) != 0) {
+					sleep(1);
+					continue;
+				}
+				if (datalink != DLT_IEEE802_11_RADIO) {
+					unow_iface_close_pcap(&pcap_handle);
+					sleep(2);
+					continue;
+				}
+
+				/* Radio restored */
+				pcap_error_count = 0;
+				fprintf(stderr,
+					"radiod: radio restored iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+					cfg.iface,
+					iface_info.mac[0], iface_info.mac[1],
+					iface_info.mac[2], iface_info.mac[3],
+					iface_info.mac[4], iface_info.mac[5]);
+				break;
+			}
+			if (!g_running)
+				break;
+		}
+
+		/* ---- TDMA cycle ---- */
+
 		int64_t cycle_start = now_us();
 		int64_t tx_start, tx_end, rx_end;
 		bool wd_emergency = false;
 
-		/* ---- 1. Flush all CTRL packets (P0, no rate limit) ---- */
+		/* 1. Flush all CTRL packets (P0, no rate limit) */
 
 		tx_start = now_us();
 		for (;;) {
@@ -398,7 +451,7 @@ int main(int argc, char **argv)
 			radio_stats_add_tx_packet(&stats, prio);
 		}
 
-		/* ---- 2. TX slot: up to N packets from P1/P2/P3 ---- */
+		/* 2. TX slot: up to N packets from P1/P2/P3 */
 
 		for (uint32_t i = 0; i < cfg.tx_slot_size; i++) {
 			uint8_t prio;
@@ -414,7 +467,7 @@ int main(int argc, char **argv)
 		tx_end = now_us();
 		radio_stats_add_tx_time(&stats, (uint64_t)(tx_end - tx_start));
 
-		/* ---- 3. RX slot ---- */
+		/* 3. RX slot */
 
 		int64_t rx_deadline = now_us() + (int64_t)cfg.rx_slot_us;
 		radio_rx_slot(&rxd, pcap_handle, iface_info.mac, rx_deadline);
@@ -422,16 +475,16 @@ int main(int argc, char **argv)
 		rx_end = now_us();
 		radio_stats_add_rx_time(&stats, (uint64_t)(rx_end - tx_end));
 
-		/* ---- 4. Async retry tick ---- */
+		/* 4. Async retry tick */
 
 		radio_async_tick(&rxd, pcap_handle,
 				 cfg.ack_timeout_us, cfg.ack_max_retry);
 
-		/* ---- 5. Drain IPC requests ---- */
+		/* 5. Drain IPC requests */
 
 		radio_ipc_drain(&ipc, on_ipc_tx_request, &ipc_ctx);
 
-		/* ---- 6. Watchdog: feed only on CTRL addressed to us ---- */
+		/* 6. Watchdog */
 
 		if (rxd.ctrl_for_us > 0)
 			radio_watchdog_feed(&wd, now_us());
@@ -468,14 +521,39 @@ int main(int argc, char **argv)
 
 		(void)link;
 
-		/* ---- 7. Route table maintenance ---- */
+		/* 7. Route table maintenance */
 
 		radio_route_expire(&routes, now_us());
 
-		/* ---- 8. Stats reporting ---- */
+		/* 8. Stats reporting */
 
 		radio_stats_add_cycle(&stats);
 		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes, &ipc);
+
+		/* 9. Detect pcap failure (USB disconnect) */
+
+		if (rxd.stats.rx_parse_fail > 50 && rxd.stats.rx_total > 0 &&
+		    rxd.stats.rx_parse_fail * 100 / rxd.stats.rx_total > 90) {
+			pcap_error_count++;
+		} else {
+			pcap_error_count = 0;
+		}
+
+		/* pcap_next_ex returns -1 on error — rx_slot exits early.
+		 * Detect by checking if RX slot produced zero results for
+		 * many consecutive cycles, or if error count is high. */
+		if (pcap_handle != NULL) {
+			int test = pcap_inject(pcap_handle, "", 0);
+			if (test < 0 && pcap_error_count > 10) {
+				fprintf(stderr,
+					"radiod: pcap error detected (%s), entering recovery\n",
+					pcap_geterr(pcap_handle));
+				unow_iface_close_pcap(&pcap_handle);
+				pcap_handle = NULL;
+				/* Loop back to recovery at top */
+				continue;
+			}
+		}
 
 		/* Micro-sleep if cycle was too fast */
 		int64_t cycle_elapsed = now_us() - cycle_start;
@@ -485,7 +563,8 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "radiod: shutting down\n");
 	radio_ipc_server_close(&ipc);
-	unow_iface_close_pcap(&pcap_handle);
+	if (pcap_handle != NULL)
+		unow_iface_close_pcap(&pcap_handle);
 	return 0;
 
 #endif /* ULAMA_WITH_UNOW */
