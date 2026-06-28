@@ -30,19 +30,23 @@ set -u
 RADIOD_BIN="/oem/usr/bin/radiod"
 RADIOD_CONF="/etc/radiod.conf"
 RADIOD_PID="/var/run/radiod.pid"
-RADIOD_LOG="/var/log/radiod"
+RADIOD_LOG="/var/log/radiod/radiod.log"
 
 # ---- ulamad ----
 ULAMAD_BIN="/oem/usr/bin/ulamad"
 ULAMAD_CONF="/etc/ulama.conf"
 ULAMAD_PID="/var/run/ulama.pid"
-ULAMAD_LOG="/var/log/ulama"
+ULAMAD_LOG="/var/log/ulama/ulamad.log"
 
 # ---- vcpd ----
 VCPD_BIN="/oem/usr/bin/vcpd"
 VCPD_CONF="/etc/vcpd.conf"
 VCPD_PID="/var/run/vcpd.pid"
-VCPD_LOG="/var/log/vcpd"
+VCPD_LOG="/var/log/vcpd/vcpd.log"
+
+# ---- Log rotation settings ----
+LOG_MAX_SIZE=262144    # 256 KB — rotate when exceeded
+LOG_KEEP=2            # keep .1.gz and .2.gz
 
 log() {
     echo "[S96radiod] $*"
@@ -83,6 +87,37 @@ kill_and_wait() {
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$pid_file"
+}
+
+# ---- Log rotation ----
+# Rotates log file if it exceeds LOG_MAX_SIZE.
+# Keeps LOG_KEEP compressed backups: .1.gz, .2.gz
+rotate_log() {
+    local logfile="$1"
+    [ -f "$logfile" ] || return 0
+
+    local size
+    size=$(wc -c < "$logfile" 2>/dev/null || echo 0)
+    [ "$size" -gt "$LOG_MAX_SIZE" ] || return 0
+
+    # Shift old backups: .2.gz → delete, .1.gz → .2.gz
+    local i="$LOG_KEEP"
+    while [ "$i" -gt 1 ]; do
+        local prev=$((i - 1))
+        [ -f "${logfile}.${prev}.gz" ] && mv -f "${logfile}.${prev}.gz" "${logfile}.${i}.gz"
+        i=$((i - 1))
+    done
+
+    # Compress current log → .1.gz
+    if command -v gzip >/dev/null 2>&1; then
+        gzip -c "$logfile" > "${logfile}.1.gz" 2>/dev/null
+    else
+        cp -f "$logfile" "${logfile}.1"
+    fi
+
+    # Truncate (don't remove — process may still have fd open)
+    : > "$logfile"
+    log "rotated $logfile ($size bytes)"
 }
 
 # ---- Parse key=value config into CLI flags ----
@@ -137,6 +172,11 @@ parse_vcpd_args() {
 start() {
     export LD_LIBRARY_PATH=/oem/usr/lib
 
+    # Rotate logs before starting
+    rotate_log "$RADIOD_LOG"
+    rotate_log "$ULAMAD_LOG"
+    rotate_log "$VCPD_LOG"
+
     # 1. radiod
     RADIOD_OK=false
     if [ -x "$RADIOD_BIN" ]; then
@@ -144,20 +184,18 @@ start() {
             log "radiod already running"
             RADIOD_OK=true
         else
-            mkdir -p "$RADIOD_LOG"
+            mkdir -p "$(dirname "$RADIOD_LOG")"
             parse_radiod_args
             log "starting radiod $RADIOD_ARGS"
-            "$RADIOD_BIN" $RADIOD_ARGS \
-                >"$RADIOD_LOG/radiod.stdout" 2>"$RADIOD_LOG/radiod.stderr" &
+            "$RADIOD_BIN" $RADIOD_ARGS >>"$RADIOD_LOG" 2>&1 &
             echo $! > "$RADIOD_PID"
 
-            # Wait for IPC socket before starting clients
             if wait_for_socket /var/run/radiod.sock 20 && is_running "$RADIOD_PID"; then
                 log "radiod started OK"
                 RADIOD_OK=true
             else
-                log "ERROR: radiod failed to start, check $RADIOD_LOG/radiod.stderr"
-                cat "$RADIOD_LOG/radiod.stderr" 2>/dev/null | tail -5 | while read -r line; do
+                log "ERROR: radiod failed to start, check $RADIOD_LOG"
+                tail -5 "$RADIOD_LOG" 2>/dev/null | while read -r line; do
                     log "  $line"
                 done
             fi
@@ -177,10 +215,9 @@ start() {
         if is_running "$ULAMAD_PID"; then
             log "ulamad already running"
         else
-            mkdir -p "$ULAMAD_LOG"
+            mkdir -p "$(dirname "$ULAMAD_LOG")"
             log "starting ulamad --config $ULAMAD_CONF"
-            "$ULAMAD_BIN" --config "$ULAMAD_CONF" \
-                >"$ULAMAD_LOG/ulamad.stdout" 2>"$ULAMAD_LOG/ulamad.stderr" &
+            "$ULAMAD_BIN" --config "$ULAMAD_CONF" >>"$ULAMAD_LOG" 2>&1 &
             echo $! > "$ULAMAD_PID"
         fi
     fi
@@ -192,18 +229,16 @@ start() {
         if is_running "$VCPD_PID"; then
             log "vcpd already running"
         else
-            mkdir -p "$VCPD_LOG"
+            mkdir -p "$(dirname "$VCPD_LOG")"
             parse_vcpd_args
             log "starting vcpd $VCPD_ARGS"
-            "$VCPD_BIN" $VCPD_ARGS \
-                >"$VCPD_LOG/vcpd.stdout" 2>"$VCPD_LOG/vcpd.stderr" &
+            "$VCPD_BIN" $VCPD_ARGS >>"$VCPD_LOG" 2>&1 &
             echo $! > "$VCPD_PID"
         fi
     fi
 }
 
 stop() {
-    # Reverse order: vcpd → ulamad → radiod
     if [ -f /tmp/vcpd.manual ]; then
         log "vcpd: MANUAL mode (not stopping)"
     else
@@ -242,6 +277,17 @@ status() {
     else
         log "vcpd:   stopped"
     fi
+
+    # Show log sizes
+    for f in "$RADIOD_LOG" "$ULAMAD_LOG" "$VCPD_LOG"; do
+        if [ -f "$f" ]; then
+            local sz
+            sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+            local backups
+            backups=$(ls "${f}".*.gz 2>/dev/null | wc -l || echo 0)
+            log "  log: $f (${sz} bytes, ${backups} backups)"
+        fi
+    done
 }
 
 case "${1:-start}" in
