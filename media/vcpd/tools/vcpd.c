@@ -835,43 +835,46 @@ int main(int argc, char *argv[])
 				nal_len = 0;
 			}
 
-			/* Detect UNOW TX failure (interface gone) */
+			/* Detect TX failure (interface gone or IPC overload) */
 			if (tx_fail_count >= TX_FAIL_THRESHOLD) {
-				fprintf(stderr, "vcpd: UNOW TX failed %u times, recovering transport\n", tx_fail_count);
 				tx_fail_count = 0;
 
-				/* Stop video to avoid flooding broken pipe */
-				vsrc_stop(&ctx.video);
+				if (tk == ULAMA_TRANSPORT_KIND_RADIOD) {
+					/* radiod IPC: transient EAGAIN during video
+					 * burst is normal — just reset and continue,
+					 * don't tear down the IPC connection */
+				} else {
+					fprintf(stderr, "vcpd: TX failed %u times, recovering UNOW\n", TX_FAIL_THRESHOLD);
+					vsrc_stop(&ctx.video);
 
-				/* Re-init UNOW */
-				char cmd[512];
-				snprintf(cmd, sizeof(cmd),
-					"for i in $(seq 1 15); do "
-					"  ip link show %s >/dev/null 2>&1 && break; "
-					"  sleep 1; "
-					"done; "
-					"sleep 2; "
-					"ip link set %s down 2>/dev/null; "
-					"iw dev %s set type monitor 2>/dev/null; "
-					"ip link set %s up 2>/dev/null; "
-					"iw dev %s set channel 6 2>/dev/null; "
-					"sleep 2",
-					ctx.iface, ctx.iface, ctx.iface, ctx.iface, ctx.iface);
+					char cmd[512];
+					snprintf(cmd, sizeof(cmd),
+						"for i in $(seq 1 15); do "
+						"  ip link show %s >/dev/null 2>&1 && break; "
+						"  sleep 1; "
+						"done; "
+						"sleep 2; "
+						"ip link set %s down 2>/dev/null; "
+						"iw dev %s set type monitor 2>/dev/null; "
+						"ip link set %s up 2>/dev/null; "
+						"iw dev %s set channel 6 2>/dev/null; "
+						"sleep 2",
+						ctx.iface, ctx.iface, ctx.iface, ctx.iface, ctx.iface);
 
-				ulama_transport_tx_close(&ctx.ulama_tx);
-				for (int t = 0; t < 10 && g_running; t++) {
-					(void)system(cmd);
-					if (ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface, NULL) == 0) {
-						fprintf(stderr, "vcpd: UNOW TX reconnected\n");
-						break;
+					ulama_transport_tx_close(&ctx.ulama_tx);
+					for (int t = 0; t < 10 && g_running; t++) {
+						(void)system(cmd);
+						if (ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface, NULL) == 0) {
+							fprintf(stderr, "vcpd: UNOW TX reconnected\n");
+							break;
+						}
+						fprintf(stderr, "vcpd: UNOW TX retry %d/10...\n", t + 1);
 					}
-					fprintf(stderr, "vcpd: UNOW TX retry %d/10...\n", t + 1);
-				}
 
-				/* Restart video */
-				if (uvcp_session_is_active(&ctx.uvcp_sess, now_ms()) || ctx.autostart) {
-					fprintf(stderr, "vcpd: restarting video after TX recovery\n");
-					vsrc_start(&ctx.video);
+					if (uvcp_session_is_active(&ctx.uvcp_sess, now_ms()) || ctx.autostart) {
+						fprintf(stderr, "vcpd: restarting video after TX recovery\n");
+						vsrc_start(&ctx.video);
+					}
 				}
 			}
 		}

@@ -255,8 +255,6 @@ static ssize_t radiod_tx_send(int fd, const uint8_t *data, size_t len,
 	return (ssize_t)len;
 }
 
-static uint32_t radiod_rx_dbg_count = 0;
-
 static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 			      int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
 {
@@ -271,27 +269,6 @@ static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 		return 0;
 
 	n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
-
-	/* Diagnostic: log first few receives with ULAMA header */
-	if (radiod_rx_dbg_count < 5 && n > 0) {
-		fprintf(stderr, "[radiod_rx_recv] fd=%d n=%zd buf[0]=0x%02x", fd, n, buf[0]);
-		if (n >= 10) {
-			uint16_t plen = (uint16_t)buf[8] | ((uint16_t)buf[9] << 8);
-			fprintf(stderr, " plen=%u", plen);
-			/* Show first bytes of ULAMA payload */
-			if (n >= 24) {
-				fprintf(stderr, " ulama[magic=0x%02x ver=%u src=%u dst=%u "
-					"flags=0x%02x class=%u seq=%u ttl=%u]",
-					buf[10], buf[11], buf[12], buf[13],
-					buf[14], buf[15],
-					(unsigned)buf[16] | ((unsigned)buf[17] << 8),
-					buf[20]);
-			}
-		}
-		fprintf(stderr, "\n");
-		radiod_rx_dbg_count++;
-	}
-
 	if (n < 10)
 		return 0;
 	if (buf[0] != RADIOD_MSG_RX_FRAME)
