@@ -67,9 +67,8 @@ all: vcpd-build
 	@echo "build $(PKG_NAME) done";
 
 vcpd-build: $(TARGET_BIN)
-	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc $(PKG_OUT)/etc/init.d
+	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc
 	@cp -f $(TARGET_BIN) $(PKG_OUT)/bin/
-	@if [ -f $(PKG_SCRIPT_DIR)/S97vcpd ]; then cp -f $(PKG_SCRIPT_DIR)/S97vcpd $(PKG_OUT)/etc/init.d/; fi
 	@if [ -f $(PKG_CONFIG_DIR)/vcpd.conf ]; then cp -f $(PKG_CONFIG_DIR)/vcpd.conf $(PKG_OUT)/etc/; fi
 
 $(TARGET_BIN): $(TARGET_APP_SRC) $(VCPD_SRCS) $(VCPD_VIDEO_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)

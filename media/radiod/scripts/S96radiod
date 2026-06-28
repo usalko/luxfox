@@ -1,37 +1,201 @@
 #!/bin/sh
-#
-# radiod — unified radio multiplexer daemon.
-# Starts BEFORE ulamad (S99) and vcpd (S97) so they can connect via IPC.
-#
+### BEGIN INIT INFO
+# Provides: radiod ulamad vcpd
+# Required-Start: $network
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Unified radio multiplexer + ULAMA daemons
+### END INIT INFO
 
-DAEMON=/usr/bin/radiod
-PIDFILE=/var/run/radiod.pid
-CONF=/etc/radiod.conf
+# radiod owns the radio (pcap handle). ulamad and vcpd connect
+# through IPC, so they must start AFTER radiod is ready.
+#
+# Start order:  radiod → ulamad → vcpd
+# Stop order:   vcpd → ulamad → radiod
 
-. /etc/init.d/functions 2>/dev/null || true
+set -u
+
+# ---- radiod ----
+RADIOD_BIN="/oem/usr/bin/radiod"
+RADIOD_CONF="/oem/etc/radiod.conf"
+RADIOD_PID="/var/run/radiod.pid"
+RADIOD_LOG="/var/log/radiod"
+
+# ---- ulamad ----
+ULAMAD_BIN="/oem/usr/bin/ulamad"
+ULAMAD_CONF="/oem/etc/ulama.conf"
+ULAMAD_PID="/var/run/ulama.pid"
+ULAMAD_LOG="/var/log/ulama"
+
+# ---- vcpd ----
+VCPD_BIN="/oem/usr/bin/vcpd"
+VCPD_CONF="/oem/etc/vcpd.conf"
+VCPD_PID="/var/run/vcpd.pid"
+VCPD_LOG="/var/log/vcpd"
+
+log() {
+    echo "[S96radiod] $*"
+}
+
+is_running() {
+    [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
+}
+
+wait_for_socket() {
+    local sock="$1" tries="$2"
+    local i=0
+    while [ "$i" -lt "$tries" ]; do
+        [ -S "$sock" ] && return 0
+        usleep 100000 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+kill_and_wait() {
+    local pid_file="$1" name="$2"
+    if ! is_running "$pid_file"; then
+        return 0
+    fi
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    log "stopping $name pid=$pid"
+    kill "$pid" 2>/dev/null || true
+    local i=0
+    while [ "$i" -lt 30 ]; do
+        kill -0 "$pid" 2>/dev/null || break
+        usleep 100000 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        log "$name: SIGTERM timeout, sending SIGKILL"
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+}
+
+# ---- Parse key=value config into CLI flags ----
+
+parse_radiod_args() {
+    RADIOD_ARGS=""
+    [ ! -f "$RADIOD_CONF" ] && return
+    while IFS='=' read -r key value; do
+        case "$key" in \#*|"") continue ;; esac
+        value=$(echo "$value" | sed 's/#.*//' | xargs)
+        [ -z "$value" ] && continue
+        case "$key" in
+            iface)          RADIOD_ARGS="$RADIOD_ARGS --iface $value" ;;
+            node_id)        RADIOD_ARGS="$RADIOD_ARGS --node-id $value" ;;
+            dst_mac)        RADIOD_ARGS="$RADIOD_ARGS --dst-mac $value" ;;
+            tx_slot_size)   RADIOD_ARGS="$RADIOD_ARGS --tx-slot $value" ;;
+            rx_slot_us)     RADIOD_ARGS="$RADIOD_ARGS --rx-slot $value" ;;
+            relay)          [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --relay" ;;
+            verbose)        [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --verbose" ;;
+        esac
+    done < "$RADIOD_CONF"
+}
+
+parse_vcpd_args() {
+    VCPD_ARGS=""
+    [ ! -f "$VCPD_CONF" ] && return
+    while IFS='=' read -r key value; do
+        case "$key" in \#*|"") continue ;; esac
+        value=$(echo "$value" | sed 's/#.*//' | xargs)
+        [ -z "$value" ] && continue
+        case "$key" in
+            autostart) [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --autostart" ;;
+            verbose)   [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --verbose" ;;
+            source)    VCPD_ARGS="$VCPD_ARGS --source $value" ;;
+            bitrate)   VCPD_ARGS="$VCPD_ARGS --bitrate $value" ;;
+            width)     VCPD_ARGS="$VCPD_ARGS --width $value" ;;
+            height)    VCPD_ARGS="$VCPD_ARGS --height $value" ;;
+            fps)       VCPD_ARGS="$VCPD_ARGS --fps $value" ;;
+            transport) VCPD_ARGS="$VCPD_ARGS --transport $value" ;;
+            iface)     VCPD_ARGS="$VCPD_ARGS --iface $value" ;;
+            node)      VCPD_ARGS="$VCPD_ARGS --node $value" ;;
+            dst_node)  VCPD_ARGS="$VCPD_ARGS --dst-node $value" ;;
+            stream_id) VCPD_ARGS="$VCPD_ARGS --stream-id $value" ;;
+            peer)      VCPD_ARGS="$VCPD_ARGS --peer $value" ;;
+            listen)    VCPD_ARGS="$VCPD_ARGS --listen $value" ;;
+        esac
+    done < "$VCPD_CONF"
+}
+
+# ---- Start / Stop ----
 
 start() {
-    printf "Starting radiod: "
-    if [ -f "$CONF" ]; then
-        IFACE=$(grep -m1 '^iface=' "$CONF" | cut -d= -f2)
-        NODE_ID=$(grep -m1 '^node_id=' "$CONF" | cut -d= -f2)
+    export LD_LIBRARY_PATH=/oem/usr/lib
+
+    # 1. radiod
+    if [ -x "$RADIOD_BIN" ]; then
+        if is_running "$RADIOD_PID"; then
+            log "radiod already running"
+        else
+            mkdir -p "$RADIOD_LOG"
+            parse_radiod_args
+            log "starting radiod $RADIOD_ARGS"
+            "$RADIOD_BIN" $RADIOD_ARGS \
+                >"$RADIOD_LOG/radiod.stdout" 2>"$RADIOD_LOG/radiod.stderr" &
+            echo $! > "$RADIOD_PID"
+
+            # Wait for IPC socket before starting clients
+            if ! wait_for_socket /var/run/radiod.sock 20; then
+                log "WARNING: radiod socket not ready after 2s"
+            fi
+        fi
+    else
+        log "radiod binary not found: $RADIOD_BIN"
     fi
-    start-stop-daemon -S -b -m -p "$PIDFILE" -x "$DAEMON" -- \
-        ${IFACE:+--iface "$IFACE"} \
-        ${NODE_ID:+--node-id "$NODE_ID"}
-    echo "OK"
+
+    # 2. ulamad
+    if [ -x "$ULAMAD_BIN" ] && [ -f "$ULAMAD_CONF" ]; then
+        if is_running "$ULAMAD_PID"; then
+            log "ulamad already running"
+        else
+            mkdir -p "$ULAMAD_LOG"
+            log "starting ulamad --config $ULAMAD_CONF"
+            "$ULAMAD_BIN" --config "$ULAMAD_CONF" \
+                >"$ULAMAD_LOG/ulamad.stdout" 2>"$ULAMAD_LOG/ulamad.stderr" &
+            echo $! > "$ULAMAD_PID"
+        fi
+    fi
+
+    # 3. vcpd
+    if [ -x "$VCPD_BIN" ]; then
+        if is_running "$VCPD_PID"; then
+            log "vcpd already running"
+        else
+            mkdir -p "$VCPD_LOG"
+            parse_vcpd_args
+            log "starting vcpd $VCPD_ARGS"
+            "$VCPD_BIN" $VCPD_ARGS \
+                >"$VCPD_LOG/vcpd.stdout" 2>"$VCPD_LOG/vcpd.stderr" &
+            echo $! > "$VCPD_PID"
+        fi
+    fi
 }
 
 stop() {
-    printf "Stopping radiod: "
-    start-stop-daemon -K -p "$PIDFILE" -x "$DAEMON"
-    rm -f "$PIDFILE"
-    echo "OK"
+    # Reverse order: vcpd → ulamad → radiod
+    kill_and_wait "$VCPD_PID" "vcpd"
+    killall -9 vcpd 2>/dev/null || true
+
+    kill_and_wait "$ULAMAD_PID" "ulamad"
+
+    kill_and_wait "$RADIOD_PID" "radiod"
 }
 
-case "$1" in
+status() {
+    is_running "$RADIOD_PID" && log "radiod: running" || log "radiod: stopped"
+    is_running "$ULAMAD_PID" && log "ulamad: running" || log "ulamad: stopped"
+    is_running "$VCPD_PID"   && log "vcpd:   running" || log "vcpd:   stopped"
+}
+
+case "${1:-start}" in
     start)   start ;;
     stop)    stop ;;
-    restart) stop; start ;;
-    *)       echo "Usage: $0 {start|stop|restart}" ; exit 1 ;;
+    restart) stop || true; start ;;
+    status)  status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
 esac
