@@ -147,6 +147,14 @@ static uint8_t frame_traffic_class(const uint8_t *data, size_t len)
 static struct sockaddr_un g_radiod_addr;
 static bool g_radiod_addr_init = false;
 
+/* Shared per-process connection to radiod.
+ * Both TX and RX transports reuse the same socket so radiod
+ * sees one client per process, not two. Without this, the TX-only
+ * socket never calls recv() → its buffer fills → radiod sendto
+ * fails with EAGAIN on half the broadcasts. */
+static int g_radiod_fd = -1;
+static int g_radiod_refcount = 0;
+
 static void radiod_ensure_addr(const char *sock_path)
 {
 	if (g_radiod_addr_init)
@@ -159,12 +167,16 @@ static void radiod_ensure_addr(const char *sock_path)
 	g_radiod_addr_init = true;
 }
 
-static int radiod_create_client_socket(const char *client_name)
+static int radiod_acquire_fd(const char *client_name)
 {
 	struct sockaddr_un addr;
-	int fd;
 
-	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (g_radiod_fd >= 0) {
+		g_radiod_refcount++;
+		return g_radiod_fd;
+	}
+
+	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return -1;
 
@@ -172,36 +184,44 @@ static int radiod_create_client_socket(const char *client_name)
 	addr.sun_family = AF_UNIX;
 	addr.sun_path[0] = '\0';
 	snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 2,
-		 "radiod_%s_%d", client_name ? client_name : "anon", getpid());
+		 "radiod_%s_%d", client_name ? client_name : "client", getpid());
 	socklen_t bind_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
 			      + 1 + strlen(addr.sun_path + 1));
 	if (bind(fd, (struct sockaddr *)&addr, bind_len) < 0) {
 		close(fd);
 		return -1;
 	}
+
+	g_radiod_fd = fd;
+	g_radiod_refcount = 1;
+
+	/* Register once */
+	uint8_t msg[1 + 16];
+	memset(msg, 0, sizeof(msg));
+	msg[0] = RADIOD_MSG_REGISTER;
+	if (client_name != NULL)
+		strncpy((char *)msg + 1, client_name, 15);
+	sendto(fd, msg, sizeof(msg), MSG_DONTWAIT,
+	       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
+
 	return fd;
 }
 
-static void radiod_send_register(int fd, const char *name)
+static void radiod_release_fd(void)
 {
-	uint8_t msg[1 + 16];
-
-	memset(msg, 0, sizeof(msg));
-	msg[0] = RADIOD_MSG_REGISTER;
-	if (name != NULL)
-		strncpy((char *)msg + 1, name, 15);
-	sendto(fd, msg, sizeof(msg), MSG_DONTWAIT,
-	       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
-}
-
-static void radiod_send_unregister(int fd)
-{
-	uint8_t msg[1 + 16];
-
-	memset(msg, 0, sizeof(msg));
-	msg[0] = RADIOD_MSG_UNREGISTER;
-	sendto(fd, msg, sizeof(msg), MSG_DONTWAIT,
-	       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
+	if (g_radiod_fd < 0)
+		return;
+	g_radiod_refcount--;
+	if (g_radiod_refcount <= 0) {
+		uint8_t msg[1 + 16];
+		memset(msg, 0, sizeof(msg));
+		msg[0] = RADIOD_MSG_UNREGISTER;
+		sendto(g_radiod_fd, msg, sizeof(msg), MSG_DONTWAIT,
+		       (struct sockaddr *)&g_radiod_addr, sizeof(g_radiod_addr));
+		close(g_radiod_fd);
+		g_radiod_fd = -1;
+		g_radiod_refcount = 0;
+	}
 }
 
 static ssize_t radiod_tx_send(int fd, const uint8_t *data, size_t len,
@@ -285,15 +305,13 @@ int ulama_transport_tx_init_radiod(ulama_tx_transport_t *transport,
 	transport->fd = -1;
 	radiod_ensure_addr(sock_path);
 
-	fd = radiod_create_client_socket(client_name ? client_name : "tx");
+	fd = radiod_acquire_fd(client_name);
 	if (fd < 0)
 		return -1;
 
 	transport->kind = ULAMA_TRANSPORT_KIND_RADIOD;
 	transport->node_id = node_id;
 	transport->fd = fd;
-
-	radiod_send_register(fd, client_name);
 	return 0;
 }
 
@@ -312,15 +330,13 @@ int ulama_transport_rx_init_radiod(ulama_rx_transport_t *transport,
 	transport->fd = -1;
 	radiod_ensure_addr(sock_path);
 
-	fd = radiod_create_client_socket(client_name ? client_name : "rx");
+	fd = radiod_acquire_fd(client_name);
 	if (fd < 0)
 		return -1;
 
 	transport->kind = ULAMA_TRANSPORT_KIND_RADIOD;
 	transport->node_id = node_id;
 	transport->fd = fd;
-
-	radiod_send_register(fd, client_name);
 	return 0;
 }
 
@@ -461,8 +477,7 @@ void ulama_transport_tx_close(ulama_tx_transport_t *transport)
 		close(transport->fd);
 	}
 	if (transport->kind == ULAMA_TRANSPORT_KIND_RADIOD && transport->fd >= 0) {
-		radiod_send_unregister(transport->fd);
-		close(transport->fd);
+		radiod_release_fd();
 	}
 	memset(transport, 0, sizeof(*transport));
 	transport->fd = -1;
@@ -611,8 +626,7 @@ void ulama_transport_rx_close(ulama_rx_transport_t *transport)
 		close(transport->fd);
 	}
 	if (transport->kind == ULAMA_TRANSPORT_KIND_RADIOD && transport->fd >= 0) {
-		radiod_send_unregister(transport->fd);
-		close(transport->fd);
+		radiod_release_fd();
 	}
 	#if ULAMA_WITH_UNOW
 	if (transport->kind == ULAMA_TRANSPORT_KIND_UNOW) {
