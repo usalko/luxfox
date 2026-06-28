@@ -27,7 +27,9 @@
 typedef struct {
 	uint8_t  data[RADIO_TX_MAX_FRAME];
 	size_t   len;
-	uint8_t  reliability; /* 0=fire-and-forget, 1=ACK+retry */
+	uint8_t  reliability;  /* 0=fire-and-forget, 1=ACK+retry */
+	bool     has_dst_mac;  /* true = use dst_mac instead of default */
+	uint8_t  dst_mac[6];   /* next-hop MAC for relay packets      */
 } radio_tx_slot_t;
 
 /* ---- Per-priority ring buffer ---- */
@@ -64,6 +66,12 @@ int  radio_tx_enqueue(radio_tx_scheduler_t *sched,
  */
 const radio_tx_slot_t *radio_tx_dequeue(radio_tx_scheduler_t *sched,
 					uint8_t *out_priority);
+
+/* Enqueue with explicit next-hop MAC (for relay packets). */
+int  radio_tx_enqueue_relay(radio_tx_scheduler_t *sched,
+			    uint8_t priority, uint8_t reliability,
+			    const uint8_t *data, size_t len,
+			    const uint8_t dst_mac[6]);
 
 /* Peek at the head of a specific priority queue without removing. */
 const radio_tx_slot_t *radio_tx_peek(const radio_tx_scheduler_t *sched,

@@ -34,11 +34,31 @@ int radio_tx_enqueue(radio_tx_scheduler_t *sched,
 	memcpy(slot->data, data, len);
 	slot->len = len;
 	slot->reliability = reliability;
+	slot->has_dst_mac = false;
 
 	q->head = (uint16_t)((q->head + 1U) % RADIO_TX_QUEUE_SIZE);
 	q->count++;
 	q->enqueued++;
 	return 0;
+}
+
+int radio_tx_enqueue_relay(radio_tx_scheduler_t *sched,
+			  uint8_t priority, uint8_t reliability,
+			  const uint8_t *data, size_t len,
+			  const uint8_t dst_mac[6])
+{
+	int rc = radio_tx_enqueue(sched, priority, reliability, data, len);
+	if (rc == 0 && dst_mac != NULL) {
+		radio_tx_queue_t *q = &sched->queues[priority >= RADIO_PRIO_COUNT
+						      ? RADIO_PRIO_BULK : priority];
+		/* The slot we just wrote is at (head - 1) */
+		uint16_t idx = (uint16_t)((q->head + RADIO_TX_QUEUE_SIZE - 1U)
+					   % RADIO_TX_QUEUE_SIZE);
+		radio_tx_slot_t *slot = &q->slots[idx];
+		memcpy(slot->dst_mac, dst_mac, 6);
+		slot->has_dst_mac = true;
+	}
+	return rc;
 }
 
 const radio_tx_slot_t *radio_tx_dequeue(radio_tx_scheduler_t *sched,

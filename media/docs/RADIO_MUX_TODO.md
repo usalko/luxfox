@@ -259,7 +259,7 @@ ACK модель: **hop-by-hop** — каждый hop подтверждает �
 end-to-end гарантий нет. Для дронов это приемлемо: CTRL идёт с
 reliable=1 на каждом hop, потери VIDEO восстанавливаются через NACK.
 
-#### Task 4.1: Relay engine в rx_dispatcher
+#### ~~Task 4.1: Relay engine в rx_dispatcher~~ ✅ DONE
 
 **Файлы**: `radiod/src/rx_dispatcher.c`, `radiod/include/radiod/rx_dispatcher.h`
 
@@ -292,7 +292,7 @@ Relay пакет сохраняет исходный traffic_class → прио�
 Relay CTRL → P0, relay VIDEO → P2. Свой и чужой трафик конкурируют
 в одних очередях — TDMA scheduler обеспечивает fairness.
 
-#### Task 4.2: ULAMA-level dedup
+#### ~~Task 4.2: ULAMA-level dedup~~ ✅ DONE
 
 **Файлы**: `radiod/src/rx_dispatcher.c`
 
@@ -318,7 +318,7 @@ radio_ulama_dedup_key_t ulama_dedup_ring[RADIO_ULAMA_DEDUP_WINDOW];
 
 Без этого: broadcast storm при 3+ узлах (A→B→C→A→B→...).
 
-#### Task 4.3: Route table (auto-learning)
+#### ~~Task 4.3: Route table (auto-learning)~~ ✅ DONE
 
 **Файлы**: `radiod/include/radiod/route_table.h`, `radiod/src/route_table.c`
 
@@ -356,7 +356,7 @@ Expire: удалять routes старше 30 секунд.
 Route discovery (ROUTE_DISC flag) — НЕ реализуем на этом этапе,
 auto-learning по RX трафику достаточно для star/chain topology.
 
-#### Task 4.4: Watchdog — фильтрация по dst_node
+#### ~~Task 4.4: Watchdog — фильтрация по dst_node~~ ✅ DONE
 
 **Файлы**: `radiod/tools/radiod.c`
 
@@ -370,7 +370,7 @@ auto-learning по RX трафику достаточно для star/chain topo
 Для этого rx_dispatcher при dispatch должен сообщать caller'у
 traffic_class и dst_node полученного фрейма.
 
-#### Task 4.5: Relay metrics в stats
+#### ~~Task 4.5: Relay metrics в stats~~ ✅ DONE
 
 **Файлы**: `radiod/include/radiod/stats.h`, `radiod/src/stats.c`
 

@@ -40,7 +40,8 @@ void radio_stats_add_tx_packet(radio_stats_t *st, uint8_t priority)
 
 int radio_stats_report(radio_stats_t *st, int64_t now_us,
 		       const radio_tx_scheduler_t *sched,
-		       const radio_rx_dispatcher_t *rxd)
+		       const radio_rx_dispatcher_t *rxd,
+		       const radio_route_table_t *rt)
 {
 	int64_t elapsed_us;
 	double elapsed_s;
@@ -78,11 +79,28 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	}
 
 	if (rxd != NULL) {
-		fprintf(stderr, "ack[ok=%u to=%u retx=%u] dedup=%u",
+		fprintf(stderr, "ack[ok=%u to=%u retx=%u] dedup=%u/%u",
 			rxd->stats.tx_ack_ok,
 			rxd->stats.tx_ack_timeout,
 			rxd->stats.tx_retries,
-			rxd->stats.rx_dedup_dropped);
+			rxd->stats.rx_dedup_dropped,
+			rxd->stats.rx_ulama_dedup_dropped);
+
+		if (rxd->stats.relay_forwarded > 0 ||
+		    rxd->stats.relay_dropped_ttl > 0) {
+			fprintf(stderr, " relay[fwd=%u ttl_drop=%u "
+				"C=%u T=%u V=%u B=%u]",
+				rxd->stats.relay_forwarded,
+				rxd->stats.relay_dropped_ttl,
+				rxd->stats.relay_by_prio[0],
+				rxd->stats.relay_by_prio[1],
+				rxd->stats.relay_by_prio[2],
+				rxd->stats.relay_by_prio[3]);
+		}
+	}
+
+	if (rt != NULL) {
+		fprintf(stderr, " routes=%d", radio_route_count(rt));
 	}
 
 	fprintf(stderr, "\n");
