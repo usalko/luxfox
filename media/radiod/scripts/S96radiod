@@ -137,9 +137,11 @@ start() {
     export LD_LIBRARY_PATH=/oem/usr/lib
 
     # 1. radiod
+    RADIOD_OK=false
     if [ -x "$RADIOD_BIN" ]; then
         if is_running "$RADIOD_PID"; then
             log "radiod already running"
+            RADIOD_OK=true
         else
             mkdir -p "$RADIOD_LOG"
             parse_radiod_args
@@ -149,12 +151,22 @@ start() {
             echo $! > "$RADIOD_PID"
 
             # Wait for IPC socket before starting clients
-            if ! wait_for_socket /var/run/radiod.sock 20; then
-                log "WARNING: radiod socket not ready after 2s"
+            if wait_for_socket /var/run/radiod.sock 20 && is_running "$RADIOD_PID"; then
+                log "radiod started OK"
+                RADIOD_OK=true
+            else
+                log "ERROR: radiod failed to start, check $RADIOD_LOG/radiod.stderr"
+                cat "$RADIOD_LOG/radiod.stderr" 2>/dev/null | tail -5 | while read -r line; do
+                    log "  $line"
+                done
             fi
         fi
     else
         log "radiod binary not found: $RADIOD_BIN"
+    fi
+
+    if [ "$RADIOD_OK" = "false" ]; then
+        log "WARNING: radiod not running — ulamad/vcpd will only work with transport=udp or transport=unow"
     fi
 
     # 2. ulamad (skip if /tmp/ulamad.manual exists)
@@ -208,9 +220,27 @@ stop() {
 }
 
 status() {
-    is_running "$RADIOD_PID" && log "radiod: running" || log "radiod: stopped"
-    is_running "$ULAMAD_PID" && log "ulamad: running" || log "ulamad: stopped"
-    is_running "$VCPD_PID"   && log "vcpd:   running" || log "vcpd:   stopped"
+    if is_running "$RADIOD_PID"; then
+        log "radiod: running (pid $(cat "$RADIOD_PID"))"
+    elif [ ! -x "$RADIOD_BIN" ]; then
+        log "radiod: NOT INSTALLED ($RADIOD_BIN not found)"
+    else
+        log "radiod: stopped"
+    fi
+    if [ -f /tmp/ulamad.manual ]; then
+        log "ulamad: MANUAL mode"
+    elif is_running "$ULAMAD_PID"; then
+        log "ulamad: running (pid $(cat "$ULAMAD_PID"))"
+    else
+        log "ulamad: stopped"
+    fi
+    if [ -f /tmp/vcpd.manual ]; then
+        log "vcpd:   MANUAL mode"
+    elif is_running "$VCPD_PID"; then
+        log "vcpd:   running (pid $(cat "$VCPD_PID"))"
+    else
+        log "vcpd:   stopped"
+    fi
 }
 
 case "${1:-start}" in
