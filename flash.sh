@@ -2,9 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR1="$SCRIPT_DIR/output/out/media_out/root"
+ROOT_DIR2="$SCRIPT_DIR/media/out"
 OEM_DIR="$SCRIPT_DIR/output/out/oem"
-ULAMA_CONF="$OEM_DIR/etc/ulama.conf"
-VCPD_CONF="$OEM_DIR/etc/vcpd.conf"
+
+ULAMA_CONF="etc/ulama.conf"
+VCPD_CONF="etc/vcpd.conf"
+RADIOD_CONF="etc/radiod.conf"
 
 NODE_ID="${1:-}"
 
@@ -29,8 +33,8 @@ done
 if [[ -z "$NODE_ID" ]]; then
     # Try to read from existing config
     CURRENT_NODE=""
-    if [[ -f "$ULAMA_CONF" ]]; then
-        CURRENT_NODE=$(grep -oP '^node=\K[0-9]+' "$ULAMA_CONF" 2>/dev/null || true)
+    if [[ -f "$ROOT_DIR1/$RADIOD_CONF" ]]; then
+        CURRENT_NODE=$(grep -oP '^node=\K[0-9]+' "$ROOT_DIR1/$RADIOD_CONF" 2>/dev/null || true)
     fi
 
     if [[ -n "$CURRENT_NODE" ]]; then
@@ -50,13 +54,30 @@ fi
 echo "=== Flash LuckFox with node_id=$NODE_ID ==="
 
 # Patch node ID in configs before building firmware image
-if [[ -f "$ULAMA_CONF" ]]; then
-    sed -i "s/^node=.*/node=$NODE_ID/" "$ULAMA_CONF"
+if [[ -f "$ROOT_DIR1/$ULAMA_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR1/$ULAMA_CONF"
+    echo "  ulama.conf: node=$NODE_ID"
+fi
+if [[ -f "$ROOT_DIR2/$ULAMA_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR2/$ULAMA_CONF"
     echo "  ulama.conf: node=$NODE_ID"
 fi
 
-if [[ -f "$VCPD_CONF" ]]; then
-    sed -i "s/^node=.*/node=$NODE_ID/" "$VCPD_CONF"
+if [[ -f "$ROOT_DIR1/$VCPD_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR1/$VCPD_CONF"
+    echo "  vcpd.conf:  node=$NODE_ID"
+fi
+if [[ -f "$ROOT_DIR2/$VCPD_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR2/$VCPD_CONF"
+    echo "  vcpd.conf:  node=$NODE_ID"
+fi
+
+if [[ -f "$ROOT_DIR1/$RADIOD_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR1/$RADIOD_CONF"
+    echo "  vcpd.conf:  node=$NODE_ID"
+fi
+if [[ -f "$ROOT_DIR2/$RADIOD_CONF" ]]; then
+    sed -i "s/^node=.*/node=$NODE_ID/" "$ROOT_DIR2/$RADIOD_CONF"
     echo "  vcpd.conf:  node=$NODE_ID"
 fi
 
