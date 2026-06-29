@@ -251,8 +251,10 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 
 		if (status == 0)
 			continue;
-		if (status < 0)
+		if (status < 0) {
+			rxd->stats.rx_pcap_error++;
 			break;
+		}
 
 		rxd->stats.rx_total++;
 

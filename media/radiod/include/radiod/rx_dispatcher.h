@@ -53,6 +53,7 @@ typedef struct {
 	uint32_t rx_data_seq;
 	uint32_t rx_dispatched;
 	uint32_t rx_parse_fail;
+	uint32_t rx_pcap_error;  /* pcap_next_ex returned -1 */
 	uint32_t tx_ack_ok;
 	uint32_t tx_ack_timeout;
 	uint32_t tx_retries;

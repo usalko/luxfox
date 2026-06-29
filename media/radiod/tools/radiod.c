@@ -380,7 +380,6 @@ int main(int argc, char **argv)
 	 * ================================================================ */
 
 	uint32_t pcap_error_count = 0;
-	uint32_t last_rx_total = 0;
 
 	while (g_running) {
 
@@ -534,28 +533,23 @@ int main(int argc, char **argv)
 		radio_stats_add_cycle(&stats);
 		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes, &ipc);
 
-		/* 9. Detect pcap failure (USB disconnect) */
-
-		/* Detect pcap failure (USB disconnect).
-		 * If rx_total hasn't grown for many cycles, the interface
-		 * is dead — enter recovery. ~500 cycles at 2ms = 1 second
-		 * of silence before recovery triggers. */
-		if (pcap_handle != NULL) {
-			if (rxd.stats.rx_total == last_rx_total)
-				pcap_error_count++;
-			else
-				pcap_error_count = 0;
-			last_rx_total = rxd.stats.rx_total;
+		/* 9. Detect pcap failure (USB disconnect).
+		 * Only trigger recovery when pcap_next_ex actually returns
+		 * errors (-1). Absence of RX packets is normal when no
+		 * ground station is transmitting — NOT a reason to recover. */
+		if (pcap_handle != NULL && rxd.stats.rx_pcap_error > 0) {
+			pcap_error_count += rxd.stats.rx_pcap_error;
+			rxd.stats.rx_pcap_error = 0;
+		} else {
+			pcap_error_count = 0;
 		}
 
-		if (pcap_handle != NULL && pcap_error_count > 500) {
+		if (pcap_handle != NULL && pcap_error_count > 3) {
 			fprintf(stderr,
-				"radiod: pcap unresponsive for %u cycles, entering recovery\n",
-				pcap_error_count);
+				"radiod: pcap error (interface lost), entering recovery\n");
 			unow_iface_close_pcap(&pcap_handle);
 			pcap_handle = NULL;
 			pcap_error_count = 0;
-			last_rx_total = 0;
 			continue;
 		}
 
