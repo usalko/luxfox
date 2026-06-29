@@ -71,7 +71,9 @@ vcpd-build: $(TARGET_BIN)
 	@cp -f $(TARGET_BIN) $(PKG_OUT)/bin/
 	@if [ -f $(PKG_CONFIG_DIR)/vcpd.conf ]; then cp -f $(PKG_CONFIG_DIR)/vcpd.conf $(PKG_OUT)/etc/; fi
 
-$(TARGET_BIN): $(TARGET_APP_SRC) $(VCPD_SRCS) $(VCPD_VIDEO_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)
+ULAMA_VERSION_HDR := $(ULAMA_ROOT)/include/ulama/ulama_version.h
+
+$(TARGET_BIN): $(TARGET_APP_SRC) $(VCPD_SRCS) $(VCPD_VIDEO_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) $(ULAMA_VERSION_HDR)
 	$(CC) $(CFLAGS) $< $(VCPD_SRCS) $(VCPD_VIDEO_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) -o $@ $(APP_LDFLAGS)
 
 host: $(HOST_TEST_BINS)

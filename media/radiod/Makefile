@@ -75,7 +75,9 @@ radiod-build: $(TARGET_BIN)
 	@if [ -f $(PKG_SCRIPT_DIR)/S96radiod ]; then cp -f $(PKG_SCRIPT_DIR)/S96radiod $(PKG_OUT)/etc/init.d/; fi
 	@if [ -f $(PKG_CONFIG_DIR)/radiod.conf ]; then cp -f $(PKG_CONFIG_DIR)/radiod.conf $(PKG_OUT)/etc/; fi
 
-$(TARGET_BIN): $(TARGET_APP_SRC) $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)
+ULAMA_VERSION_HDR := $(ULAMA_ROOT)/include/ulama/ulama_version.h
+
+$(TARGET_BIN): $(TARGET_APP_SRC) $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) $(ULAMA_VERSION_HDR)
 	$(CC) $(CFLAGS) $< $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) -o $@ $(APP_LDFLAGS)
 
 host: $(HOST_TEST_BINS)

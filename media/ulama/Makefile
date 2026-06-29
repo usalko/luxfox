@@ -88,7 +88,9 @@ $(PKG_BUILD)/src/%.o: $(CURRENT_DIR)/src/%.c
 $(TARGET_LIB_A): $(LIB_OBJS)
 	$(AR) -rcs $@ $(LIB_OBJS)
 
-$(TARGET_BIN): $(TARGET_APP_SRC) $(LIB_SRCS) $(UNOW_SRCS)
+VERSION_HDR := $(CURRENT_DIR)/include/ulama/ulama_version.h
+
+$(TARGET_BIN): $(TARGET_APP_SRC) $(LIB_SRCS) $(UNOW_SRCS) $(VERSION_HDR)
 	$(CC) $(CFLAGS) $< $(LIB_SRCS) $(UNOW_SRCS) -o $@ $(APP_LDFLAGS)
 
 host: $(HOST_TEST_BINS) $(HOST_TOOL_BINS)
