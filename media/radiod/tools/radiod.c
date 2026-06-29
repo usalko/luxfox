@@ -94,6 +94,7 @@ typedef struct {
 	radio_tx_scheduler_t *sched;
 	radio_watchdog_t     *wd;
 	bool                  verbose;
+	uint32_t              wd_drop_count;
 } ipc_tx_ctx_t;
 
 static void on_ipc_tx_request(const radio_tx_request_t *req,
@@ -104,8 +105,13 @@ static void on_ipc_tx_request(const radio_tx_request_t *req,
 	(void)total_len;
 
 	if (ctx->wd != NULL && radio_watchdog_video_blocked(ctx->wd)) {
-		if (req->priority != RADIO_PRIO_CTRL)
+		if (req->priority != RADIO_PRIO_CTRL) {
+			if (ctx->wd_drop_count++ % 100 == 0)
+				fprintf(stderr,
+					"radiod: watchdog dropping prio=%u pkt (link LOST, total dropped=%u)\n",
+					(unsigned)req->priority, ctx->wd_drop_count);
 			return;
+		}
 	}
 
 	radio_tx_enqueue(ctx->sched, req->priority, req->reliability,
