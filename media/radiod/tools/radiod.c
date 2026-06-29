@@ -380,6 +380,7 @@ int main(int argc, char **argv)
 	 * ================================================================ */
 
 	uint32_t pcap_error_count = 0;
+	uint32_t last_rx_total = 0;
 
 	while (g_running) {
 
@@ -413,14 +414,17 @@ int main(int argc, char **argv)
 					continue;
 				}
 
-				/* Radio restored */
+				/* Radio restored — let driver settle before
+				 * entering TDMA loop */
 				pcap_error_count = 0;
 				fprintf(stderr,
-					"radiod: radio restored iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+					"radiod: radio restored iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x, settling...\n",
 					cfg.iface,
 					iface_info.mac[0], iface_info.mac[1],
 					iface_info.mac[2], iface_info.mac[3],
 					iface_info.mac[4], iface_info.mac[5]);
+				sleep(2);
+				radio_watchdog_init(&wd, now_us());
 				break;
 			}
 			if (!g_running)
@@ -532,27 +536,27 @@ int main(int argc, char **argv)
 
 		/* 9. Detect pcap failure (USB disconnect) */
 
-		if (rxd.stats.rx_parse_fail > 50 && rxd.stats.rx_total > 0 &&
-		    rxd.stats.rx_parse_fail * 100 / rxd.stats.rx_total > 90) {
-			pcap_error_count++;
-		} else {
-			pcap_error_count = 0;
+		/* Detect pcap failure (USB disconnect).
+		 * If rx_total hasn't grown for many cycles, the interface
+		 * is dead — enter recovery. ~500 cycles at 2ms = 1 second
+		 * of silence before recovery triggers. */
+		if (pcap_handle != NULL) {
+			if (rxd.stats.rx_total == last_rx_total)
+				pcap_error_count++;
+			else
+				pcap_error_count = 0;
+			last_rx_total = rxd.stats.rx_total;
 		}
 
-		/* pcap_next_ex returns -1 on error — rx_slot exits early.
-		 * Detect by checking if RX slot produced zero results for
-		 * many consecutive cycles, or if error count is high. */
-		if (pcap_handle != NULL) {
-			int test = pcap_inject(pcap_handle, "", 0);
-			if (test < 0 && pcap_error_count > 10) {
-				fprintf(stderr,
-					"radiod: pcap error detected (%s), entering recovery\n",
-					pcap_geterr(pcap_handle));
-				unow_iface_close_pcap(&pcap_handle);
-				pcap_handle = NULL;
-				/* Loop back to recovery at top */
-				continue;
-			}
+		if (pcap_handle != NULL && pcap_error_count > 500) {
+			fprintf(stderr,
+				"radiod: pcap unresponsive for %u cycles, entering recovery\n",
+				pcap_error_count);
+			unow_iface_close_pcap(&pcap_handle);
+			pcap_handle = NULL;
+			pcap_error_count = 0;
+			last_rx_total = 0;
+			continue;
 		}
 
 		/* Micro-sleep if cycle was too fast */
