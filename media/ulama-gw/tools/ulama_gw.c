@@ -626,7 +626,7 @@ static void try_send_nack(app_ctx_t *ctx, uint64_t now)
 
 static void handle_ulama_rx(app_ctx_t *ctx)
 {
-  for (int drain = 0; drain < 4; drain++) {
+  for (int drain = 0; drain < 128; drain++) {
 	uint8_t buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD + 64];
 	uint8_t src_mac[6] = {0};
 	int8_t rssi = 0;
@@ -887,13 +887,18 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
 	}
 
-	struct pollfd pfds[1];
+	struct pollfd pfds[2];
+	nfds_t nfds = 1;
 	pfds[0].fd = ctx.cascade_rx_fd;
 	pfds[0].events = POLLIN;
-	bool ulama_rx_is_pollable = (ctx.ulama_rx.fd >= 0);
+	if (ctx.ulama_rx.fd >= 0) {
+		pfds[1].fd = ctx.ulama_rx.fd;
+		pfds[1].events = POLLIN;
+		nfds = 2;
+	}
 
 	while (g_running) {
-		int ret = poll(pfds, 1, ulama_rx_is_pollable ? 50 : 5);
+		int ret = poll(pfds, nfds, 2);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;

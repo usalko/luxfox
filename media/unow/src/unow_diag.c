@@ -284,3 +284,10 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 		return ESP_FAIL;
 	}
 }
+
+int unow_diag_get_rx_fd(void)
+{
+	if (!g_unow.initialized || g_unow.pcap == NULL)
+		return -1;
+	return pcap_get_selectable_fd(g_unow.pcap);
+}

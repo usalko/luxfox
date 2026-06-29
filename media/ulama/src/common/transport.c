@@ -538,7 +538,7 @@ int ulama_transport_rx_init_unow(ulama_rx_transport_t *transport, uint8_t node_i
 	}
 	transport->kind = ULAMA_TRANSPORT_KIND_UNOW;
 	transport->node_id = node_id;
-	transport->fd = -1;
+	transport->fd = unow_diag_get_rx_fd();
 	return 0;
 	#else
 	(void)transport;

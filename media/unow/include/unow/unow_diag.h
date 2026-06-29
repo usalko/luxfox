@@ -32,6 +32,7 @@ void unow_diag_hexdump(unow_log_level_t level, const char *prefix, const void *d
 bool unow_diag_parse_mac(const char *text, uint8_t mac[6]);
 void unow_dump_state(FILE *stream);
 esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms);
+int unow_diag_get_rx_fd(void);
 void unow_diag_dump_frame(FILE *stream, const unow_diag_frame_t *frame);
 
 #define UNOW_LOGE(...) unow_diag_log(UNOW_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
