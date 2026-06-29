@@ -651,56 +651,18 @@ main() {
                 do_clean
             fi
 
-            # Build ulama + all sibling projects
             if ! do_build; then
                 log_error "Build failed!"
                 return 1
             fi
 
-            # Build sibling projects (vcpd, radiod, unow)
-            local MEDIA_ROOT="$ULAMA_ROOT/.."
-            for sibling in vcpd radiod unow; do
-                if [ -f "$MEDIA_ROOT/$sibling/Makefile" ]; then
-                    log_info "Building $sibling..."
-                    make -C "$MEDIA_ROOT/$sibling" || log_warn "$sibling build failed (non-fatal)"
-                fi
-            done
-
-            # Stage files
             if ! stage_files; then
                 log_error "Failed to stage files for flashing!"
                 return 1
             fi
 
-            # Stage sibling projects: binaries → OEM, configs → rootfs
-            for sibling in vcpd radiod unow; do
-                local sib_out="$MEDIA_ROOT/$sibling/out"
-                [ -d "$sib_out" ] || continue
-                log_info "Staging $sibling..."
-                if [ -d "$sib_out/bin" ]; then
-                    mkdir -p "$OEM_STAGING/usr/bin"
-                    cp -f "$sib_out/bin/"* "$OEM_STAGING/usr/bin/" 2>/dev/null || true
-                    chmod +x "$OEM_STAGING/usr/bin/"* 2>/dev/null || true
-                fi
-                if [ -d "$sib_out/lib" ]; then
-                    mkdir -p "$OEM_STAGING/usr/lib"
-                    cp -rf "$sib_out/lib/"* "$OEM_STAGING/usr/lib/" 2>/dev/null || true
-                fi
-                if [ -d "$sib_out/etc" ]; then
-                    mkdir -p "$MEDIA_ROOT_STAGING/etc"
-                    cp -rf "$sib_out/etc/"* "$MEDIA_ROOT_STAGING/etc/" 2>/dev/null || true
-                    find "$MEDIA_ROOT_STAGING/etc/init.d" -maxdepth 1 -type f -name 'S*' \
-                        -exec chmod +x {} \; 2>/dev/null || true
-                fi
-            done
-
-            # Print summary
             print_summary
-
-            # Always sync to device
-            log_info "Syncing to device..."
-            cd "$PROJECT_ROOT" && ./build.sh sync
-
+            print_next_steps
             return 0
             ;;
         test)
