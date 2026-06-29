@@ -113,6 +113,17 @@ typedef struct {
 	size_t chunk_size;
 } nal_assembler_t;
 
+#define GW_MAX_NODES 254
+
+typedef struct {
+	uint32_t rx_pkts;
+	uint32_t tx_pkts;
+	uint32_t rx_bytes;
+	uint32_t tx_bytes;
+	int32_t  rssi_sum;
+	uint32_t rssi_count;
+} gw_node_stats_t;
+
 typedef struct {
 	uint32_t nal_complete;
 	uint32_t nal_dropped;
@@ -144,6 +155,7 @@ typedef struct {
 	uint32_t nal_gap_skipped;
 	uint32_t lts_rx_total;
 	uint64_t lts_payload_bytes;
+	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
 
 typedef struct {
@@ -237,6 +249,12 @@ static void cascade_to_ulama_tx(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 
 	if (ulama_class == ULAMA_CLASS_CTRL)
 		ctx->stats.ctrl_tx++;
+
+	/* Per-node TX stats */
+	if (dst_node > 0 && dst_node < GW_MAX_NODES) {
+		ctx->stats.nodes[dst_node].tx_pkts++;
+		ctx->stats.nodes[dst_node].tx_bytes += (uint32_t)cf->payload_len;
+	}
 
 	if (cf->payload_len <= ULAMA_FRAME_MAX_PAYLOAD) {
 		ulama_frame_view_t uf = {
@@ -633,6 +651,14 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	case ULAMA_CLASS_CTRL:      ctx->stats.ulama_rx_ctrl++; break;
 	}
 
+	/* Per-node RX stats */
+	if (uf.src_node > 0 && uf.src_node < GW_MAX_NODES) {
+		ctx->stats.nodes[uf.src_node].rx_pkts++;
+		ctx->stats.nodes[uf.src_node].rx_bytes += (uint32_t)uf.payload_len;
+		ctx->stats.nodes[uf.src_node].rssi_sum += rssi;
+		ctx->stats.nodes[uf.src_node].rssi_count++;
+	}
+
 	uint16_t src_u16 = gw_addr_u8_to_u16(&ctx->gw, uf.src_node);
 	uint8_t cascade_class = gw_class_ulama_to_cascade(uf.traffic_class);
 
@@ -903,6 +929,25 @@ int main(int argc, char *argv[])
 				s->burst_gaps, s->single_gaps, s->retx_arrived,
 				s->fec_recovered, s->fec_unrecoverable, s->nal_gap_skipped,
 				pps_in, pps_unique, bps_in / 1000);
+			/* Per-node summary */
+			bool any_node = false;
+			for (int ni = 0; ni < GW_MAX_NODES; ni++) {
+				gw_node_stats_t *ns = &s->nodes[ni];
+				if (ns->rx_pkts == 0 && ns->tx_pkts == 0)
+					continue;
+				if (!any_node) {
+					fprintf(stderr, "[nodes]");
+					any_node = true;
+				}
+				int node_rssi = ns->rssi_count > 0
+					? (int)(ns->rssi_sum / (int32_t)ns->rssi_count) : 0;
+				fprintf(stderr, " n%d[rx=%u/%uB tx=%u/%uB rssi=%d]",
+					ni, ns->rx_pkts, ns->rx_bytes,
+					ns->tx_pkts, ns->tx_bytes, node_rssi);
+			}
+			if (any_node)
+				fprintf(stderr, "\n");
+
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}

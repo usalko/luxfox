@@ -354,11 +354,8 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 				do_relay = false;
 		}
 
-		/* Per-cycle watchdog feedback: any ULAMA frame addressed to us.
-		 * Previously only CTRL class fed the watchdog, but the GW
-		 * sends UVCP control messages on VIDEO class — so the
-		 * watchdog starved and blocked all TX permanently. */
-		if (is_ulama &&
+		/* Per-cycle watchdog feedback: CTRL addressed to us */
+		if (is_ulama && traffic_class == ULAMA_CLASS_CTRL &&
 		    (dst_node == rxd->own_node_id || dst_node == 0xFF))
 			rxd->ctrl_for_us++;
 
