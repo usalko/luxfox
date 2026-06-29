@@ -14,6 +14,11 @@ typedef struct {
     bool    t3t4_valid;
 } clock_sync_sample_t;
 
+/* Step system clock when offset exceeds this threshold */
+#define CLOCK_SYNC_STEP_THRESHOLD_US 500000 /* 500 ms */
+/* Minimum samples before we trust the offset enough to step */
+#define CLOCK_SYNC_STEP_MIN_SAMPLES  4
+
 typedef struct {
     int64_t  offset_us;
     int64_t  rtt_us;
@@ -32,6 +37,9 @@ typedef struct {
     bool     delay_req_pending;
 
     uint8_t  sync_source_node;
+
+    bool     clock_stepped;  /* true after settimeofday was applied */
+    uint32_t step_count;     /* how many times we stepped the clock */
 
     clock_sync_sample_t current;
 } clock_sync_t;
