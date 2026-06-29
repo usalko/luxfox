@@ -32,6 +32,17 @@ typedef struct {
 
 	/* Per-priority TX counts */
 	uint32_t tx_by_prio[4];
+
+	/* SYNC stats (snapshot for reporting) */
+	uint32_t sync_tx;
+	uint32_t sync_rx;
+	uint32_t sync_relay;
+	uint32_t delay_req_tx;
+	uint32_t delay_resp_rx;
+	int64_t  clock_offset_us;
+	int64_t  clock_rtt_us;
+	uint8_t  current_role;
+	uint8_t  current_master;
 } radio_stats_t;
 
 void radio_stats_init(radio_stats_t *st, int64_t now_us);
@@ -52,3 +63,7 @@ int  radio_stats_report(radio_stats_t *st, int64_t now_us,
 			const radio_rx_dispatcher_t *rxd,
 			const radio_route_table_t *rt,
 			const radio_ipc_server_t *ipc);
+
+struct radio_sync_t_fwd;
+void radio_stats_update_sync(radio_stats_t *st,
+			     const void *sync_ctx);

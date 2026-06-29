@@ -82,3 +82,8 @@ bool radio_watchdog_video_blocked(const radio_watchdog_t *wd)
 		return false;
 	return wd->state == RADIO_LINK_LOST;
 }
+
+void radio_watchdog_feed_sync(radio_watchdog_t *wd, int64_t now_us)
+{
+	radio_watchdog_feed(wd, now_us);
+}

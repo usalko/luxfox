@@ -51,3 +51,6 @@ radio_link_state_t radio_watchdog_tick(radio_watchdog_t *wd,
 
 /* Returns true if VIDEO TX should be suppressed. */
 bool radio_watchdog_video_blocked(const radio_watchdog_t *wd);
+
+/* SYNC beacon from master = implicit CTRL heartbeat */
+void radio_watchdog_feed_sync(radio_watchdog_t *wd, int64_t now_us);

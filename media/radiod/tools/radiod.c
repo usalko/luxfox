@@ -802,6 +802,8 @@ int main(int argc, char **argv)
 		radio_route_expire(&routes, now_us());
 
 		radio_stats_add_cycle(&stats);
+		if (cfg.sync_enabled)
+			radio_stats_update_sync(&stats, &sync_engine);
 		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes, &ipc);
 
 		if (pcap_handle != NULL && rxd.stats.rx_pcap_error > 0) {

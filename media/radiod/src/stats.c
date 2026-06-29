@@ -1,4 +1,5 @@
 #include "radiod/stats.h"
+#include "radiod/sync.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -112,10 +113,48 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 			active, ipc->tx_ok, ipc->tx_fail);
 	}
 
+	if (st->current_role > 0) {
+		static const char *role_names[] = {"CAND", "MASTER", "SLAVE"};
+		const char *rn = st->current_role <= 2
+			? role_names[st->current_role] : "?";
+		fprintf(stderr, " sync[role=%s master=%u offset=%+lldus "
+			"rtt=%lldus tx=%u rx=%u relay=%u]",
+			rn, st->current_master,
+			(long long)st->clock_offset_us,
+			(long long)st->clock_rtt_us,
+			st->sync_tx, st->sync_rx, st->sync_relay);
+	}
+
+	if (rxd != NULL && (rxd->stats.rx_sync > 0 ||
+			    rxd->stats.rx_delay_req > 0)) {
+		fprintf(stderr, " sync_rx[sync=%u dreq=%u relayed=%u]",
+			rxd->stats.rx_sync,
+			rxd->stats.rx_delay_req,
+			rxd->stats.sync_relayed);
+	}
+
 	fprintf(stderr, "\n");
 
 	/* Reset for next period */
+	int64_t saved_start = now_us;
 	memset(st, 0, sizeof(*st));
-	st->period_start_us = now_us;
+	st->period_start_us = saved_start;
 	return 1;
+}
+
+void radio_stats_update_sync(radio_stats_t *st,
+			     const void *sync_ctx)
+{
+	if (st == NULL || sync_ctx == NULL)
+		return;
+	const radio_sync_t *s = (const radio_sync_t *)sync_ctx;
+	st->sync_tx = s->sync_tx_count;
+	st->sync_rx = s->sync_rx_count;
+	st->sync_relay = s->sync_relay_count;
+	st->delay_req_tx = s->delay_req_tx_count;
+	st->delay_resp_rx = s->delay_resp_rx_count;
+	st->clock_offset_us = s->clock.offset_us;
+	st->clock_rtt_us = s->clock.rtt_us;
+	st->current_role = (uint8_t)s->role;
+	st->current_master = s->current_master_id;
 }
