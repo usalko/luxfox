@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "ulama/ulama_frame.h"
+#include "ulama/ulama_version.h"
 
 #include "radiod/ipc.h"
 #include "radiod/route_table.h"
@@ -191,6 +192,8 @@ static void tx_inject_slot(const radio_tx_slot_t *slot,
 
 static void usage(const char *prog)
 {
+	fprintf(stderr, "radiod: build #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
 	fprintf(stderr,
 		"Usage: %s [OPTIONS]\n"
 		"\n"
@@ -464,13 +467,14 @@ int main(int argc, char **argv)
 		{"dl-us",    required_argument, NULL, 'D'},
 		{"ul-us",    required_argument, NULL, 'U'},
 		{"guard-us", required_argument, NULL, 'G'},
+		{"version",  no_argument,       NULL, 'V'},
 		{"verbose",  no_argument,       NULL, 'v'},
 		{"help",     no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "i:n:d:s:T:R:rSD:U:G:vh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:n:d:s:T:R:rSD:U:G:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'i': cfg.iface = optarg; break;
 		case 'n': cfg.node_id = (uint8_t)atoi(optarg); break;
@@ -489,6 +493,10 @@ int main(int argc, char **argv)
 		case 'D': cfg.sync_dl_us = (uint16_t)atoi(optarg); break;
 		case 'U': cfg.sync_ul_us = (uint16_t)atoi(optarg); break;
 		case 'G': cfg.sync_guard_us = (uint16_t)atoi(optarg); break;
+		case 'V':
+			fprintf(stderr, "radiod: build #%d (%s@%s) %s\n",
+				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+			return 0;
 		case 'v': cfg.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -514,6 +522,8 @@ int main(int argc, char **argv)
 			cfg.sock_path, strerror(errno));
 		return 1;
 	}
+	fprintf(stderr, "radiod: build #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
 	fprintf(stderr, "radiod: IPC listening on %s\n", cfg.sock_path);
 
 	/* ---- Wait for radio interface ---- */

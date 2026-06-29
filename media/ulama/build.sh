@@ -128,34 +128,59 @@ EOF
 ##############################################################################
 do_build() {
     log_info "=========================================="
-    log_info "Building ULAMA"
+    log_info "Building ULAMA suite"
     log_info "=========================================="
 
     cd "$ULAMA_ROOT"
 
-    # Generate version before building
+    # Generate version before building — shared by all components
     generate_version
 
-    log_info "Step 1/5: make host"
-    make host || {
-        log_error "make host failed"
-        return 1
-    }
-
-    log_info "Step 2/5: make host-unow"
-    make host-unow || {
-        log_error "make host-unow failed"
-        return 1
-    }
-
-    log_info "Step 3/5: make (ARM build)"
-    make || {
-        log_error "make failed"
-        return 1
-    }
-
-    log_info "Step 4/5: ulama-gw host-unow"
+    local VCPD_ROOT="$ULAMA_ROOT/../vcpd"
     local GW_ROOT="$ULAMA_ROOT/../ulama-gw"
+    local RADIOD_ROOT="$ULAMA_ROOT/../radiod"
+
+    log_info "Step 1/8: ulama host tests"
+    make host || {
+        log_error "ulama host failed"
+        return 1
+    }
+
+    log_info "Step 2/8: ulama host-unow"
+    make host-unow || {
+        log_error "ulama host-unow failed"
+        return 1
+    }
+
+    log_info "Step 3/8: ulama ARM build"
+    make || {
+        log_error "ulama ARM build failed"
+        return 1
+    }
+
+    log_info "Step 4/8: vcpd"
+    if [ -f "$VCPD_ROOT/Makefile" ]; then
+        make -C "$VCPD_ROOT" host || log_warn "vcpd host build failed (non-fatal)"
+        make -C "$VCPD_ROOT" || log_warn "vcpd ARM build failed (non-fatal)"
+    else
+        log_warn "vcpd not found at $VCPD_ROOT, skipping"
+    fi
+
+    log_info "Step 5/8: radiod host-unow"
+    if [ -f "$RADIOD_ROOT/Makefile" ]; then
+        make -C "$RADIOD_ROOT" host-unow || log_warn "radiod host-unow build failed (non-fatal)"
+    else
+        log_warn "radiod not found at $RADIOD_ROOT, skipping"
+    fi
+
+    log_info "Step 6/8: radiod ARM build"
+    if [ -f "$RADIOD_ROOT/Makefile" ]; then
+        make -C "$RADIOD_ROOT" || log_warn "radiod ARM build failed (non-fatal)"
+    else
+        log_warn "radiod not found at $RADIOD_ROOT, skipping"
+    fi
+
+    log_info "Step 7/8: ulama-gw host-unow"
     if [ -f "$GW_ROOT/Makefile" ]; then
         make -C "$GW_ROOT" host-unow || {
             log_error "ulama-gw host-unow build failed"
@@ -165,11 +190,9 @@ do_build() {
         log_warn "ulama-gw not found at $GW_ROOT, skipping"
     fi
 
-    log_info "Step 5/5: ulama-gw (ARM build)"
+    log_info "Step 8/8: ulama-gw ARM build"
     if [ -f "$GW_ROOT/Makefile" ]; then
-        make -C "$GW_ROOT" || {
-            log_warn "ulama-gw ARM build failed (non-fatal)"
-        }
+        make -C "$GW_ROOT" || log_warn "ulama-gw ARM build failed (non-fatal)"
     fi
 
     return 0
@@ -182,76 +205,79 @@ stage_files() {
     log_info "=========================================="
     log_info "Staging files for firmware packaging & OEM sync"
     log_info "=========================================="
-    
+
     log_info "Rootfs staging: $MEDIA_ROOT_STAGING"
     log_info "OEM staging:    $OEM_STAGING"
-    
+
+    local VCPD_ROOT="$ULAMA_ROOT/../vcpd"
+    local RADIOD_ROOT="$ULAMA_ROOT/../radiod"
+
     # Create staging directories
     mkdir -p "$MEDIA_ROOT_STAGING/usr/bin/scripts"
     mkdir -p "$MEDIA_ROOT_STAGING/etc/init.d"
     mkdir -p "$OEM_STAGING/usr/bin/scripts"
     mkdir -p "$OEM_STAGING/etc/init.d"
-    
-    # Stage /usr/bin/ulamad
-    log_debug "Staging /usr/bin/ulamad"
-    if [ ! -f "$ULAMA_ROOT/out/bin/ulamad" ]; then
-        log_error "Binary not found: $ULAMA_ROOT/out/bin/ulamad"
-        return 1
+
+    # ---- Binaries → OEM ----
+
+    local bins_staged=""
+
+    for pair in \
+        "$ULAMA_ROOT/out/bin/ulamad:ulamad" \
+        "$VCPD_ROOT/out/bin/vcpd:vcpd" \
+        "$RADIOD_ROOT/out/bin/radiod:radiod"; do
+        local src="${pair%%:*}"
+        local name="${pair##*:}"
+        if [ -f "$src" ]; then
+            cp -f "$src" "$OEM_STAGING/usr/bin/$name"
+            chmod +x "$OEM_STAGING/usr/bin/$name"
+            bins_staged="$bins_staged $name"
+            log_debug "Staged $name"
+        else
+            log_warn "Binary not found: $src (skipping)"
+        fi
+    done
+
+    # ---- Configs → rootfs ----
+
+    for pair in \
+        "$ULAMA_ROOT/defaults/ulama.conf:ulama.conf" \
+        "$VCPD_ROOT/defaults/vcpd.conf:vcpd.conf" \
+        "$RADIOD_ROOT/defaults/radiod.conf:radiod.conf"; do
+        local src="${pair%%:*}"
+        local name="${pair##*:}"
+        if [ -f "$src" ]; then
+            cp -f "$src" "$MEDIA_ROOT_STAGING/etc/$name"
+            log_debug "Staged /etc/$name"
+        else
+            log_warn "Config not found: $src (skipping)"
+        fi
+    done
+
+    # ---- Init script → rootfs ----
+
+    if [ -f "$RADIOD_ROOT/scripts/S96radiod" ]; then
+        cp -f "$RADIOD_ROOT/scripts/S96radiod" "$MEDIA_ROOT_STAGING/etc/init.d/S96radiod"
+        chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S96radiod"
+        log_debug "Staged /etc/init.d/S96radiod"
     fi
-    cp -f "$ULAMA_ROOT/out/bin/ulamad" "$OEM_STAGING/usr/bin/ulamad"
-    chmod +x "$OEM_STAGING/usr/bin/ulamad"
-    # cp -f "$ULAMA_ROOT/out/bin/ulamad" "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
-    # chmod +x "$MEDIA_ROOT_STAGING/usr/bin/ulamad"
-    
-    # Stage /etc/ulama.conf
-    log_debug "Staging /etc/ulama.conf"
-    if [ ! -f "$ULAMA_ROOT/defaults/ulama.conf" ]; then
-        log_error "Config not found: $ULAMA_ROOT/defaults/ulama.conf"
-        return 1
-    fi
-    cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$MEDIA_ROOT_STAGING/etc/ulama.conf"
-    # cp -f "$ULAMA_ROOT/defaults/ulama.conf" "$OEM_STAGING/etc/ulama.conf"
-    
-    # # Stage /etc/init.d/S99ulama
-    # log_debug "Staging /etc/init.d/S99ulama"
-    # if [ ! -f "$ULAMA_ROOT/scripts/S99ulama" ]; then
-    #     log_error "Init script not found: $ULAMA_ROOT/scripts/S99ulama"
-    #     return 1
-    # fi
-    # cp -f "$ULAMA_ROOT/scripts/S99ulama" "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
-    # chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S99ulama"
-    # cp -f "$ULAMA_ROOT/scripts/S99ulama" "$OEM_STAGING/etc/init.d/S99ulama"
-    # chmod +x "$OEM_STAGING/etc/init.d/S99ulama"
-    
-    # Stage /usr/bin/scripts/unow-mon.sh
-    log_debug "Staging /usr/bin/scripts/unow-mon.sh"
-    if [ ! -f "$UNOW_ROOT/scripts/unow-mon.sh" ]; then
-        log_error "Script not found: $UNOW_ROOT/scripts/unow-mon.sh"
-        return 1
-    fi
-    cp -f "$UNOW_ROOT/scripts/unow-mon.sh" "$OEM_STAGING/usr/bin/scripts/unow-mon.sh"
-    chmod +x "$OEM_STAGING/usr/bin/scripts/unow-mon.sh"
-    cp -f "$UNOW_ROOT/scripts/unow-mon.sh" "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-mon.sh"
-    chmod +x "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-mon.sh"
-    
-    # Stage /usr/bin/scripts/unow-down.sh
-    log_debug "Staging /usr/bin/scripts/unow-down.sh"
-    if [ ! -f "$UNOW_ROOT/scripts/unow-down.sh" ]; then
-        log_error "Script not found: $UNOW_ROOT/scripts/unow-down.sh"
-        return 1
-    fi
-    cp -f "$UNOW_ROOT/scripts/unow-down.sh" "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-down.sh"
-    chmod +x "$MEDIA_ROOT_STAGING/usr/bin/scripts/unow-down.sh"
-    cp -f "$UNOW_ROOT/scripts/unow-down.sh" "$OEM_STAGING/usr/bin/scripts/unow-down.sh"
-    chmod +x "$OEM_STAGING/usr/bin/scripts/unow-down.sh"
-    
-    log_info "✓ Files staged successfully:"
-    log_info "  - usr/bin/ulamad"
-    log_info "  - etc/ulama.conf"
-    log_info "  - etc/init.d/S99ulama"
-    log_info "  - usr/bin/scripts/unow-mon.sh"
-    log_info "  - usr/bin/scripts/unow-down.sh"
-    
+
+    # ---- Helper scripts → both ----
+
+    for script in unow-mon.sh unow-down.sh; do
+        if [ -f "$UNOW_ROOT/scripts/$script" ]; then
+            cp -f "$UNOW_ROOT/scripts/$script" "$OEM_STAGING/usr/bin/scripts/$script"
+            chmod +x "$OEM_STAGING/usr/bin/scripts/$script"
+            cp -f "$UNOW_ROOT/scripts/$script" "$MEDIA_ROOT_STAGING/usr/bin/scripts/$script"
+            chmod +x "$MEDIA_ROOT_STAGING/usr/bin/scripts/$script"
+            log_debug "Staged $script"
+        else
+            log_warn "Script not found: $UNOW_ROOT/scripts/$script (skipping)"
+        fi
+    done
+
+    log_info "Staged binaries:$bins_staged"
+
     return 0
 }
 
@@ -262,20 +288,32 @@ print_summary() {
     log_info "=========================================="
     log_info "Build Summary"
     log_info "=========================================="
-    
-    if [ -f "$ULAMA_ROOT/out/bin/ulamad" ]; then
-        echo ""
-        echo -e "${GREEN}✓ ULAMA Build Complete${NC}"
-        echo "  Binary:  $ULAMA_ROOT/out/bin/ulamad"
-        echo "  Library: $ULAMA_ROOT/libulama.a"
-    fi
-    
+
+    local VCPD_ROOT="$ULAMA_ROOT/../vcpd"
+    local RADIOD_ROOT="$ULAMA_ROOT/../radiod"
+    local GW_ROOT="$ULAMA_ROOT/../ulama-gw"
+
+    echo ""
+    for pair in \
+        "ulamad:$ULAMA_ROOT/out/bin/ulamad" \
+        "vcpd:$VCPD_ROOT/out/bin/vcpd" \
+        "radiod:$RADIOD_ROOT/out/bin/radiod" \
+        "ulama-gw:$GW_ROOT/out/bin/ulama-gw"; do
+        local name="${pair%%:*}"
+        local path="${pair##*:}"
+        if [ -f "$path" ]; then
+            echo -e "  ${GREEN}✓${NC} $name  ($path)"
+        else
+            echo -e "  ${RED}✗${NC} $name  (not found)"
+        fi
+    done
+
     if [ -d "$MEDIA_ROOT_STAGING" ]; then
         echo ""
         echo -e "${GREEN}✓ Files Staged for Flashing${NC}"
         echo "  Rootfs:  $MEDIA_ROOT_STAGING"
     fi
-    
+
     if [ -d "$OEM_STAGING" ]; then
         echo ""
         echo -e "${GREEN}✓ Files Staged for OEM Sync${NC}"

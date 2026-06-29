@@ -350,11 +350,12 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 		{"msp-uart", required_argument, NULL, 'M'},
 		{"msp-baud", required_argument, NULL, 'B'},
 		{"tx-peer", required_argument, NULL, 'T'},
+		{"version", no_argument, NULL, 'V'},
 		{0, 0, 0, 0},
 	};
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:k:r:vhM:B:T:", options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "t:f:i:l:n:u:b:o:sc:k:r:VvhM:B:T:", options, NULL)) != -1) {
 		switch (opt) {
 		case 't':
 			cfg->transport_kind = ulama_transport_parse_kind(optarg);
@@ -419,6 +420,10 @@ static int parse_args(int argc, char **argv, app_config_t *cfg)
 		case 'T':
 			cfg->tx_peer = optarg;
 			break;
+		case 'V':
+			fprintf(stdout, "ulamad: build #%d (%s@%s) %s\n",
+				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+			exit(0);
 		case 'h':
 			usage(stdout);
 			exit(0);
@@ -450,9 +455,6 @@ static void print_channel_summary(const uint16_t channels[ULAMA_CRSF_NUM_CHANNEL
 
 int main(int argc, char **argv)
 {
-	fprintf(stderr, "[ulamad] Build: #%d (%s@%s) %s\n",
-		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
-
 	app_config_t cfg;
 	ulama_rx_transport_t transport;
 	ulama_tx_transport_t tx_transport;

@@ -19,6 +19,7 @@
 #include "ulama_gw/lts_decoder.h"
 #include "ulama_gw/lts_fec_dec.h"
 #include "ulama/ulama_frame.h"
+#include "ulama/ulama_version.h"
 #include "ulama/transport.h"
 
 static volatile sig_atomic_t g_running = 1;
@@ -70,6 +71,8 @@ static int setup_iface(const char *iface, int channel, bool verbose)
 
 static void usage(const char *prog)
 {
+	fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
 	fprintf(stderr,
 		"Usage: %s [options]\n"
 		"  --cascade-in  ADDR:PORT  Listen for cascade-core outbound (default 127.0.0.1:5601)\n"
@@ -787,13 +790,14 @@ int main(int argc, char *argv[])
 		{"dst-mac",       required_argument, NULL, 'm'},
 		{"gap-tolerance",  required_argument, NULL, 'G'},
 		{"nack-disable",   no_argument,       NULL, 'N'},
+		{"version",       no_argument,       NULL, 'V'},
 		{"verbose",       no_argument,       NULL, 'v'},
 		{"help",        no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "C:O:t:l:p:i:c:n:m:vh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "C:O:t:l:p:i:c:n:m:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'C': strncpy(ctx.gw.cascade_in, optarg, sizeof(ctx.gw.cascade_in) - 1); break;
 		case 'O': strncpy(ctx.gw.cascade_out, optarg, sizeof(ctx.gw.cascade_out) - 1); break;
@@ -806,6 +810,10 @@ int main(int argc, char *argv[])
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'G': ctx.nal_asm.max_gap_tolerance = (uint16_t)atoi(optarg); break;
 		case 'N': ctx.nack_disable = true; break;
+		case 'V':
+			fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s\n",
+				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+			return 0;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -867,9 +875,9 @@ int main(int argc, char *argv[])
 	lts_decoder_init(&ctx.lts_dec, LTS_REORDER_WINDOW, LTS_EMIT_DEADLINE_MS);
 	lts_fec_decoder_init(&ctx.fec_dec);
 
-	fprintf(stderr, "ulama-gw: build=%s lts_max=%d started (node=%u, transport=%s)\n",
-		ULAMA_GW_BUILD_ID, LTS_MAX_PAYLOAD,
-		ctx.gw.node_id, ulama_transport_kind_name(tk));
+	fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s lts_max=%d started (node=%u, transport=%s)\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE,
+		LTS_MAX_PAYLOAD, ctx.gw.node_id, ulama_transport_kind_name(tk));
 	fprintf(stderr, "  cascade-in:  %s\n", ctx.gw.cascade_in);
 	fprintf(stderr, "  cascade-out: %s\n", ctx.gw.cascade_out);
 	if (tk == ULAMA_TRANSPORT_KIND_UDP) {

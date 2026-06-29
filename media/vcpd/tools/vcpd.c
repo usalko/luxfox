@@ -16,6 +16,7 @@
 #include "vcpd/uvcp.h"
 #include "vcpd/video_source.h"
 #include "ulama/ulama_frame.h"
+#include "ulama/ulama_version.h"
 #include "ulama/transport.h"
 
 #ifndef ULAMA_WITH_UNOW
@@ -53,6 +54,8 @@ static uint64_t now_ms(void)
 
 static void usage(const char *prog)
 {
+	fprintf(stderr, "vcpd: build #%d (%s@%s) %s\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
 	fprintf(stderr,
 		"Usage: %s [options]\n"
 		"  --source      DEVICE     Video device             (default /dev/video0)\n"
@@ -425,6 +428,7 @@ int main(int argc, char *argv[])
 		{"lts-mtu",              required_argument, NULL, 'M'},
 		{"benchmark",            required_argument, NULL, 'B'},
 		{"vps-repeat",           required_argument, NULL, 'D'},
+		{"version",              no_argument,       NULL, 'V'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
@@ -433,7 +437,7 @@ int main(int argc, char *argv[])
 	int opt;
 	ctx.test_frames = 50;
 
-	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:T:F:vh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:T:F:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
 #ifndef VCPD_WITH_MPP
@@ -467,6 +471,10 @@ int main(int argc, char *argv[])
 		case 'M': ctx.lts_mtu = atoi(optarg); break;
 		case 'B': ctx.benchmark_kbps = atoi(optarg); break;
 		case 'D': ctx.param_dup_count = atoi(optarg); break;
+		case 'V':
+			fprintf(stderr, "vcpd: build #%d (%s@%s) %s\n",
+				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
+			return 0;
 		case 'v': ctx.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -540,8 +548,8 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build=%s lts_mtu=%zu started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
-		VCPD_BUILD_ID, ctx.lts_enc.max_payload,
+	fprintf(stderr, "vcpd: build #%d (%s@%s) %s lts_mtu=%zu started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE, ctx.lts_enc.max_payload,
 		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
 		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
 		ctx.ack_timeout_us, ctx.ack_max_retry, ctx.fec_group);

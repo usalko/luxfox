@@ -51,9 +51,7 @@ endif
 CFLAGS += $(RK_MEDIA_CROSS_CFLAGS) -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -DULAMA_WITH_UNOW=1 -g -Wall -Wextra -std=c11 $(INC_FLAGS) -fPIC
 
 HOST_INC_FLAGS := -I$(CURRENT_DIR)/include -I$(ULAMA_ROOT)/include -I$(ULAMA_ROOT)/src -I$(UNOW_ROOT)/include -I$(UNOW_ROOT)/src
-VCPD_BUILD_ID := $(shell git -C $(CURRENT_DIR)/.. describe --always --dirty 2>/dev/null || date +%Y%m%d-%H%M%S)
-CFLAGS += -DVCPD_BUILD_ID='"$(VCPD_BUILD_ID)"'
-HOST_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=0 -DVCPD_BUILD_ID='"$(VCPD_BUILD_ID)"' -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS)
+HOST_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=0 -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS)
 APP_LDFLAGS += -lpcap -lpthread -lrt
 ifneq ($(wildcard $(UNOW_PCAP_SYSROOT)/usr/lib/libpcap.so),)
 APP_LDFLAGS += -L$(UNOW_PCAP_SYSROOT)/usr/lib -Wl,-rpath-link,$(UNOW_PCAP_SYSROOT)/usr/lib

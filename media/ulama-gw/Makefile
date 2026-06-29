@@ -65,10 +65,7 @@ else
 HAVE_HOST_PCAP := 1
 endif
 
-GW_BUILD_ID := $(shell git -C $(CURRENT_DIR)/.. describe --always --dirty 2>/dev/null || date +%Y%m%d-%H%M%S)
-CFLAGS += -DULAMA_GW_BUILD_ID='"$(GW_BUILD_ID)"'
-HOST_CFLAGS += -DULAMA_GW_BUILD_ID='"$(GW_BUILD_ID)"'
-HOST_UNOW_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=1 -DULAMA_GW_BUILD_ID='"$(GW_BUILD_ID)"' -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS) $(HOST_PCAP_CFLAGS)
+HOST_UNOW_CFLAGS := -D_DEFAULT_SOURCE -DULAMA_WITH_UNOW=1 -g -Wall -Wextra -std=c11 $(HOST_INC_FLAGS) $(HOST_PCAP_CFLAGS)
 HOST_UNOW_LDFLAGS := $(HOST_PCAP_LIBS) -lpthread
 
 .PHONY: all clean distclean host host-unow test
