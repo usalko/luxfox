@@ -23,6 +23,8 @@
 #include "radiod/route_table.h"
 #include "radiod/rx_dispatcher.h"
 #include "radiod/stats.h"
+#include "radiod/sync.h"
+#include "radiod/sync_frame.h"
 #include "radiod/tx_scheduler.h"
 #include "radiod/watchdog.h"
 
@@ -66,6 +68,10 @@ typedef struct {
 	uint32_t    rx_slot_us;
 	uint32_t    ack_timeout_us;
 	uint32_t    ack_max_retry;
+	uint16_t    sync_dl_us;
+	uint16_t    sync_ul_us;
+	uint16_t    sync_guard_us;
+	bool        sync_enabled;
 } radiod_config_t;
 
 static void config_defaults(radiod_config_t *cfg)
@@ -78,6 +84,10 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->rx_slot_us = RX_SLOT_US;
 	cfg->ack_timeout_us = ACK_TIMEOUT_US;
 	cfg->ack_max_retry = ACK_MAX_RETRY;
+	cfg->sync_dl_us = 2000;
+	cfg->sync_ul_us = 2000;
+	cfg->sync_guard_us = 300;
+	cfg->sync_enabled = false;
 }
 
 static int64_t now_us(void)
@@ -194,6 +204,10 @@ static void usage(const char *prog)
 		"  -T, --tx-slot N       Max TX packets per slot (default: %u)\n"
 		"  -R, --rx-slot US      RX slot duration in µs (default: %u)\n"
 		"      --relay           Enable mesh relay mode\n"
+		"  -S, --sync            Enable SYNC protocol (TDMA + election)\n"
+		"  -D, --dl-us US        SYNC DL slot duration (default: 2000)\n"
+		"  -U, --ul-us US        SYNC UL slot duration (default: 2000)\n"
+		"  -G, --guard-us US     SYNC guard interval (default: 300)\n"
 		"  -v, --verbose         Verbose output\n"
 		"  -h, --help            Show this help\n",
 		prog, RADIO_IPC_SOCK_PATH, TX_SLOT_SIZE, RX_SLOT_US);
@@ -210,6 +224,219 @@ static bool parse_mac(const char *text, uint8_t mac[6])
 		mac[i] = (uint8_t)o[i];
 	return true;
 }
+
+/* ---- SYNC cycle helpers ---- */
+
+#if ULAMA_WITH_UNOW
+static void sync_inject_beacon(radio_sync_t *sync,
+			       pcap_t *pcap,
+			       const uint8_t own_mac[6],
+			       int64_t ts)
+{
+	sync_frame_t beacon;
+	radio_sync_build_beacon(sync, &beacon, ts);
+
+	uint8_t packed[SYNC_FRAME_MAX_SIZE];
+	size_t packed_len;
+	if (!sync_frame_pack(&beacon, packed, sizeof(packed), &packed_len))
+		return;
+
+	uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
+		     sizeof(struct unow_dot11_mgmt_header) +
+		     sizeof(struct unow_action_vendor_header) +
+		     SYNC_FRAME_MAX_SIZE];
+	const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	size_t wire_len = unow_build_action_frame_ex(
+		wire, sizeof(wire), own_mac, broadcast,
+		packed, packed_len,
+		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_SYNC);
+	if (wire_len > 0U)
+		pcap_inject(pcap, wire, wire_len);
+}
+
+static void sync_inject_delay_req(radio_sync_t *sync,
+				  pcap_t *pcap,
+				  const uint8_t own_mac[6],
+				  int64_t ts)
+{
+	delay_req_frame_t dreq;
+	if (!radio_sync_build_delay_req(sync, &dreq, ts))
+		return;
+
+	uint8_t packed[DELAY_REQ_FRAME_SIZE];
+	size_t packed_len;
+	if (!delay_req_pack(&dreq, packed, sizeof(packed), &packed_len))
+		return;
+
+	uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
+		     sizeof(struct unow_dot11_mgmt_header) +
+		     sizeof(struct unow_action_vendor_header) +
+		     DELAY_REQ_FRAME_SIZE];
+	const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	size_t wire_len = unow_build_action_frame_ex(
+		wire, sizeof(wire), own_mac, broadcast,
+		packed, packed_len,
+		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_DELAY_REQ);
+	if (wire_len > 0U)
+		pcap_inject(pcap, wire, wire_len);
+}
+
+static void sync_inject_null_frame(pcap_t *pcap,
+				   const uint8_t own_mac[6])
+{
+	uint8_t null_byte = 0x00;
+	uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
+		     sizeof(struct unow_dot11_mgmt_header) +
+		     sizeof(struct unow_action_vendor_header) + 1];
+	const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	size_t wire_len = unow_build_action_frame(
+		wire, sizeof(wire), own_mac, broadcast,
+		&null_byte, 1, UNOW_TX_RATE_1MBPS);
+	if (wire_len > 0U)
+		pcap_inject(pcap, wire, wire_len);
+}
+
+static void sleep_until(int64_t target_us)
+{
+	int64_t remain = target_us - now_us();
+	if (remain > 0)
+		usleep((useconds_t)remain);
+}
+
+static void master_cycle(radio_sync_t *sync,
+			 radio_tx_scheduler_t *sched,
+			 radio_rx_dispatcher_t *rxd,
+			 pcap_t *pcap,
+			 const uint8_t own_mac[6],
+			 const uint8_t *default_dst,
+			 const radio_route_table_t *rt,
+			 radio_stats_t *stats)
+{
+	int64_t t_now = now_us();
+
+	radio_sync_update_slot_map(sync, t_now);
+	sync_inject_beacon(sync, pcap, own_mac, t_now);
+
+	/* DL slot: send our data */
+	int64_t dl_deadline = now_us() + sync->dl_duration_us;
+
+	/* Flush CTRL first */
+	for (;;) {
+		const radio_tx_slot_t *slot = radio_tx_peek(sched, RADIO_PRIO_CTRL);
+		if (slot == NULL)
+			break;
+		uint8_t prio;
+		slot = radio_tx_dequeue(sched, &prio);
+		if (slot == NULL)
+			break;
+		tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+		radio_stats_add_tx_packet(stats, prio);
+	}
+
+	/* Then P1/P2/P3 */
+	while (now_us() < dl_deadline) {
+		uint8_t prio;
+		const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
+		if (slot == NULL)
+			break;
+		tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+		radio_stats_add_tx_packet(stats, prio);
+	}
+	sleep_until(dl_deadline);
+
+	/* Guard */
+	usleep(sync->guard_us);
+
+	/* UL slots: receive from each slave */
+	for (uint8_t i = 0; i < sync->num_slots; i++) {
+		int64_t ul_deadline = now_us() + sync->ul_slot_us;
+		radio_rx_slot(rxd, pcap, own_mac, ul_deadline);
+		usleep(sync->guard_us);
+	}
+
+	radio_async_tick(rxd, pcap, ACK_TIMEOUT_US, ACK_MAX_RETRY);
+}
+
+static void slave_cycle(radio_sync_t *sync,
+			radio_tx_scheduler_t *sched,
+			radio_rx_dispatcher_t *rxd,
+			pcap_t *pcap,
+			const uint8_t own_mac[6],
+			const uint8_t *default_dst,
+			const radio_route_table_t *rt,
+			radio_stats_t *stats)
+{
+	/* Wait for SYNC beacon */
+	int64_t sync_deadline = sync->next_superframe_us > 0
+		? sync->next_superframe_us + 2000
+		: now_us() + SYNC_BEACON_INTERVAL_US + 2000;
+	radio_rx_slot(rxd, pcap, own_mac, sync_deadline);
+
+	if (!radio_sync_is_synced(sync))
+		return;
+
+	radio_sync_compute_timing(sync, now_us());
+
+	/* DL phase: receive master's data */
+	if (sync->dl_end_us > now_us())
+		radio_rx_slot(rxd, pcap, own_mac, sync->dl_end_us);
+
+	/* My UL slot */
+	if (sync->my_slot_index != 0xFF) {
+		sleep_until(sync->my_ul_start_us);
+
+		/* DELAY_REQ first */
+		sync_inject_delay_req(sync, pcap, own_mac, now_us());
+
+		/* Send data */
+		int64_t ul_deadline = sync->my_ul_end_us;
+		bool sent_data = false;
+
+		/* Flush CTRL first */
+		for (;;) {
+			if (now_us() >= ul_deadline)
+				break;
+			const radio_tx_slot_t *slot = radio_tx_peek(sched, RADIO_PRIO_CTRL);
+			if (slot == NULL)
+				break;
+			uint8_t prio;
+			slot = radio_tx_dequeue(sched, &prio);
+			if (slot == NULL)
+				break;
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+			radio_stats_add_tx_packet(stats, prio);
+			sent_data = true;
+		}
+
+		while (now_us() < ul_deadline) {
+			uint8_t prio;
+			const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
+			if (slot == NULL)
+				break;
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+			radio_stats_add_tx_packet(stats, prio);
+			sent_data = true;
+		}
+
+		if (!sent_data)
+			sync_inject_null_frame(pcap, own_mac);
+	}
+
+	/* Listen until end of superframe */
+	if (sync->next_superframe_us > now_us())
+		radio_rx_slot(rxd, pcap, own_mac, sync->next_superframe_us);
+}
+
+static void candidate_cycle(radio_sync_t *sync,
+			    radio_rx_dispatcher_t *rxd,
+			    pcap_t *pcap,
+			    const uint8_t own_mac[6])
+{
+	int64_t rx_deadline = now_us() + 5000;
+	radio_rx_slot(rxd, pcap, own_mac, rx_deadline);
+	(void)sync;
+}
+#endif /* ULAMA_WITH_UNOW */
 
 /* ---- Main ---- */
 
@@ -233,13 +460,17 @@ int main(int argc, char **argv)
 		{"tx-slot",  required_argument, NULL, 'T'},
 		{"rx-slot",  required_argument, NULL, 'R'},
 		{"relay",    no_argument,       NULL, 'r'},
+		{"sync",     no_argument,       NULL, 'S'},
+		{"dl-us",    required_argument, NULL, 'D'},
+		{"ul-us",    required_argument, NULL, 'U'},
+		{"guard-us", required_argument, NULL, 'G'},
 		{"verbose",  no_argument,       NULL, 'v'},
 		{"help",     no_argument,       NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "i:n:d:s:T:R:rvh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:n:d:s:T:R:rSD:U:G:vh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 'i': cfg.iface = optarg; break;
 		case 'n': cfg.node_id = (uint8_t)atoi(optarg); break;
@@ -254,6 +485,10 @@ int main(int argc, char **argv)
 		case 'T': cfg.tx_slot_size = (uint32_t)atoi(optarg); break;
 		case 'R': cfg.rx_slot_us = (uint32_t)atoi(optarg); break;
 		case 'r': cfg.relay = true; break;
+		case 'S': cfg.sync_enabled = true; break;
+		case 'D': cfg.sync_dl_us = (uint16_t)atoi(optarg); break;
+		case 'U': cfg.sync_ul_us = (uint16_t)atoi(optarg); break;
+		case 'G': cfg.sync_guard_us = (uint16_t)atoi(optarg); break;
 		case 'v': cfg.verbose = true; break;
 		case 'h': usage(argv[0]); return 0;
 		default:  usage(argv[0]); return 1;
@@ -362,6 +597,19 @@ int main(int argc, char **argv)
 		rxd.own_node_id = cfg.node_id;
 	}
 
+	radio_sync_t sync_engine;
+	if (cfg.sync_enabled) {
+		radio_sync_init(&sync_engine, cfg.node_id,
+				cfg.sync_dl_us, cfg.sync_ul_us,
+				cfg.sync_guard_us);
+		radio_rx_dispatcher_set_sync(&rxd, &sync_engine);
+		fprintf(stderr,
+			"radiod: SYNC protocol enabled, node_id=%u "
+			"dl=%u ul=%u guard=%u\n",
+			cfg.node_id, cfg.sync_dl_us,
+			cfg.sync_ul_us, cfg.sync_guard_us);
+	}
+
 	ipc_tx_ctx_t ipc_ctx = {
 		.sched = &sched,
 		.wd = &wd,
@@ -433,64 +681,91 @@ int main(int argc, char **argv)
 		/* ---- TDMA cycle ---- */
 
 		int64_t cycle_start = now_us();
-		int64_t tx_start, tx_end, rx_end;
 		bool wd_emergency = false;
 
-		/* 1. Flush all CTRL packets (P0, no rate limit) */
+		if (cfg.sync_enabled) {
+			/* SYNC-based TDMA cycle */
+			radio_role_t role = radio_sync_tick(
+				&sync_engine, now_us());
 
-		tx_start = now_us();
-		for (;;) {
-			const radio_tx_slot_t *slot = radio_tx_peek(&sched, RADIO_PRIO_CTRL);
-			if (slot == NULL)
+			switch (role) {
+			case RADIO_ROLE_MASTER:
+				master_cycle(&sync_engine, &sched, &rxd,
+					     pcap_handle, iface_info.mac,
+					     default_dst, &routes, &stats);
 				break;
-
-			uint8_t prio;
-			slot = radio_tx_dequeue(&sched, &prio);
-			if (slot == NULL)
+			case RADIO_ROLE_SLAVE:
+				slave_cycle(&sync_engine, &sched, &rxd,
+					    pcap_handle, iface_info.mac,
+					    default_dst, &routes, &stats);
+				/* SYNC beacon = implicit heartbeat */
+				if (radio_sync_is_synced(&sync_engine))
+					radio_watchdog_feed(&wd, now_us());
 				break;
+			case RADIO_ROLE_CANDIDATE:
+				candidate_cycle(&sync_engine, &rxd,
+						pcap_handle, iface_info.mac);
+				break;
+			}
+		} else {
+			/* Standalone TDMA cycle (no SYNC) */
+			int64_t tx_start, tx_end, rx_end;
 
-			tx_inject_slot(slot, pcap_handle, iface_info.mac,
-				       default_dst, &rxd, &routes);
-			radio_stats_add_tx_packet(&stats, prio);
+			/* 1. Flush all CTRL packets (P0, no rate limit) */
+
+			tx_start = now_us();
+			for (;;) {
+				const radio_tx_slot_t *slot = radio_tx_peek(&sched, RADIO_PRIO_CTRL);
+				if (slot == NULL)
+					break;
+
+				uint8_t prio;
+				slot = radio_tx_dequeue(&sched, &prio);
+				if (slot == NULL)
+					break;
+
+				tx_inject_slot(slot, pcap_handle, iface_info.mac,
+					       default_dst, &rxd, &routes);
+				radio_stats_add_tx_packet(&stats, prio);
+			}
+
+			/* 2. TX slot: up to N packets from P1/P2/P3 */
+
+			for (uint32_t i = 0; i < cfg.tx_slot_size; i++) {
+				uint8_t prio;
+				const radio_tx_slot_t *slot = radio_tx_dequeue(&sched, &prio);
+				if (slot == NULL)
+					break;
+
+				tx_inject_slot(slot, pcap_handle, iface_info.mac,
+					       default_dst, &rxd, &routes);
+				radio_stats_add_tx_packet(&stats, prio);
+			}
+
+			tx_end = now_us();
+			radio_stats_add_tx_time(&stats, (uint64_t)(tx_end - tx_start));
+
+			/* 3. RX slot */
+
+			int64_t rx_deadline = now_us() + (int64_t)cfg.rx_slot_us;
+			radio_rx_slot(&rxd, pcap_handle, iface_info.mac, rx_deadline);
+
+			rx_end = now_us();
+			radio_stats_add_rx_time(&stats, (uint64_t)(rx_end - tx_end));
+
+			/* 4. Async retry tick */
+
+			radio_async_tick(&rxd, pcap_handle,
+					 cfg.ack_timeout_us, cfg.ack_max_retry);
+
+			/* Watchdog feed (standalone) */
+			if (rxd.ctrl_for_us > 0)
+				radio_watchdog_feed(&wd, now_us());
 		}
 
-		/* 2. TX slot: up to N packets from P1/P2/P3 */
-
-		for (uint32_t i = 0; i < cfg.tx_slot_size; i++) {
-			uint8_t prio;
-			const radio_tx_slot_t *slot = radio_tx_dequeue(&sched, &prio);
-			if (slot == NULL)
-				break;
-
-			tx_inject_slot(slot, pcap_handle, iface_info.mac,
-				       default_dst, &rxd, &routes);
-			radio_stats_add_tx_packet(&stats, prio);
-		}
-
-		tx_end = now_us();
-		radio_stats_add_tx_time(&stats, (uint64_t)(tx_end - tx_start));
-
-		/* 3. RX slot */
-
-		int64_t rx_deadline = now_us() + (int64_t)cfg.rx_slot_us;
-		radio_rx_slot(&rxd, pcap_handle, iface_info.mac, rx_deadline);
-
-		rx_end = now_us();
-		radio_stats_add_rx_time(&stats, (uint64_t)(rx_end - tx_end));
-
-		/* 4. Async retry tick */
-
-		radio_async_tick(&rxd, pcap_handle,
-				 cfg.ack_timeout_us, cfg.ack_max_retry);
-
-		/* 5. Drain IPC requests */
+		/* ---- Common: IPC, watchdog, stats, recovery ---- */
 
 		radio_ipc_drain(&ipc, on_ipc_tx_request, &ipc_ctx);
-
-		/* 6. Watchdog */
-
-		if (rxd.ctrl_for_us > 0)
-			radio_watchdog_feed(&wd, now_us());
 
 		radio_link_state_t link = radio_watchdog_tick(&wd, now_us(), &wd_emergency);
 
@@ -524,19 +799,11 @@ int main(int argc, char **argv)
 
 		(void)link;
 
-		/* 7. Route table maintenance */
-
 		radio_route_expire(&routes, now_us());
-
-		/* 8. Stats reporting */
 
 		radio_stats_add_cycle(&stats);
 		radio_stats_report(&stats, now_us(), &sched, &rxd, &routes, &ipc);
 
-		/* 9. Detect pcap failure (USB disconnect).
-		 * Only trigger recovery when pcap_next_ex actually returns
-		 * errors (-1). Absence of RX packets is normal when no
-		 * ground station is transmitting — NOT a reason to recover. */
 		if (pcap_handle != NULL && rxd.stats.rx_pcap_error > 0) {
 			pcap_error_count += rxd.stats.rx_pcap_error;
 			rxd.stats.rx_pcap_error = 0;
@@ -553,7 +820,6 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		/* Micro-sleep if cycle was too fast */
 		int64_t cycle_elapsed = now_us() - cycle_start;
 		if (cycle_elapsed < 500)
 			usleep(100);
