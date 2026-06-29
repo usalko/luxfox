@@ -136,6 +136,10 @@ parse_radiod_args() {
             tx_slot_size)   RADIOD_ARGS="$RADIOD_ARGS --tx-slot $value" ;;
             rx_slot_us)     RADIOD_ARGS="$RADIOD_ARGS --rx-slot $value" ;;
             relay)          [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --relay" ;;
+            sync)           [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --sync" ;;
+            sync_dl_us)     RADIOD_ARGS="$RADIOD_ARGS --dl-us $value" ;;
+            sync_ul_us)     RADIOD_ARGS="$RADIOD_ARGS --ul-us $value" ;;
+            sync_guard_us)  RADIOD_ARGS="$RADIOD_ARGS --guard-us $value" ;;
             verbose)        [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --verbose" ;;
         esac
     done < "$RADIOD_CONF"
