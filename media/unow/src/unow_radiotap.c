@@ -143,7 +143,9 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	}
 	if (vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA &&
 	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_ACK &&
-	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA_SEQ) {
+	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DATA_SEQ &&
+	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_SYNC &&
+	    vendor_header->subtype != UNOW_VENDOR_SUBTYPE_DELAY_REQ) {
 		return false;
 	}
 	payload = packet + radiotap_len + sizeof(*mgmt_header) + sizeof(*vendor_header);
