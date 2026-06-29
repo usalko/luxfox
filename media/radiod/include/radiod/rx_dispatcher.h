@@ -65,6 +65,10 @@ typedef struct {
 	uint32_t relay_forwarded;
 	uint32_t relay_dropped_ttl;
 	uint32_t relay_by_prio[4];
+	/* SYNC counters */
+	uint32_t rx_sync;
+	uint32_t rx_delay_req;
+	uint32_t sync_relayed;
 } radio_rx_stats_t;
 
 /* Opaque pointer — avoids circular include with tx_scheduler.h */
@@ -96,6 +100,9 @@ typedef struct {
 
 	/* Per-cycle feedback for watchdog (reset each cycle) */
 	uint32_t ctrl_for_us;
+
+	/* Sync engine (set by radiod main, NULL if standalone) */
+	void *sync_ctx;
 
 	/* Statistics */
 	radio_rx_stats_t stats;
@@ -133,3 +140,5 @@ void radio_async_tick(radio_rx_dispatcher_t *rxd,
 		      uint32_t max_retry);
 
 uint16_t radio_async_next_seq(radio_rx_dispatcher_t *rxd);
+
+void radio_rx_dispatcher_set_sync(radio_rx_dispatcher_t *rxd, void *sync_ctx);

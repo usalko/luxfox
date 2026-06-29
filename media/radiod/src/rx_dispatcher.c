@@ -11,6 +11,8 @@
 #include <pcap/pcap.h>
 #include <poll.h>
 #include "unow_internal.h"
+#include "radiod/sync.h"
+#include "radiod/sync_frame.h"
 #endif
 
 void radio_rx_dispatcher_init(radio_rx_dispatcher_t *rxd,
@@ -33,6 +35,12 @@ void radio_rx_dispatcher_enable_relay(radio_rx_dispatcher_t *rxd,
 	rxd->own_node_id = own_node_id;
 	rxd->relay_sched = sched;
 	rxd->route_table = rt;
+}
+
+void radio_rx_dispatcher_set_sync(radio_rx_dispatcher_t *rxd, void *sync_ctx)
+{
+	if (rxd != NULL)
+		rxd->sync_ctx = sync_ctx;
 }
 
 #if ULAMA_WITH_UNOW
@@ -217,6 +225,40 @@ static void async_ack_received(radio_rx_dispatcher_t *rxd, uint16_t ack_seq)
 	}
 }
 
+/* ---- SYNC relay: prepare and inject relayed SYNC frame ---- */
+
+static void radio_sync_relay_inject(radio_rx_dispatcher_t *rxd,
+				    const sync_frame_t *rx_sf,
+				    pcap_t *pcap,
+				    const uint8_t own_mac[6])
+{
+	radio_sync_t *sync = (radio_sync_t *)rxd->sync_ctx;
+	sync_frame_t relay_sf;
+	int64_t tx_time = now_us();
+
+	if (!radio_sync_prepare_relay(sync, rx_sf, &relay_sf, tx_time))
+		return;
+
+	uint8_t packed[SYNC_FRAME_MAX_SIZE];
+	size_t packed_len;
+	if (!sync_frame_pack(&relay_sf, packed, sizeof(packed), &packed_len))
+		return;
+
+	uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
+		     sizeof(struct unow_dot11_mgmt_header) +
+		     sizeof(struct unow_action_vendor_header) +
+		     SYNC_FRAME_MAX_SIZE];
+	const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	size_t wire_len = unow_build_action_frame_ex(
+		wire, sizeof(wire), own_mac, broadcast,
+		packed, packed_len,
+		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_SYNC);
+	if (wire_len > 0U) {
+		pcap_inject(pcap, wire, wire_len);
+		rxd->stats.sync_relayed++;
+	}
+}
+
 /* ================================================================
  * RX slot: main receive loop with mesh routing
  * ================================================================ */
@@ -272,6 +314,42 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 		/* Drop self-sent frames */
 		if (memcmp(frame.src_mac, own_mac, 6) == 0) {
 			rxd->stats.rx_self_dropped++;
+			continue;
+		}
+
+		/* SYNC frame → delegate to sync engine */
+		if (frame.subtype == UNOW_VENDOR_SUBTYPE_SYNC) {
+			rxd->stats.rx_sync++;
+			if (rxd->sync_ctx != NULL) {
+				sync_frame_t sf;
+				if (sync_frame_unpack(frame.payload,
+						      frame.len, &sf)) {
+					int64_t rx_time = now_us();
+					bool should_relay =
+						radio_sync_on_sync_rx(
+						    (radio_sync_t *)rxd->sync_ctx,
+						    &sf, rx_time,
+						    sf.sender_node_id);
+					if (should_relay)
+						radio_sync_relay_inject(
+						    rxd, &sf, pcap, own_mac);
+				}
+			}
+			continue;
+		}
+
+		/* DELAY_REQ → master records T4 */
+		if (frame.subtype == UNOW_VENDOR_SUBTYPE_DELAY_REQ) {
+			rxd->stats.rx_delay_req++;
+			if (rxd->sync_ctx != NULL) {
+				delay_req_frame_t dreq;
+				if (delay_req_unpack(frame.payload,
+						     frame.len, &dreq)) {
+					radio_sync_on_delay_req_rx(
+					    (radio_sync_t *)rxd->sync_ctx,
+					    &dreq, now_us());
+				}
+			}
 			continue;
 		}
 
