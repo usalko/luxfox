@@ -1,0 +1,353 @@
+#include "radiod/sync_frame.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static int g_failures;
+static int g_tests;
+
+static void check(int ok, const char *expr, const char *file, int line)
+{
+	g_tests++;
+	if (ok)
+		return;
+	g_failures++;
+	fprintf(stderr, "  FAIL %s:%d: %s\n", file, line, expr);
+}
+
+#define CHECK(cond) check(!!(cond), #cond, __FILE__, __LINE__)
+
+static void test_sync_pack_unpack_roundtrip(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 5,
+		.sender_node_id = 5,
+		.superframe_seq = 42,
+		.origin_time_us = 1234567890LL,
+		.dl_duration_us = 2000,
+		.ul_slot_us     = 2000,
+		.guard_us       = 300,
+		.num_slots      = 3,
+		.relay_hops     = 0,
+		.slot_map       = {1, 2, 3, 0},
+		.num_delay_resp = 0,
+	};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+	CHECK(len == SYNC_FRAME_MIN_SIZE);
+
+	sync_frame_t out;
+	memset(&out, 0xFF, sizeof(out));
+	CHECK(sync_frame_unpack(buf, len, &out));
+
+	CHECK(out.master_node_id == 5);
+	CHECK(out.sender_node_id == 5);
+	CHECK(out.superframe_seq == 42);
+	CHECK(out.origin_time_us == 1234567890LL);
+	CHECK(out.dl_duration_us == 2000);
+	CHECK(out.ul_slot_us     == 2000);
+	CHECK(out.guard_us       == 300);
+	CHECK(out.num_slots      == 3);
+	CHECK(out.relay_hops     == 0);
+	CHECK(out.slot_map[0]    == 1);
+	CHECK(out.slot_map[1]    == 2);
+	CHECK(out.slot_map[2]    == 3);
+	CHECK(out.slot_map[3]    == 0);
+	CHECK(out.num_delay_resp == 0);
+}
+
+static void test_sync_pack_with_delay_resp(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 5,
+		.sender_node_id = 5,
+		.superframe_seq = 100,
+		.origin_time_us = 999999LL,
+		.dl_duration_us = 2000,
+		.ul_slot_us     = 2000,
+		.guard_us       = 300,
+		.num_slots      = 4,
+		.relay_hops     = 0,
+		.slot_map       = {1, 2, 3, 4},
+		.num_delay_resp = 3,
+		.delay_resp     = {
+			{.node_id = 1, .t4_us = 100000LL},
+			{.node_id = 2, .t4_us = 200000LL},
+			{.node_id = 3, .t4_us = 300000LL},
+		},
+	};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+	CHECK(len == 29 + 3 * 9);
+
+	sync_frame_t out;
+	CHECK(sync_frame_unpack(buf, len, &out));
+	CHECK(out.num_delay_resp == 3);
+	CHECK(out.delay_resp[0].node_id == 1);
+	CHECK(out.delay_resp[0].t4_us   == 100000LL);
+	CHECK(out.delay_resp[1].node_id == 2);
+	CHECK(out.delay_resp[1].t4_us   == 200000LL);
+	CHECK(out.delay_resp[2].node_id == 3);
+	CHECK(out.delay_resp[2].t4_us   == 300000LL);
+}
+
+static void test_sync_pack_max_delay_resp(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 5,
+		.sender_node_id = 5,
+		.num_delay_resp = 4,
+		.delay_resp     = {
+			{.node_id = 1, .t4_us = -1LL},
+			{.node_id = 2, .t4_us = 0LL},
+			{.node_id = 3, .t4_us = INT64_MAX},
+			{.node_id = 4, .t4_us = INT64_MIN},
+		},
+	};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+	CHECK(len == SYNC_FRAME_MAX_SIZE);
+
+	sync_frame_t out;
+	CHECK(sync_frame_unpack(buf, len, &out));
+	CHECK(out.num_delay_resp == 4);
+	CHECK(out.delay_resp[0].t4_us == -1LL);
+	CHECK(out.delay_resp[1].t4_us == 0LL);
+	CHECK(out.delay_resp[2].t4_us == INT64_MAX);
+	CHECK(out.delay_resp[3].t4_us == INT64_MIN);
+}
+
+static void test_sync_pack_no_delay_resp(void)
+{
+	sync_frame_t in = {0};
+	in.master_node_id = 1;
+	in.sender_node_id = 1;
+	in.num_delay_resp = 0;
+
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+	CHECK(len == SYNC_FRAME_MIN_SIZE);
+
+	sync_frame_t out;
+	CHECK(sync_frame_unpack(buf, len, &out));
+	CHECK(out.num_delay_resp == 0);
+}
+
+static void test_sync_unpack_short_buffer(void)
+{
+	uint8_t buf[SYNC_FRAME_MIN_SIZE - 1];
+	memset(buf, 0, sizeof(buf));
+	buf[0] = SYNC_FRAME_MAGIC;
+	buf[1] = SYNC_FRAME_VERSION;
+
+	sync_frame_t out;
+	CHECK(!sync_frame_unpack(buf, sizeof(buf), &out));
+	CHECK(!sync_frame_unpack(buf, 0, &out));
+	CHECK(!sync_frame_unpack(buf, 1, &out));
+}
+
+static void test_sync_unpack_bad_magic(void)
+{
+	uint8_t buf[SYNC_FRAME_MIN_SIZE] = {0};
+	buf[0] = 0xAA;
+	buf[1] = SYNC_FRAME_VERSION;
+
+	sync_frame_t out;
+	CHECK(!sync_frame_unpack(buf, sizeof(buf), &out));
+}
+
+static void test_sync_unpack_bad_version(void)
+{
+	uint8_t buf[SYNC_FRAME_MIN_SIZE] = {0};
+	buf[0] = SYNC_FRAME_MAGIC;
+	buf[1] = 0x02;
+
+	sync_frame_t out;
+	CHECK(!sync_frame_unpack(buf, sizeof(buf), &out));
+}
+
+static void test_sync_unpack_truncated_delay_resp(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 5,
+		.sender_node_id = 5,
+		.num_delay_resp = 3,
+		.delay_resp     = {
+			{.node_id = 1, .t4_us = 100LL},
+			{.node_id = 2, .t4_us = 200LL},
+			{.node_id = 3, .t4_us = 300LL},
+		},
+	};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+
+	sync_frame_t out;
+	/* Truncate: claims 3 delay_resp but only has room for 1 */
+	CHECK(!sync_frame_unpack(buf, 29 + 1 * 9, &out));
+}
+
+static void test_delay_req_pack_unpack_roundtrip(void)
+{
+	delay_req_frame_t in = {
+		.requester_node_id = 2,
+		.target_node_id    = 5,
+		.t3_us             = 7777777LL,
+		.superframe_seq    = 42,
+	};
+	uint8_t buf[DELAY_REQ_FRAME_SIZE];
+	size_t len = 0;
+
+	CHECK(delay_req_pack(&in, buf, sizeof(buf), &len));
+	CHECK(len == DELAY_REQ_FRAME_SIZE);
+
+	delay_req_frame_t out;
+	memset(&out, 0xFF, sizeof(out));
+	CHECK(delay_req_unpack(buf, len, &out));
+	CHECK(out.requester_node_id == 2);
+	CHECK(out.target_node_id    == 5);
+	CHECK(out.t3_us             == 7777777LL);
+	CHECK(out.superframe_seq    == 42);
+}
+
+static void test_delay_req_unpack_short(void)
+{
+	uint8_t buf[DELAY_REQ_FRAME_SIZE - 1];
+	memset(buf, 0, sizeof(buf));
+	buf[0] = DELAY_REQ_MAGIC;
+	buf[1] = DELAY_REQ_VERSION;
+
+	delay_req_frame_t out;
+	CHECK(!delay_req_unpack(buf, sizeof(buf), &out));
+	CHECK(!delay_req_unpack(buf, 0, &out));
+}
+
+static void test_endianness(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 5,
+		.sender_node_id = 3,
+		.superframe_seq = 0x04030201U,
+		.origin_time_us = 0x0807060504030201LL,
+		.dl_duration_us = 0x0201,
+		.ul_slot_us     = 0x0403,
+		.guard_us       = 0x0605,
+		.num_slots      = 2,
+		.relay_hops     = 1,
+		.slot_map       = {1, 2, 0, 0},
+		.num_delay_resp = 0,
+	};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len = 0;
+
+	CHECK(sync_frame_pack(&in, buf, sizeof(buf), &len));
+
+	/* Check raw bytes for LE encoding */
+	CHECK(buf[0] == 0xBE);
+	CHECK(buf[1] == 0x01);
+	CHECK(buf[2] == 5);
+	CHECK(buf[3] == 3);
+
+	/* superframe_seq at [4..7]: 0x04030201 LE → 01 02 03 04 */
+	CHECK(buf[4] == 0x01);
+	CHECK(buf[5] == 0x02);
+	CHECK(buf[6] == 0x03);
+	CHECK(buf[7] == 0x04);
+
+	/* origin_time_us at [8..15]: 0x0807060504030201 LE */
+	CHECK(buf[8]  == 0x01);
+	CHECK(buf[9]  == 0x02);
+	CHECK(buf[10] == 0x03);
+	CHECK(buf[11] == 0x04);
+	CHECK(buf[12] == 0x05);
+	CHECK(buf[13] == 0x06);
+	CHECK(buf[14] == 0x07);
+	CHECK(buf[15] == 0x08);
+
+	/* dl_duration_us at [16..17]: 0x0201 LE → 01 02 */
+	CHECK(buf[16] == 0x01);
+	CHECK(buf[17] == 0x02);
+
+	/* ul_slot_us at [18..19]: 0x0403 LE → 03 04 */
+	CHECK(buf[18] == 0x03);
+	CHECK(buf[19] == 0x04);
+
+	/* guard_us at [20..21]: 0x0605 LE → 05 06 */
+	CHECK(buf[20] == 0x05);
+	CHECK(buf[21] == 0x06);
+}
+
+static void test_null_params(void)
+{
+	sync_frame_t sf = {0};
+	uint8_t buf[SYNC_FRAME_MAX_SIZE];
+	size_t len;
+
+	CHECK(!sync_frame_pack(NULL, buf, sizeof(buf), &len));
+	CHECK(!sync_frame_pack(&sf, NULL, sizeof(buf), &len));
+	CHECK(!sync_frame_pack(&sf, buf, sizeof(buf), NULL));
+	CHECK(!sync_frame_unpack(NULL, SYNC_FRAME_MIN_SIZE, &sf));
+	CHECK(!sync_frame_unpack(buf, SYNC_FRAME_MIN_SIZE, NULL));
+
+	delay_req_frame_t dr = {0};
+	CHECK(!delay_req_pack(NULL, buf, sizeof(buf), &len));
+	CHECK(!delay_req_pack(&dr, NULL, sizeof(buf), &len));
+	CHECK(!delay_req_unpack(NULL, DELAY_REQ_FRAME_SIZE, &dr));
+	CHECK(!delay_req_unpack(buf, DELAY_REQ_FRAME_SIZE, NULL));
+}
+
+static void test_sync_pack_capacity_too_small(void)
+{
+	sync_frame_t in = {
+		.master_node_id = 1,
+		.num_delay_resp = 2,
+		.delay_resp     = {
+			{.node_id = 1, .t4_us = 100},
+			{.node_id = 2, .t4_us = 200},
+		},
+	};
+	uint8_t buf[SYNC_FRAME_MIN_SIZE];
+	size_t len;
+
+	/* Buffer too small for 2 delay_resp */
+	CHECK(!sync_frame_pack(&in, buf, sizeof(buf), &len));
+}
+
+int main(void)
+{
+	const struct { const char *name; void (*fn)(void); } tests[] = {
+		{"sync_pack_unpack_roundtrip",     test_sync_pack_unpack_roundtrip},
+		{"sync_pack_with_delay_resp",      test_sync_pack_with_delay_resp},
+		{"sync_pack_max_delay_resp",       test_sync_pack_max_delay_resp},
+		{"sync_pack_no_delay_resp",        test_sync_pack_no_delay_resp},
+		{"sync_unpack_short_buffer",       test_sync_unpack_short_buffer},
+		{"sync_unpack_bad_magic",          test_sync_unpack_bad_magic},
+		{"sync_unpack_bad_version",        test_sync_unpack_bad_version},
+		{"sync_unpack_truncated_delay_resp", test_sync_unpack_truncated_delay_resp},
+		{"delay_req_pack_unpack_roundtrip", test_delay_req_pack_unpack_roundtrip},
+		{"delay_req_unpack_short",         test_delay_req_unpack_short},
+		{"endianness",                     test_endianness},
+		{"null_params",                    test_null_params},
+		{"sync_pack_capacity_too_small",   test_sync_pack_capacity_too_small},
+	};
+
+	size_t n = sizeof(tests) / sizeof(tests[0]);
+	for (size_t i = 0; i < n; i++) {
+		int before = g_failures;
+		tests[i].fn();
+		fprintf(stderr, "  %s: %s\n", tests[i].name,
+			g_failures == before ? "OK" : "FAILED");
+	}
+
+	fprintf(stderr, "\ntest_sync_frame: %d tests, %d failures\n",
+		g_tests, g_failures);
+	return g_failures != 0 ? 1 : 0;
+}

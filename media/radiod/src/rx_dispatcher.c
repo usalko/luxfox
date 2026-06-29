@@ -1,24 +1,17 @@
 #include "radiod/rx_dispatcher.h"
 #include "radiod/tx_scheduler.h"
 
-#include <pcap/pcap.h>
-#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
 
 #include "ulama/ulama_frame.h"
 
-/* We link against unow sources directly, same as vcpd/ulamad */
+#if ULAMA_WITH_UNOW
+#include <pcap/pcap.h>
+#include <poll.h>
 #include "unow_internal.h"
-
-static int64_t now_us(void)
-{
-	struct timeval tv;
-
-	gettimeofday(&tv, NULL);
-	return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
-}
+#endif
 
 void radio_rx_dispatcher_init(radio_rx_dispatcher_t *rxd,
 			      radio_ipc_server_t *ipc)
@@ -42,10 +35,23 @@ void radio_rx_dispatcher_enable_relay(radio_rx_dispatcher_t *rxd,
 	rxd->route_table = rt;
 }
 
+#if ULAMA_WITH_UNOW
+
+static int64_t now_us(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
+}
+
+#endif /* ULAMA_WITH_UNOW */
+
 /* ================================================================
  * UNOW-level dedup (by DATA_SEQ sequence number)
  * ================================================================ */
 
+#if ULAMA_WITH_UNOW
 static bool dedup_check_and_add(radio_rx_dispatcher_t *rxd, uint16_t seq)
 {
 	for (uint16_t i = 0; i < rxd->dedup_count; i++) {
@@ -442,3 +448,5 @@ uint16_t radio_async_next_seq(radio_rx_dispatcher_t *rxd)
 		return 0;
 	return ++rxd->async_tx_seq;
 }
+
+#endif /* ULAMA_WITH_UNOW */
