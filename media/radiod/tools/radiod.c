@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ulama/ulama_frame.h"
@@ -443,6 +444,42 @@ static void candidate_cycle(radio_sync_t *sync,
 
 /* ---- Main ---- */
 
+/* ---- System clock sanity check ----
+ * LuckFox has no battery-backed RTC — on cold boot the clock starts
+ * from epoch (year 2000 or 1970). This makes log timestamps useless.
+ * If system time is behind build time, set it to build time so that
+ * logs are at least approximately correct. */
+static void fix_system_clock(void)
+{
+	struct tm build_tm = {0};
+
+	if (sscanf(ULAMA_BUILD_DATE, "%d-%d-%d %d:%d:%d",
+		   &build_tm.tm_year, &build_tm.tm_mon, &build_tm.tm_mday,
+		   &build_tm.tm_hour, &build_tm.tm_min, &build_tm.tm_sec) != 6)
+		return;
+
+	build_tm.tm_year -= 1900;
+	build_tm.tm_mon -= 1;
+	build_tm.tm_isdst = -1;
+
+	time_t build_epoch = mktime(&build_tm);
+	if (build_epoch <= 0)
+		return;
+
+	time_t now = time(NULL);
+	if (now >= build_epoch)
+		return;
+
+	struct timeval tv = { .tv_sec = build_epoch, .tv_usec = 0 };
+	if (settimeofday(&tv, NULL) == 0) {
+		char buf[64];
+		strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S",
+			 localtime(&build_epoch));
+		fprintf(stderr, "radiod: system clock was behind, set to "
+			"build time %s\n", buf);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	radiod_config_t cfg;
@@ -502,6 +539,8 @@ int main(int argc, char **argv)
 		default:  usage(argv[0]); return 1;
 		}
 	}
+
+	fix_system_clock();
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
