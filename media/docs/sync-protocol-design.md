@@ -200,13 +200,17 @@ Offset  Size  Field               Description
 20      2     guard_us            uint16_t LE, guard interval
 22      1     num_slots           кол-во UL слотов (0-4)
 23      1     relay_hops          сколько relay-ов пройдено (0 = прямой)
-24      4     slot_map[4]         node_id для UL0..UL3 (0x00 = unused)
-28      1     num_delay_resp      кол-во DELAY_RESP записей (0-4)
-29      N*9   delay_resp[]        массив DELAY_RESP:
+24      4     reserved[4]         зарезервировано для расширений (=0).
+                                  Будущее: reserved[0] = flags,
+                                  бит 0 = HAS_NODE_TABLE (таблица id→mac
+                                  для детекции конфликтов node_id)
+28      4     slot_map[4]         node_id для UL0..UL3 (0x00 = unused)
+32      1     num_delay_resp      кол-во DELAY_RESP записей (0-4)
+33      N*9   delay_resp[]        массив DELAY_RESP:
                                     [0]    uint8_t  node_id
                                     [1..8] int64_t  t4_us (master RX time)
 ─────────────────────────────────────────────────────────────
-Total: 29 + num_delay_resp * 9 bytes (29-65 bytes)
+Total: 33 + num_delay_resp * 9 bytes (33-69 bytes)
 ```
 
 ### 3.3 DELAY_REQ Frame Format (subtype 0x05)
@@ -259,8 +263,8 @@ Pack/unpack для SYNC и DELAY_REQ кадров.
 #define SYNC_MAX_SLOTS        4
 #define SYNC_MAX_DELAY_RESP   4
 
-#define SYNC_FRAME_MIN_SIZE   29
-#define SYNC_FRAME_MAX_SIZE   (29 + SYNC_MAX_DELAY_RESP * 9)
+#define SYNC_FRAME_MIN_SIZE   33
+#define SYNC_FRAME_MAX_SIZE   (33 + SYNC_MAX_DELAY_RESP * 9)
 #define DELAY_REQ_FRAME_SIZE  16
 
 typedef struct {
@@ -278,6 +282,7 @@ typedef struct {
     uint16_t guard_us;
     uint8_t  num_slots;
     uint8_t  relay_hops;
+    uint8_t  reserved[4];
     uint8_t  slot_map[SYNC_MAX_SLOTS];
     uint8_t  num_delay_resp;
     sync_delay_resp_t delay_resp[SYNC_MAX_DELAY_RESP];
@@ -844,8 +849,8 @@ t=5.5s   Node 4 получает SYNC(5) — 5 > 4 → SLAVE
 - `DELAY_REQ_VERSION 0x01`
 - `SYNC_MAX_SLOTS 4`
 - `SYNC_MAX_DELAY_RESP 4`
-- `SYNC_FRAME_MIN_SIZE 29`
-- `SYNC_FRAME_MAX_SIZE (29 + 4*9)` = 65
+- `SYNC_FRAME_MIN_SIZE 33`
+- `SYNC_FRAME_MAX_SIZE (33 + 4*9)` = 69
 - `DELAY_REQ_FRAME_SIZE 16`
 
 Объявить 4 функции: pack/unpack для обеих структур.
@@ -860,17 +865,19 @@ t=5.5s   Node 4 получает SYNC(5) — 5 > 4 → SLAVE
 - Записать origin_time_us как int64_t LE (8 байт)
 - Записать dl_duration_us, ul_slot_us, guard_us как uint16_t LE
 - Записать num_slots, relay_hops
+- Записать reserved[4] (обнулённые — заложены для расширений, см. секцию 12)
 - Записать slot_map[4]
 - Записать num_delay_resp
 - Для каждого delay_resp: записать node_id (1 байт) + t4_us (8 байт LE)
 - Вернуть true и записать out_len
 
 Реализовать `sync_frame_unpack()`:
-- Проверить in_len >= SYNC_FRAME_MIN_SIZE
+- Проверить in_len >= SYNC_FRAME_MIN_SIZE (33)
 - Проверить magic == 0xBE, version == 0x01
 - Прочитать все поля в обратном порядке pack
+- Прочитать reserved[4] (игнорировать значения, но сохранить в структуру)
 - Проверить num_delay_resp <= SYNC_MAX_DELAY_RESP
-- Проверить in_len >= 29 + num_delay_resp * 9
+- Проверить in_len >= 33 + num_delay_resp * 9
 - Прочитать delay_resp массив
 - Вернуть true
 
@@ -1717,3 +1724,129 @@ sync[role=SLAVE master=5 offset=+123µs rtt=890µs tx=150 rx=148 relay=12]
 5. **Standalone fallback**: `--sync` не указан → старый цикл без изменений.
    Это гарантирует что обновление radiod не сломает существующие
    системы без SYNC.
+
+---
+
+## 12. Дальнейшее развитие: разрешение конфликтов node_id
+
+### Проблема
+
+`node_id` — 8-битное число, назначаемое вручную. Если два узла получили
+одинаковый ID, протокол ломается по нескольким направлениям:
+
+- **TDMA**: оба узла передают в одном UL-слоте → постоянные коллизии
+- **Dedup**: кольцо `(src_node, seq)` дропает легитимные пакеты от одного
+  из двойников (совпавший seq)
+- **Route table**: два разных MAC маппятся на один node_id — маршрут
+  прыгает между ними каждый цикл
+- **Watchdog**: heartbeat от чужого двойника кормит watchdog «не того» узла
+- **Master election**: если дублирован node_id мастера — катастрофа:
+  два мастера с одинаковым приоритетом, протокол не может разрешить конфликт
+
+### Вариант A: Детекция + alert (минимальный)
+
+**Суть**: каждый узел знает свой MAC. Если `rx_dispatcher` видит
+ULAMA-фрейм или SYNC с `src_node == own_node_id`, но `src_mac != own_mac`
+— это конфликт. Узел логирует ошибку, может сигнализировать через LED
+или отдельный IPC-канал для оператора.
+
+**Объём**: ~30 строк кода в `rx_dispatcher.c`.
+
+**Реализация**:
+```c
+/* В radio_rx_slot(), после ulama_header_peek(): */
+if (is_ulama && src_node == rxd->own_node_id &&
+    memcmp(frame.src_mac, own_mac, 6) != 0) {
+    /* CONFLICT: another node uses our node_id */
+    if (rxd->stats.node_id_conflicts++ % 100 == 0)
+        fprintf(stderr, "radiod: WARNING: node_id=%u conflict! "
+                "our MAC=%02x:..., seen from %02x:...\n",
+                src_node, own_mac[0], frame.src_mac[0]);
+}
+```
+
+**Плюсы**: просто, не ломает wire format, полезно для диагностики.
+**Минусы**: не самовосстанавливающийся — оператор чинит вручную.
+
+### Вариант B: Авторазрешение по MAC (средний)
+
+**Суть**: при обнаружении конфликта узел с **лексикографически меньшим MAC**
+автоматически выбирает себе новый `node_id` из пула свободных.
+
+**Необходимые изменения**:
+
+1. **SYNC расширение**: мастер включает в SYNC битовую маску занятых ID
+   (32 байта = 256 бит) или компактный список активных пар
+   `(node_id, mac[2..5])` — 5 байт на узел, до 25 байт на 5 узлов.
+
+2. **Wire format**: добавить optional TLV-секцию в SYNC кадр.
+   Текущий `reserved` поля (рекомендовано заложить в v1) позволяют
+   расширить без смены version.
+
+3. **Логика**: узел обнаруживает конфликт → ищет в маске свободный ID
+   → сообщает новый ID через ULAMA CTRL frame (REANNOUNCE) → мастер
+   обновляет slot_map.
+
+4. **Каскадные эффекты**: IPC-клиенты (vcpd, ulamad) тоже должны узнать
+   о смене ID. Нужен IPC-механизм нотификации:
+   ```c
+   radio_ipc_notify_id_change(old_id, new_id);
+   ```
+
+**Плюсы**: автоматическое восстановление без оператора.
+**Минусы**: сложнее (SYNC format extension + IPC notify + client-side
+handling); узел теряет свой TDMA-слот на 1-2 суперкадра при смене;
+edge cases с одновременным конфликтом нескольких узлов.
+
+### Вариант C: Динамическая адресация (тяжёлый, фактически v2)
+
+**Суть**: отказаться от статического `node_id`. MAC (или случайный UUID)
+становится истинным идентификатором. `node_id` — «короткий адрес»,
+который мастер **назначает динамически** при регистрации.
+
+**Протокол**:
+```
+Новый узел                          Мастер
+    │                                  │
+    │── JOIN_REQ(mac) ────────────────►│
+    │                                  │  Находит свободный node_id
+    │◄── JOIN_RESP(mac, node_id=3) ───│
+    │                                  │
+    │  Теперь использует node_id=3     │
+    │  во всех ULAMA-фреймах          │
+```
+
+По сути — DHCP для TDMA-сети.
+
+**Необходимые изменения**:
+- Новые UNOW subtypes: JOIN_REQ (0x06), JOIN_RESP (0x07)
+- Аренда ID с таймаутом (lease) и продлением
+- ULAMA-фрейм без изменений (src/dst_node остаётся uint8_t)
+- Все клиенты (vcpd, ulamad, ulama-gw) должны получать node_id
+  от radiod динамически, а не из CLI
+- Мастер хранит таблицу mac→node_id
+
+**Плюсы**: конфликты node_id невозможны by design; plug-and-play
+для новых узлов; масштабируется до 254 узлов.
+**Минусы**: радикальная переделка flow инициализации всех демонов;
+зависимость от доступности мастера при старте; по сути другой протокол.
+
+### Рекомендация
+
+Для v1 SYNC протокола **не реализовывать** ни один из вариантов.
+
+Вместо этого — **заложить расширяемость** в wire format:
+
+1. Добавить поле `uint8_t reserved[4]` в `sync_frame_t` между
+   `relay_hops` и `slot_map`. Это даёт 4 байта для будущих расширений
+   без смены version.
+
+2. В будущем один из reserved байт может стать `flags` с битом
+   `HAS_NODE_TABLE`, указывающим на наличие `(id, mac)` таблицы
+   после основного тела SYNC.
+
+3. Детекцию конфликтов (Вариант A) добавить первой — это ~30 строк
+   и полезно для диагностики даже без автоматического разрешения.
+
+**Путь развития**: A (сейчас, опционально) → B (когда сеть вырастет
+за пределы ручного управления) → C (если нужен plug-and-play).
