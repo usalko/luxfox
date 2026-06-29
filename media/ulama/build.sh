@@ -254,11 +254,13 @@ stage_files() {
         fi
     done
 
-    # ---- Init script → rootfs ----
+    # ---- Init script → rootfs + OEM ----
 
     if [ -f "$RADIOD_ROOT/scripts/S96radiod" ]; then
         cp -f "$RADIOD_ROOT/scripts/S96radiod" "$MEDIA_ROOT_STAGING/etc/init.d/S96radiod"
         chmod +x "$MEDIA_ROOT_STAGING/etc/init.d/S96radiod"
+        cp -f "$RADIOD_ROOT/scripts/S96radiod" "$OEM_STAGING/etc/init.d/S96radiod"
+        chmod +x "$OEM_STAGING/etc/init.d/S96radiod"
         log_debug "Staged /etc/init.d/S96radiod"
     fi
 
