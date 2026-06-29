@@ -71,15 +71,17 @@ HOST_UNOW_LDFLAGS := $(HOST_PCAP_LIBS) -lpthread
 .PHONY: all clean distclean host host-unow test
 
 all: gw-build
-	@$(call MAROC_COPY_PKG_TO_MEDIA_OUTPUT, $(RK_MEDIA_OUTPUT), $(PKG_OUT))
-	@echo "build $(PKG_NAME) done";
+	@echo "build $(PKG_NAME) done (host-only, not staged to device output)";
 
+# ulama-gw is a host-only tool; its artifacts stay under $(PKG_OUT) for local
+# inspection but are intentionally NOT copied into RK_MEDIA_OUTPUT, so it
+# never ends up in the OEM partition or rootfs shipped to the device.
 gw-build: $(TARGET_LIB_A) $(TARGET_BIN)
-	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc $(PKG_OUT)/etc/init.d $(PKG_OUT)/include $(PKG_OUT)/lib
+	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc $(PKG_OUT)/include $(PKG_OUT)/lib
 	@cp -f $(TARGET_BIN) $(PKG_OUT)/bin/
 	@cp -f $(TARGET_LIB_A) $(PKG_OUT)/lib/
 	@cp -rfa $(CURRENT_DIR)/include/* $(PKG_OUT)/include/
-	@if [ -f $(PKG_SCRIPT_DIR)/S98ulama-gw ]; then cp -f $(PKG_SCRIPT_DIR)/S98ulama-gw $(PKG_OUT)/etc/init.d/; fi
+	@if [ -f $(PKG_SCRIPT_DIR)/S98ulama-gw ]; then cp -f $(PKG_SCRIPT_DIR)/S98ulama-gw $(PKG_OUT)/etc/; fi
 	@if [ -f $(PKG_CONFIG_DIR)/ulama-gw.conf ]; then cp -f $(PKG_CONFIG_DIR)/ulama-gw.conf $(PKG_OUT)/etc/; fi
 
 $(PKG_BUILD)/src/%.o: $(CURRENT_DIR)/src/%.c

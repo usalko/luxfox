@@ -795,6 +795,18 @@ function build_sync() {
 			--source "${RK_PROJECT_OUTPUT}/oem" \
 			--target /oem \
 			"$@"
+
+		# Files staged under media_out/root (e.g. /etc/init.d scripts) end up
+		# in the rootfs, not the OEM partition, so they need their own sync pass.
+		if [ -d "${RK_PROJECT_PATH_MEDIA}/root" ]; then
+			"${SDK_MEDIA_DIR}/buildspot/buildspot-sync-ssh.sh" \
+				--host 192.168.100.1 \
+				--user root \
+				--port 22 \
+				--source "${RK_PROJECT_PATH_MEDIA}/root" \
+				--target / \
+				"$@"
+		fi
 	else
 		msg_error "buildspot-sync-ssh.sh not found in ${SDK_MEDIA_DIR}/buildspot/"
 		exit 1
@@ -1423,6 +1435,7 @@ function __PACKAGE_RESOURCES() {
 	__COPY_FILES $RK_PROJECT_PATH_MEDIA/lib $_install_dir/lib/
 	__COPY_FILES $RK_PROJECT_PATH_MEDIA/share $_install_dir/share/
 	__COPY_FILES $RK_PROJECT_PATH_MEDIA/usr $_install_dir/
+	__COPY_FILES $RK_PROJECT_PATH_MEDIA/etc $_target_dir/etc/
 
 	mkdir -p $_target_dir/etc/init.d $_target_dir/etc/default $_install_dir/bin/scripts
 	if [ -f "$RK_PROJECT_PATH_MEDIA/bin/S99unow-signal-diag" ]; then
