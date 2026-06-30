@@ -32,6 +32,9 @@ typedef struct {
 
 	/* Per-priority TX counts */
 	uint32_t tx_by_prio[4];
+	uint32_t queue_drop_snap[4];
+	uint32_t ipc_tx_ok_snap;
+	uint32_t ipc_tx_fail_snap;
 
 	/* SYNC stats (snapshot for reporting) */
 	uint32_t sync_tx;

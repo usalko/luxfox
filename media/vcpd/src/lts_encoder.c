@@ -9,6 +9,15 @@ void lts_encoder_init(lts_encoder_t *enc, uint8_t stream_id)
 	enc->max_payload = LTS_ENC_MAX_PAYLOAD;
 }
 
+size_t lts_encoder_packet_count(const lts_encoder_t *enc, size_t payload_len)
+{
+	if (payload_len == 0)
+		return 0;
+
+	size_t mtu = (enc && enc->max_payload > 0) ? enc->max_payload : LTS_ENC_MAX_PAYLOAD;
+	return (payload_len + mtu - 1) / mtu;
+}
+
 size_t lts_encode_single(uint8_t stream_id, uint16_t pkt_seq, uint8_t flags,
 			 const uint8_t *payload, size_t payload_len,
 			 uint8_t *out, size_t out_capacity)

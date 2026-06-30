@@ -9,6 +9,15 @@
 #define VIDEO_TS_GROUP_SIZE 7
 #define VIDEO_TS_GROUP_BYTES (MPEGTS_PACKET_SIZE * VIDEO_TS_GROUP_SIZE)
 
+/*
+ * In MPP (ring-buffer) mode video_source_mpp_read() returns one ring slot per
+ * call — up to VIDEO_RING_SLOT_MAX bytes.  Callers must size their read buffer
+ * to at least this value when VCPD_WITH_MPP is defined.
+ */
+#ifdef VCPD_WITH_MPP
+#define VIDEO_MPP_READ_MAX 65536
+#endif
+
 typedef struct {
 	pid_t ffmpeg_pid;
 	int pipe_fd;

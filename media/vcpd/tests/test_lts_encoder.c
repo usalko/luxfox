@@ -65,6 +65,32 @@ static void test_encoder_fragmentation(void)
 		    "last packet should have LAST_OF_FRAME flag");
 }
 
+static void test_encoder_respects_runtime_mtu(void)
+{
+	lts_encoder_t enc;
+	lts_encoder_init(&enc, 0);
+	enc.max_payload = 216;
+
+	uint8_t payload[1000];
+	memset(payload, 0xCC, sizeof(payload));
+
+	size_t required = lts_encoder_packet_count(&enc, sizeof(payload));
+	expect_true(required == 5, "1000B payload at MTU 216 should require 5 packets");
+
+	lts_encoded_packet_t pkts[5];
+	size_t n = lts_encoder_encode(&enc, payload, sizeof(payload), 0, pkts, 5);
+	expect_true(n == required, "encoder should emit all packets required by runtime MTU");
+
+	size_t total_payload = 0;
+	for (size_t i = 0; i < n; i++)
+		total_payload += (pkts[i].len - LTS_ENC_HEADER_SIZE);
+	expect_true(total_payload == sizeof(payload), "runtime MTU fragmentation should preserve full payload");
+	expect_true(pkts[0].data[3] & LTS_ENC_FLAG_FIRST_OF_FRAME,
+		    "first runtime-MTU packet should have FIRST_OF_FRAME flag");
+	expect_true(pkts[n - 1].data[3] & LTS_ENC_FLAG_LAST_OF_FRAME,
+		    "last runtime-MTU packet should have LAST_OF_FRAME flag");
+}
+
 static void test_roundtrip_with_decoder(void)
 {
 	uint8_t payload[] = {0x47, 0x00, 0x11, 0x10};
@@ -147,6 +173,7 @@ int main(void)
 	test_single_encode();
 	test_encoder_sequence();
 	test_encoder_fragmentation();
+	test_encoder_respects_runtime_mtu();
 	test_roundtrip_with_decoder();
 	test_nack_decode();
 	test_retx_buf_store_find();

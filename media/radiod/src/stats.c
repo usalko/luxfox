@@ -75,11 +75,17 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 		st->tx_by_prio[2], st->tx_by_prio[3]);
 
 	if (sched != NULL) {
+		uint32_t qdrop[4];
+		for (int p = 0; p < 4; p++)
+			qdrop[p] = sched->queues[p].dropped - st->queue_drop_snap[p];
+
 		fprintf(stderr, "q[C=%d T=%d V=%d B=%d] ",
 			radio_tx_queue_depth(sched, 0),
 			radio_tx_queue_depth(sched, 1),
 			radio_tx_queue_depth(sched, 2),
 			radio_tx_queue_depth(sched, 3));
+		fprintf(stderr, "qdrop[C=%u T=%u V=%u B=%u] ",
+			qdrop[0], qdrop[1], qdrop[2], qdrop[3]);
 	}
 
 	if (rxd != NULL) {
@@ -109,10 +115,12 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	if (ipc != NULL) {
 		int active = 0;
+		uint32_t ipc_ok = ipc->tx_ok - st->ipc_tx_ok_snap;
+		uint32_t ipc_fail = ipc->tx_fail - st->ipc_tx_fail_snap;
 		for (int i = 0; i < ipc->client_count; i++)
 			if (ipc->clients[i].active) active++;
-		fprintf(stderr, " ipc[clients=%d tx_ok=%u tx_fail=%u]",
-			active, ipc->tx_ok, ipc->tx_fail);
+		fprintf(stderr, " ipc[clients=%d ok=%u fail=%u tot_fail=%u]",
+			active, ipc_ok, ipc_fail, ipc->tx_fail);
 	}
 
 	if (st->current_role > 0) {
@@ -137,10 +145,25 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	fprintf(stderr, "\n");
 
-	/* Reset for next period */
+	/* Reset for next period but preserve queue-drop snapshots. */
 	int64_t saved_start = now_us;
+	uint32_t saved_qdrop[4] = {0, 0, 0, 0};
+	uint32_t saved_ipc_tx_ok = 0;
+	uint32_t saved_ipc_tx_fail = 0;
+	if (sched != NULL) {
+		for (int p = 0; p < 4; p++)
+			saved_qdrop[p] = sched->queues[p].dropped;
+	}
+	if (ipc != NULL) {
+		saved_ipc_tx_ok = ipc->tx_ok;
+		saved_ipc_tx_fail = ipc->tx_fail;
+	}
 	memset(st, 0, sizeof(*st));
 	st->period_start_us = saved_start;
+	for (int p = 0; p < 4; p++)
+		st->queue_drop_snap[p] = saved_qdrop[p];
+	st->ipc_tx_ok_snap = saved_ipc_tx_ok;
+	st->ipc_tx_fail_snap = saved_ipc_tx_fail;
 	return 1;
 }
 

@@ -23,7 +23,7 @@ ULAMA_ROOT := $(CURRENT_DIR)/../ulama
 UNOW_ROOT := $(CURRENT_DIR)/../unow
 UNOW_PCAP_SYSROOT ?= $(CURRENT_DIR)/../../sysdrv/source/buildroot/buildroot-2023.02.6/output/host/arm-buildroot-linux-uclibcgnueabihf/sysroot
 
-VCPD_SRCS := $(CURRENT_DIR)/src/lts_encoder.c $(CURRENT_DIR)/src/lts_fec_enc.c $(CURRENT_DIR)/src/uvcp.c
+VCPD_SRCS := $(CURRENT_DIR)/src/lts_encoder.c $(CURRENT_DIR)/src/lts_fec_enc.c $(CURRENT_DIR)/src/uvcp.c $(CURRENT_DIR)/src/video_ring.c
 
 # MPP hardware encoder (default for target ARM build)
 # Falls back to ffmpeg if MPP libs not found

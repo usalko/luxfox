@@ -181,12 +181,14 @@ typedef struct {
 	int lts_mtu;
 	int benchmark_kbps;
 	int param_dup_count;
+	lts_encoded_packet_t *lts_pkt_buf;
+	size_t lts_pkt_cap;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
 #define TX_FAIL_THRESHOLD 10
 
-static void send_ulama_video_ex(vcpd_ctx_t *ctx, const uint8_t *data, size_t len, bool reliable)
+static bool send_ulama_video_ex(vcpd_ctx_t *ctx, const uint8_t *data, size_t len, bool reliable)
 {
 	ulama_frame_view_t uf = {
 		.src_node = ctx->node_id,
@@ -203,22 +205,44 @@ static void send_ulama_video_ex(vcpd_ctx_t *ctx, const uint8_t *data, size_t len
 
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 	size_t frame_len = 0;
-	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
-		int rc;
-		if (reliable)
-			rc = ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
-		else
-			rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
-		if (rc >= 0)
-			tx_fail_count = 0;
-		else
-			tx_fail_count++;
+	if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
+		return false;
+
+	int rc;
+	if (reliable)
+		rc = ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
+	else
+		rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+
+	if (rc >= 0) {
+		tx_fail_count = 0;
+		return true;
 	}
+
+	tx_fail_count++;
+	return false;
 }
 
-static void send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
+static bool send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 {
-	send_ulama_video_ex(ctx, data, len, false);
+	return send_ulama_video_ex(ctx, data, len, false);
+}
+
+static bool ensure_lts_packet_capacity(vcpd_ctx_t *ctx, size_t required)
+{
+	if (required == 0)
+		return true;
+	if (required <= ctx->lts_pkt_cap)
+		return true;
+
+	lts_encoded_packet_t *new_buf = (lts_encoded_packet_t *)realloc(
+		ctx->lts_pkt_buf, required * sizeof(*new_buf));
+	if (!new_buf)
+		return false;
+
+	ctx->lts_pkt_buf = new_buf;
+	ctx->lts_pkt_cap = required;
+	return true;
 }
 
 static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
@@ -232,10 +256,13 @@ static void handle_nack(vcpd_ctx_t *ctx, const lts_enc_nack_t *nack)
 			uint8_t retx_data[LTS_ENC_HEADER_SIZE + LTS_ENC_MAX_PAYLOAD];
 			memcpy(retx_data, pkt->data, pkt->len);
 			retx_data[3] |= LTS_ENC_FLAG_RETX;
-			send_ulama_video(ctx, retx_data, pkt->len);
-			ctx->nack_retx_count++;
-			if (ctx->verbose)
-				fprintf(stderr, "vcpd: RETX seq=%u (%zu bytes)\n", seq, pkt->len);
+			if (send_ulama_video(ctx, retx_data, pkt->len)) {
+				ctx->nack_retx_count++;
+				if (ctx->verbose)
+					fprintf(stderr, "vcpd: RETX seq=%u (%zu bytes)\n", seq, pkt->len);
+			} else if (ctx->verbose) {
+				fprintf(stderr, "vcpd: RETX seq=%u SEND FAIL\n", seq);
+			}
 		} else {
 			ctx->nack_retx_miss++;
 			if (ctx->verbose)
@@ -297,7 +324,7 @@ static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 			uint8_t pong_buf[64];
 			size_t pong_len = uvcp_build_pong(pong_buf, sizeof(pong_buf));
 			if (pong_len > 0) {
-				send_ulama_video(ctx, pong_buf, pong_len);
+					(void)send_ulama_video(ctx, pong_buf, pong_len);
 				ctx->uvcp_sess.last_pong_ms = now_ms();
 			}
 		}
@@ -336,11 +363,12 @@ static int run_benchmark(vcpd_ctx_t *ctx)
 		size_t np = lts_encoder_encode(&ctx->lts_enc, dummy, mtu, 0, &pkt, 1);
 		if (np == 0) continue;
 
-		send_ulama_video_ex(ctx, pkt.data, pkt.len, use_reliable);
-		pkts_sent++;
-		bytes_sent += pkt.len;
-		rpt_pkts++;
-		rpt_bytes += pkt.len;
+		if (send_ulama_video_ex(ctx, pkt.data, pkt.len, use_reliable)) {
+			pkts_sent++;
+			bytes_sent += pkt.len;
+			rpt_pkts++;
+			rpt_bytes += pkt.len;
+		}
 
 		uint64_t now = now_ms();
 		if (now - last_report >= 5000) {
@@ -664,13 +692,20 @@ int main(int argc, char *argv[])
 			vrc, ctx.video.pipe_fd, ctx.video.running);
 	}
 
+	/* In MPP ring mode each read returns one VENC pack (up to VIDEO_MPP_READ_MAX).
+	 * In legacy / ffmpeg mode each read returns VIDEO_TS_GROUP_BYTES. */
+#ifdef VCPD_WITH_MPP
+	static uint8_t ts_buf[VIDEO_MPP_READ_MAX];
+	const size_t nal_buf_cap = 2 * VIDEO_MPP_READ_MAX;  /* fits one full ring slot + partial head */
+#else
 	uint8_t ts_buf[VIDEO_TS_GROUP_BYTES];
-
-	/* NAL accumulator: collect bytes from pipe, split on start codes,
-	 * feed complete NALs to LTS encoder so LAST_OF_FRAME aligns with NAL boundaries */
-	uint8_t *nal_buf = malloc(64 * 1024);
-	size_t nal_len = 0;
 	const size_t nal_buf_cap = 64 * 1024;
+#endif
+
+	/* NAL accumulator: collect bytes from pipe/ring, split on start codes,
+	 * feed complete NALs to LTS encoder so LAST_OF_FRAME aligns with NAL boundaries */
+	uint8_t *nal_buf = malloc(nal_buf_cap);
+	size_t nal_len = 0;
 
 	uint64_t diag_last_ms = now_ms();
 	uint32_t diag_polls = 0;
@@ -713,13 +748,13 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "%s vcpd: [diag] polls=%u nfds=%d video=%u/%u running=%d pipe_fd=%d"
 				" | pipe=%u B"
 				" | nals=%u(idr=%u p=%u prm=%u) %u B"
-				" | lts=%u(idr=%u prm=%u) tx=%u/%u B fec=%u\n",
+				" | lts=%u(idr=%u prm=%u) tx=%u/%u B fail=%u fec=%u\n",
 				_ts, diag_polls, nfds, diag_poll_video, diag_video_reads,
 				ctx.video.running, ctx.video.pipe_fd,
 				diag_pipe_bytes,
 				diag_nals, diag_nal_idr, diag_nal_p, diag_nal_param, diag_nal_bytes,
 				diag_lts_pkts, diag_lts_idr, diag_lts_param,
-				diag_tx_ok, diag_tx_bytes, diag_fec_pkts);
+				diag_tx_ok, diag_tx_bytes, diag_tx_fail, diag_fec_pkts);
 			diag_polls = 0;
 			diag_poll_video = 0;
 			diag_video_reads = 0;
@@ -895,7 +930,7 @@ int main(int argc, char *argv[])
 							for (size_t i = 0; i < np; i++) {
 								lts_retx_buf_store(ctx.retx_buf, &pp[i]);
 								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
-									send_ulama_video(&ctx, pp[i].data, pp[i].len);
+									(void)send_ulama_video(&ctx, pp[i].data, pp[i].len);
 								if (ctx.pace_us > 0 && i + 1 < np)
 									usleep(ctx.pace_us);
 							}
@@ -906,13 +941,31 @@ int main(int argc, char *argv[])
 							ctx.param_dup_count);
 				}
 
-				lts_encoded_packet_t lts_pkts[64];
-				size_t max_pkts = nal_size / LTS_ENC_MAX_PAYLOAD + 2;
-				if (max_pkts > 64) max_pkts = 64;
+				size_t max_pkts = lts_encoder_packet_count(&ctx.lts_enc, nal_size);
+				if (max_pkts == 0)
+					max_pkts = 1;
+				if (!ensure_lts_packet_capacity(&ctx, max_pkts)) {
+					fprintf(stderr,
+						"vcpd: failed to reserve %zu LTS packets for %zu-byte NAL (mtu=%zu)\n",
+						max_pkts, nal_size, ctx.lts_enc.max_payload);
+					diag_tx_fail++;
+					pos = sc2;
+					continue;
+				}
+
+				lts_encoded_packet_t *lts_pkts = ctx.lts_pkt_buf;
 				bool is_idr = (hevc_nal_type == 19 || hevc_nal_type == 20);
 				size_t npkts = lts_encoder_encode(&ctx.lts_enc, nal_data, nal_size,
 								  is_idr ? LTS_ENC_FLAG_KEYFRAME : 0,
 								  lts_pkts, max_pkts);
+				if (npkts != max_pkts) {
+					fprintf(stderr,
+						"vcpd: short LTS encode for %zu-byte NAL: expected %zu packets, got %zu\n",
+						nal_size, max_pkts, npkts);
+					diag_tx_fail++;
+					pos = sc2;
+					continue;
+				}
 				if (is_idr)
 					diag_lts_idr += (uint32_t)npkts;
 
@@ -925,9 +978,12 @@ int main(int argc, char *argv[])
 					if (lts_pkts[i].len <= ULAMA_FRAME_MAX_PAYLOAD) {
 						bool pkt_reliable = use_reliable ||
 							(ctx.reliable_mode == 1 && i + 1 == npkts);
-						send_ulama_video_ex(&ctx, lts_pkts[i].data, lts_pkts[i].len, pkt_reliable);
-						diag_tx_ok++;
-						diag_tx_bytes += (uint32_t)lts_pkts[i].len;
+						if (send_ulama_video_ex(&ctx, lts_pkts[i].data, lts_pkts[i].len, pkt_reliable)) {
+							diag_tx_ok++;
+							diag_tx_bytes += (uint32_t)lts_pkts[i].len;
+						} else {
+							diag_tx_fail++;
+						}
 					} else {
 						diag_tx_fail++;
 					}
@@ -935,10 +991,16 @@ int main(int argc, char *argv[])
 						lts_encoded_packet_t fec_pkt;
 						if (lts_fec_encoder_add(&ctx.fec_enc, &lts_pkts[i], &ctx.lts_enc, &fec_pkt)) {
 							lts_retx_buf_store(ctx.retx_buf, &fec_pkt);
-							if (fec_pkt.len <= ULAMA_FRAME_MAX_PAYLOAD)
-								send_ulama_video_ex(&ctx, fec_pkt.data, fec_pkt.len, use_reliable);
-							ctx.fec_sent++;
-							diag_fec_pkts++;
+							if (fec_pkt.len <= ULAMA_FRAME_MAX_PAYLOAD) {
+								if (send_ulama_video_ex(&ctx, fec_pkt.data, fec_pkt.len, use_reliable)) {
+									ctx.fec_sent++;
+									diag_fec_pkts++;
+								} else {
+									diag_tx_fail++;
+								}
+							} else {
+								diag_tx_fail++;
+							}
 						}
 					}
 					if (i + 1 < npkts) {
@@ -1012,6 +1074,7 @@ int main(int argc, char *argv[])
 	vsrc_stop(&ctx.video);
 	ulama_transport_tx_close(&ctx.ulama_tx);
 	ulama_transport_rx_close(&ctx.ulama_rx);
+	free(ctx.lts_pkt_buf);
 	free(ctx.retx_buf);
 
 	return 0;

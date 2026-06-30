@@ -43,6 +43,8 @@ typedef struct {
 
 void lts_encoder_init(lts_encoder_t *enc, uint8_t stream_id);
 
+size_t lts_encoder_packet_count(const lts_encoder_t *enc, size_t payload_len);
+
 size_t lts_encoder_encode(lts_encoder_t *enc, const uint8_t *payload, size_t payload_len,
 			  uint8_t flags, lts_encoded_packet_t *out, size_t max_out);
 
