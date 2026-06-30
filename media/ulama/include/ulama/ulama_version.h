@@ -1,9 +1,9 @@
 #ifndef ULAMA_VERSION_H
 #define ULAMA_VERSION_H
 
-#define ULAMA_BUILD_NUMBER    251
-#define ULAMA_GIT_HASH        "019a54df7"
+#define ULAMA_BUILD_NUMBER    257
+#define ULAMA_GIT_HASH        "1dd4ff7e7"
 #define ULAMA_GIT_BRANCH      "main"
-#define ULAMA_BUILD_DATE      "2026-06-30 13:20:20"
+#define ULAMA_BUILD_DATE      "2026-06-30 19:52:33"
 
 #endif /* ULAMA_VERSION_H */

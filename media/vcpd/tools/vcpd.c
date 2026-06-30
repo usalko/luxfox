@@ -107,7 +107,14 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 		return 1;
 	}
 
+	/* In MPP ring mode vsrc_read returns one VENC pack per call (up to
+	 * VIDEO_MPP_READ_MAX bytes).  A 1316-byte stack buffer would silently
+	 * truncate every pack; use a static buffer sized to the maximum. */
+#ifdef VCPD_WITH_MPP
+	static uint8_t buf[VIDEO_MPP_READ_MAX];
+#else
 	uint8_t buf[VIDEO_TS_GROUP_BYTES];
+#endif
 	int frames = 0;
 	size_t total_bytes = 0;
 	uint64_t t0 = now_ms();
@@ -802,10 +809,13 @@ int main(int argc, char *argv[])
 						n == 0 ? "EOF" : strerror(errno));
 					vsrc_stop(&ctx.video);
 
-					/* Recovery: wait for USB re-enumeration, restore monitor mode, restart */
+					/* Recovery: wait for USB re-enumeration.
+					 * Poll ulama_rx during the wait so UVCP PING/NACK keep working. */
 					for (int retry = 0; retry < 30 && g_running; retry++) {
-						usleep(1000000); /* 1s */
-						/* Check if video device reappeared */
+						struct pollfd rpfd = { .fd = ctx.ulama_rx.fd, .events = POLLIN };
+						poll(&rpfd, 1, 1000); /* 1s timeout = same cadence as before */
+						if (rpfd.revents & POLLIN)
+							handle_uvcp_rx(&ctx);
 						int probe_fd = open(ctx.video.device, O_RDONLY);
 						if (probe_fd >= 0) {
 							close(probe_fd);
@@ -831,7 +841,7 @@ int main(int argc, char *argv[])
 							ctx.iface, ctx.iface, ctx.iface, ctx.iface, ctx.iface);
 						(void)system(cmd);
 
-						/* Retry UNOW TX init until it works */
+						/* Retry UNOW TX init until it works (poll during waits). */
 						ulama_transport_tx_close(&ctx.ulama_tx);
 						for (int t = 0; t < 10 && g_running; t++) {
 							if (ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.node_id, ctx.iface, NULL) == 0) {
@@ -839,8 +849,11 @@ int main(int argc, char *argv[])
 								break;
 							}
 							fprintf(stderr, "vcpd: UNOW TX init retry %d/10...\n", t + 1);
-							usleep(2000000);
 							(void)system(cmd);
+							struct pollfd rpfd = { .fd = ctx.ulama_rx.fd, .events = POLLIN };
+							poll(&rpfd, 1, 2000);
+							if (rpfd.revents & POLLIN)
+								handle_uvcp_rx(&ctx);
 						}
 					}
 

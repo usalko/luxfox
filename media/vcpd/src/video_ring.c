@@ -77,3 +77,26 @@ bool video_ring_pop(video_ring_t *ring, void *buf, size_t cap, uint32_t *out_len
     atomic_store_explicit(&ring->tail, (tail + 1u) % VIDEO_RING_SLOTS, memory_order_release);
     return true;
 }
+
+bool video_ring_pop_latest(video_ring_t *ring, void *buf, size_t cap, uint32_t *out_len)
+{
+    uint32_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
+    uint32_t tail = atomic_load_explicit(&ring->tail, memory_order_relaxed);
+
+    if (head == tail)
+        return false;  /* empty */
+
+    /* Newest slot is the one most recently pushed = head - 1 */
+    uint32_t latest = (head + VIDEO_RING_SLOTS - 1u) % VIDEO_RING_SLOTS;
+
+    video_ring_slot_t *slot = &ring->slots[latest];
+    uint32_t len = slot->len;
+    if (len > (uint32_t)cap)
+        len = (uint32_t)cap;
+    memcpy(buf, slot->data, len);
+    *out_len = len;
+
+    /* Consume all slots up to and including latest; producer gets them back */
+    atomic_store_explicit(&ring->tail, head, memory_order_release);
+    return true;
+}

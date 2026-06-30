@@ -60,9 +60,18 @@ void video_ring_destroy(video_ring_t *ring, const char *path);
 bool video_ring_push(video_ring_t *ring, const void *data, uint32_t len);
 
 /*
- * Consumer: copy one slot into `buf` (up to `cap` bytes).
+ * Consumer: copy the oldest slot into `buf` (up to `cap` bytes).
  * Sets *out_len to the number of bytes written.
  * Returns false if the ring is empty.
  * Must be called from a single consumer thread only.
  */
 bool video_ring_pop(video_ring_t *ring, void *buf, size_t cap, uint32_t *out_len);
+
+/*
+ * Consumer: copy the NEWEST slot into `buf`, skipping all older entries.
+ * All skipped slots are freed for the producer immediately.
+ * Use for real-time video: sender always gets the latest frame.
+ * Returns false if the ring is empty.
+ * Must be called from a single consumer thread only.
+ */
+bool video_ring_pop_latest(video_ring_t *ring, void *buf, size_t cap, uint32_t *out_len);
