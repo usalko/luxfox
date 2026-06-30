@@ -385,7 +385,7 @@ int main(int argc, char *argv[])
 	ctx.video.fps = 25;
 	ctx.video.gop = 0;
 	ctx.pace_us = 0;
-	ctx.reliable_mode = 2;
+	ctx.reliable_mode = 0;
 	ctx.reliable_threshold = 3;
 	ctx.ack_timeout_us = 2000;
 	ctx.ack_max_retry = 0;

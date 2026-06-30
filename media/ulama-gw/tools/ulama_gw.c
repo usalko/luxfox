@@ -884,7 +884,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "  ulama-listen: %s\n", ctx.listen_addr);
 		fprintf(stderr, "  ulama-peer:   %s\n", ctx.peer_addr);
 	} else {
-		fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
+			fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
+		fprintf(stderr, "  radio-rx-fd: %d (%s)\n", ctx.ulama_rx.fd,
+			ctx.ulama_rx.fd >= 0 ? "poll active" : "poll DISABLED — check UNOW init");
 	}
 
 	struct pollfd pfds[2];

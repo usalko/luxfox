@@ -153,20 +153,30 @@ parse_vcpd_args() {
         value=$(echo "$value" | sed 's/#.*//' | xargs)
         [ -z "$value" ] && continue
         case "$key" in
-            autostart) [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --autostart" ;;
-            verbose)   [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --verbose" ;;
-            source)    VCPD_ARGS="$VCPD_ARGS --source $value" ;;
-            bitrate)   VCPD_ARGS="$VCPD_ARGS --bitrate $value" ;;
-            width)     VCPD_ARGS="$VCPD_ARGS --width $value" ;;
-            height)    VCPD_ARGS="$VCPD_ARGS --height $value" ;;
-            fps)       VCPD_ARGS="$VCPD_ARGS --fps $value" ;;
-            transport) VCPD_ARGS="$VCPD_ARGS --transport $value" ;;
-            iface)     VCPD_ARGS="$VCPD_ARGS --iface $value" ;;
-            node)      VCPD_ARGS="$VCPD_ARGS --node $value" ;;
-            dst_node)  VCPD_ARGS="$VCPD_ARGS --dst-node $value" ;;
-            stream_id) VCPD_ARGS="$VCPD_ARGS --stream-id $value" ;;
-            peer)      VCPD_ARGS="$VCPD_ARGS --peer $value" ;;
-            listen)    VCPD_ARGS="$VCPD_ARGS --listen $value" ;;
+            autostart)          [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --autostart" ;;
+            verbose)            [ "$value" = "true" ] && VCPD_ARGS="$VCPD_ARGS --verbose" ;;
+            source)             VCPD_ARGS="$VCPD_ARGS --source $value" ;;
+            bitrate)            VCPD_ARGS="$VCPD_ARGS --bitrate $value" ;;
+            width)              VCPD_ARGS="$VCPD_ARGS --width $value" ;;
+            height)             VCPD_ARGS="$VCPD_ARGS --height $value" ;;
+            fps)                VCPD_ARGS="$VCPD_ARGS --fps $value" ;;
+            gop)                VCPD_ARGS="$VCPD_ARGS --gop $value" ;;
+            transport)          VCPD_ARGS="$VCPD_ARGS --transport $value" ;;
+            iface)              VCPD_ARGS="$VCPD_ARGS --iface $value" ;;
+            node)               VCPD_ARGS="$VCPD_ARGS --node $value" ;;
+            dst_node)           VCPD_ARGS="$VCPD_ARGS --dst-node $value" ;;
+            dst_mac)            VCPD_ARGS="$VCPD_ARGS --dst-mac $value" ;;
+            stream_id)          VCPD_ARGS="$VCPD_ARGS --stream-id $value" ;;
+            peer)               VCPD_ARGS="$VCPD_ARGS --peer $value" ;;
+            listen)             VCPD_ARGS="$VCPD_ARGS --listen $value" ;;
+            lts_mtu)            VCPD_ARGS="$VCPD_ARGS --lts-mtu $value" ;;
+            reliable)           VCPD_ARGS="$VCPD_ARGS --reliable $value" ;;
+            reliable_threshold) VCPD_ARGS="$VCPD_ARGS --reliable-threshold $value" ;;
+            fec)                VCPD_ARGS="$VCPD_ARGS --fec $value" ;;
+            pace_us)            VCPD_ARGS="$VCPD_ARGS --pace-us $value" ;;
+            ack_timeout_us)     VCPD_ARGS="$VCPD_ARGS --ack-timeout $value" ;;
+            ack_retry)          VCPD_ARGS="$VCPD_ARGS --ack-retry $value" ;;
+            vps_repeat)         VCPD_ARGS="$VCPD_ARGS --vps-repeat $value" ;;
         esac
     done < "$VCPD_CONF"
 }

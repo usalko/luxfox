@@ -179,7 +179,7 @@ int unow_iface_open_pcap(const char *iface, pcap_t **out_handle, int *out_datali
 		pcap_close(handle);
 		return -1;
 	}
-	status = pcap_set_timeout(handle, 100);
+	status = pcap_set_timeout(handle, 1);
 	if (status != 0) {
 		unow_set_error(error_buf, error_buf_len, "pcap_set_timeout failed: %s", pcap_geterr(handle));
 		pcap_close(handle);
