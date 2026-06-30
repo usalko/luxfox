@@ -70,9 +70,12 @@ all: radiod-build
 	@echo "build $(PKG_NAME) done";
 
 radiod-build: $(TARGET_BIN)
-	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc $(PKG_OUT)/root/etc/init.d
+	@mkdir -p $(PKG_OUT)/bin $(PKG_OUT)/etc/init.d $(PKG_OUT)/root/etc/init.d
 	@cp -f $(TARGET_BIN) $(PKG_OUT)/bin/
-	@if [ -f $(PKG_SCRIPT_DIR)/S96radiod ]; then cp -f $(PKG_SCRIPT_DIR)/S96radiod $(PKG_OUT)/root/etc/init.d/; fi
+	@if [ -f $(PKG_SCRIPT_DIR)/S96radiod ]; then \
+		cp -f $(PKG_SCRIPT_DIR)/S96radiod $(PKG_OUT)/etc/init.d/; \
+		cp -f $(PKG_SCRIPT_DIR)/S96radiod $(PKG_OUT)/root/etc/init.d/; \
+	fi
 	@if [ -f $(PKG_CONFIG_DIR)/radiod.conf ]; then cp -f $(PKG_CONFIG_DIR)/radiod.conf $(PKG_OUT)/etc/; fi
 
 ULAMA_VERSION_HDR := $(ULAMA_ROOT)/include/ulama/ulama_version.h

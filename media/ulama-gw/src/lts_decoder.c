@@ -103,6 +103,7 @@ bool lts_decoder_insert(lts_decoder_t *dec, const lts_packet_t *pkt, uint64_t no
 			dec->next_emit = pkt->pkt_seq;
 			for (int i = 0; i < dec->window_size; i++)
 				dec->slots[i].occupied = false;
+			dec->keyframe_flushes++;
 		}
 	}
 

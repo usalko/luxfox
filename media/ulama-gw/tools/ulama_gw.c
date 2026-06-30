@@ -159,6 +159,14 @@ typedef struct {
 	uint32_t lts_rx_total;
 	uint64_t lts_payload_bytes;
 	uint32_t lts_stale;
+	uint32_t lts_keyframe_flushes;
+	/* NAL type breakdown: ok = assembled+sent, drop = discarded */
+	uint32_t nal_ok_idr;
+	uint32_t nal_ok_param;
+	uint32_t nal_ok_p;
+	uint32_t nal_drop_idr;
+	uint32_t nal_drop_p;
+	uint32_t cascade_out_frames;
 	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
 
@@ -411,10 +419,12 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 
 	if (nt >= 32 && nt <= 34) {
 		cache_hevc_param(&ctx->param_cache, nt, a->buf, a->len);
-	}
-
-	if (nt == 19 || nt == 20) {
+		ctx->stats.nal_ok_param++;
+	} else if (nt == 19 || nt == 20) {
 		inject_cached_params(ctx, src_u16);
+		ctx->stats.nal_ok_idr++;
+	} else {
+		ctx->stats.nal_ok_p++;
 	}
 
 	cascade_frame_view_t cf = {
@@ -427,6 +437,7 @@ static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
 	};
 	send_cascade_frame(ctx, &cf);
 	ctx->stats.nal_complete++;
+	ctx->stats.cascade_out_frames++;
 	ctx->stats.video_bytes_out += a->len;
 
 	if (ctx->verbose)
@@ -443,6 +454,14 @@ static void drop_nal(app_ctx_t *ctx, uint16_t expected, uint16_t got)
 	nal_assembler_t *a = &ctx->nal_asm;
 	ctx->stats.nal_dropped++;
 	ctx->stats.lts_gaps++;
+
+	if (a->len > 0) {
+		uint8_t nt = hevc_nal_type(a->buf, a->len);
+		if (nt == 19 || nt == 20)
+			ctx->stats.nal_drop_idr++;
+		else
+			ctx->stats.nal_drop_p++;
+	}
 
 	uint16_t pkt_count = (uint16_t)(got - a->first_seq);
 	if (pkt_count <= 1)
@@ -942,12 +961,13 @@ int main(int argc, char *argv[])
 			uint32_t pps_in = (uint32_t)(s->lts_rx_total * 1000 / (dt > 0 ? dt : 1));
 			uint32_t pps_unique = (uint32_t)(s->lts_unique * 1000 / (dt > 0 ? dt : 1));
 			uint32_t bps_in = (uint32_t)(s->lts_payload_bytes * 8000 / (dt > 0 ? dt : 1));
-			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
+			char _ts[9]; { time_t _t = time(NULL); strftime(_ts, sizeof(_ts), "%H:%M:%S", localtime(&_t)); }
+			fprintf(stderr, "%s [stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
 				"LTS unique=%u dup=%u stale=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
 				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u | "
 				"pps_in=%u pps_uniq=%u bps_in=%u Kbit/s\n",
-				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
+				_ts, s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->lts_unique, s->lts_dup, s->lts_stale, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
 				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
@@ -961,7 +981,7 @@ int main(int argc, char *argv[])
 				if (ns->rx_pkts == 0 && ns->tx_pkts == 0)
 					continue;
 				if (!any_node) {
-					fprintf(stderr, "[nodes]");
+					fprintf(stderr, "%s [nodes]", _ts);
 					any_node = true;
 				}
 				int node_rssi = ns->rssi_count > 0
@@ -973,25 +993,29 @@ int main(int argc, char *argv[])
 			if (any_node)
 				fprintf(stderr, "\n");
 
+			/* Capture keyframe_flushes from decoder before memset wipes stats */
+			s->lts_keyframe_flushes = ctx.lts_dec.keyframe_flushes;
+			ctx.lts_dec.keyframe_flushes = 0;
+
+			uint32_t fps_x10 = (uint32_t)(s->cascade_out_frames * 10000 / (dt > 0 ? dt : 1));
+			fprintf(stderr, "%s [pipeline] keyfl=%u | "
+				"ok: idr=%u param=%u p=%u | "
+				"drop: idr=%u p=%u | "
+				"cache=%s | fps_out=%u.%u\n",
+				_ts, s->lts_keyframe_flushes,
+				s->nal_ok_idr, s->nal_ok_param, s->nal_ok_p,
+				s->nal_drop_idr, s->nal_drop_p,
+				ctx.param_cache.valid ? "OK" : "MISS",
+				fps_x10 / 10, fps_x10 % 10);
+
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
 
 		frag_reassembly_expire(&ctx.reassembly, ts);
 
-		lts_packet_t lts_out[16];
-		size_t lts_n = lts_decoder_emit(&ctx.lts_dec, lts_out, 16, ts);
-		for (size_t i = 0; i < lts_n; i++) {
-			cascade_frame_view_t cf = {
-				.version = CASCADE_FRAME_VERSION,
-				.src = ctx.lts_video_src,
-				.dst = 0,
-				.traffic_class = CASCADE_CLASS_VIDEO,
-				.payload = lts_out[i].payload,
-				.payload_len = lts_out[i].payload_len,
-			};
-			send_cascade_frame(&ctx, &cf);
-		}
+		/* Flush deadline-expired LTS slots through the NAL assembler */
+		emit_lts_to_cascade(&ctx, ctx.lts_video_src);
 	}
 
 	fprintf(stderr, "ulama-gw: shutting down\n");

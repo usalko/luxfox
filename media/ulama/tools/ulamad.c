@@ -627,8 +627,9 @@ int main(int argc, char **argv)
 		time_t stats_now = time(NULL);
 		if (stats_now - last_stats >= 5) {
 			if (cfg.transport_kind == ULAMA_TRANSPORT_KIND_UNOW) {
-				fprintf(stderr, "[stats] accepted=%u keepalive=%u (uptime=%lds)\n",
-					(unsigned int)accepted,
+				char _ts[9]; strftime(_ts, sizeof(_ts), "%H:%M:%S", localtime(&stats_now));
+				fprintf(stderr, "%s [stats] accepted=%u keepalive=%u (uptime=%lds)\n",
+					_ts, (unsigned int)accepted,
 					(unsigned int)keepalive_count,
 					(long)(stats_now - (last_stats - 5)));
 			}

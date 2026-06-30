@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 void radio_stats_init(radio_stats_t *st, int64_t now_us)
 {
@@ -60,11 +61,12 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	tx_pct = elapsed_us > 0 ? (double)st->tx_time_us * 100.0 / (double)elapsed_us : 0.0;
 	rx_pct = elapsed_us > 0 ? (double)st->rx_time_us * 100.0 / (double)elapsed_us : 0.0;
 
+	char ts[9]; { time_t _t = time(NULL); strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&_t)); }
 	fprintf(stderr,
-		"[radiod stats] %.1fs: cycles=%u tx_pkt=%u rx_pkt=%u "
+		"%s [radiod stats] %.1fs: cycles=%u tx_pkt=%u rx_pkt=%u "
 		"tx%%=%.1f rx%%=%.1f "
 		"prio[C=%u T=%u V=%u B=%u] ",
-		elapsed_s,
+		ts, elapsed_s,
 		st->cycles,
 		st->tx_packets,
 		rxd != NULL ? rxd->stats.rx_dispatched : 0,

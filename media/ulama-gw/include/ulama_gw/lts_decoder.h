@@ -50,6 +50,7 @@ typedef struct {
 	bool first_packet;
 	int window_size;
 	uint64_t emit_deadline_ms;
+	uint32_t keyframe_flushes;
 } lts_decoder_t;
 
 bool lts_decode_packet(const uint8_t *data, size_t len, lts_packet_t *out);

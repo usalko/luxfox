@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -371,6 +372,64 @@ static int run_benchmark(vcpd_ctx_t *ctx)
 	return 0;
 }
 
+static void vcpd_load_config(vcpd_ctx_t *ctx, const char *path)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		fprintf(stderr, "vcpd: cannot open config %s: %s\n", path, strerror(errno));
+		return;
+	}
+	char line[512];
+	while (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = '\0';
+		char *hash = strchr(line, '#');
+		if (hash)
+			*hash = '\0';
+		char *eq = strchr(line, '=');
+		if (!eq)
+			continue;
+		*eq = '\0';
+		char *key = line;
+		char *val = eq + 1;
+		while (isspace((unsigned char)*key)) key++;
+		while (isspace((unsigned char)*val)) val++;
+		size_t klen = strlen(key);
+		while (klen > 0 && isspace((unsigned char)key[klen - 1]))
+			key[--klen] = '\0';
+		size_t vlen = strlen(val);
+		while (vlen > 0 && isspace((unsigned char)val[vlen - 1]))
+			val[--vlen] = '\0';
+		if (klen == 0 || vlen == 0)
+			continue;
+
+		if      (!strcmp(key, "source"))             strncpy(ctx->video.device, val, sizeof(ctx->video.device) - 1);
+		else if (!strcmp(key, "bitrate"))            ctx->video.bitrate_kbps = atoi(val);
+		else if (!strcmp(key, "width"))              ctx->video.width = atoi(val);
+		else if (!strcmp(key, "height"))             ctx->video.height = atoi(val);
+		else if (!strcmp(key, "fps"))                ctx->video.fps = atoi(val);
+		else if (!strcmp(key, "gop"))                ctx->video.gop = atoi(val);
+		else if (!strcmp(key, "transport"))          strncpy(ctx->transport_str, val, sizeof(ctx->transport_str) - 1);
+		else if (!strcmp(key, "iface"))              strncpy(ctx->iface, val, sizeof(ctx->iface) - 1);
+		else if (!strcmp(key, "node"))               ctx->node_id = (uint8_t)atoi(val);
+		else if (!strcmp(key, "dst_node"))           ctx->dst_node = (uint8_t)atoi(val);
+		else if (!strcmp(key, "dst_mac"))            strncpy(ctx->dst_mac_str, val, sizeof(ctx->dst_mac_str) - 1);
+		else if (!strcmp(key, "stream_id"))          ctx->stream_id = (uint8_t)atoi(val);
+		else if (!strcmp(key, "peer"))               strncpy(ctx->peer_addr, val, sizeof(ctx->peer_addr) - 1);
+		else if (!strcmp(key, "listen"))             strncpy(ctx->listen_addr, val, sizeof(ctx->listen_addr) - 1);
+		else if (!strcmp(key, "lts_mtu"))            ctx->lts_mtu = atoi(val);
+		else if (!strcmp(key, "reliable"))           ctx->reliable_mode = atoi(val);
+		else if (!strcmp(key, "reliable_threshold")) ctx->reliable_threshold = atoi(val);
+		else if (!strcmp(key, "fec"))                ctx->fec_group = atoi(val);
+		else if (!strcmp(key, "pace_us"))            ctx->pace_us = (unsigned int)atoi(val);
+		else if (!strcmp(key, "ack_timeout_us"))     ctx->ack_timeout_us = (uint32_t)atoi(val);
+		else if (!strcmp(key, "ack_retry"))          ctx->ack_max_retry = (uint32_t)atoi(val);
+		else if (!strcmp(key, "vps_repeat"))         ctx->param_dup_count = atoi(val);
+		else if (!strcmp(key, "autostart"))          ctx->autostart = !strcmp(val, "true");
+		else if (!strcmp(key, "verbose"))            ctx->verbose = !strcmp(val, "true");
+	}
+	fclose(f);
+}
+
 int main(int argc, char *argv[])
 {
 	vcpd_ctx_t ctx;
@@ -428,6 +487,7 @@ int main(int argc, char *argv[])
 		{"lts-mtu",              required_argument, NULL, 'M'},
 		{"benchmark",            required_argument, NULL, 'B'},
 		{"vps-repeat",           required_argument, NULL, 'D'},
+		{"config",               required_argument, NULL, 'C'},
 		{"version",              no_argument,       NULL, 'V'},
 		{"verbose",              no_argument,       NULL, 'v'},
 		{"help",         no_argument,       NULL, 'h'},
@@ -436,6 +496,19 @@ int main(int argc, char *argv[])
 
 	int opt;
 	ctx.test_frames = 50;
+
+	/* Pre-scan for --config so that config file acts as defaults
+	 * and all other CLI args can override it regardless of order. */
+	for (int i = 1; i < argc - 1; i++) {
+		if (!strcmp(argv[i], "--config") || !strcmp(argv[i], "-C")) {
+			vcpd_load_config(&ctx, argv[i + 1]);
+			break;
+		}
+		if (!strncmp(argv[i], "--config=", 9)) {
+			vcpd_load_config(&ctx, argv[i] + 9);
+			break;
+		}
+	}
 
 	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:T:F:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
@@ -471,6 +544,7 @@ int main(int argc, char *argv[])
 		case 'M': ctx.lts_mtu = atoi(optarg); break;
 		case 'B': ctx.benchmark_kbps = atoi(optarg); break;
 		case 'D': ctx.param_dup_count = atoi(optarg); break;
+		case 'C': break; /* already handled in pre-scan above */
 		case 'V':
 			fprintf(stderr, "vcpd: build #%d (%s@%s) %s\n",
 				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
@@ -548,11 +622,29 @@ int main(int argc, char *argv[])
 	lts_retx_buf_init(ctx.retx_buf);
 	uvcp_session_init(&ctx.uvcp_sess, UVCP_LEASE_DEFAULT_MS);
 
-	fprintf(stderr, "vcpd: build #%d (%s@%s) %s lts_mtu=%zu started (node=%u, dst=%u, stream=%u, transport=%s, pace=%u us, reliable=%d thresh=%d, ack=%u us/%u retry, fec=%d)\n",
-		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE, ctx.lts_enc.max_payload,
-		ctx.node_id, ctx.dst_node, ctx.stream_id, ulama_transport_kind_name(tk),
-		ctx.pace_us, ctx.reliable_mode, ctx.reliable_threshold,
-		ctx.ack_timeout_us, ctx.ack_max_retry, ctx.fec_group);
+	fprintf(stderr,
+		"vcpd: build #%d (%s@%s) %s\n"
+		"vcpd: --- config ---\n"
+		"vcpd:   source     = %s\n"
+		"vcpd:   video      = %dx%d  fps=%d  gop=%d  bitrate=%d Kbit/s\n"
+		"vcpd:   transport  = %s  node=%u → dst=%u  stream=%u\n"
+		"vcpd:   lts_mtu    = %zu B\n"
+		"vcpd:   pace       = %u us\n"
+		"vcpd:   reliable   = %d  threshold=%d  ack=%u us / %u retry\n"
+		"vcpd:   fec        = %d\n"
+		"vcpd:   vps_repeat = %d\n"
+		"vcpd:   autostart  = %s\n"
+		"vcpd: ---------------\n",
+		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE,
+		ctx.video.device,
+		ctx.video.width, ctx.video.height, ctx.video.fps, ctx.video.gop, ctx.video.bitrate_kbps,
+		ulama_transport_kind_name(tk), ctx.node_id, ctx.dst_node, ctx.stream_id,
+		ctx.lts_enc.max_payload,
+		ctx.pace_us,
+		ctx.reliable_mode, ctx.reliable_threshold, ctx.ack_timeout_us, ctx.ack_max_retry,
+		ctx.fec_group,
+		ctx.param_dup_count,
+		ctx.autostart ? "true" : "false");
 
 	if (ctx.benchmark_kbps > 0) {
 		int rc = run_benchmark(&ctx);
@@ -586,7 +678,12 @@ int main(int argc, char *argv[])
 	uint32_t diag_video_reads = 0;
 	uint32_t diag_nals = 0;
 	uint32_t diag_nal_bytes = 0;
+	uint32_t diag_nal_idr = 0;
+	uint32_t diag_nal_p = 0;
+	uint32_t diag_nal_param = 0;
 	uint32_t diag_lts_pkts = 0;
+	uint32_t diag_lts_idr = 0;
+	uint32_t diag_lts_param = 0;
 	uint32_t diag_tx_bytes = 0;
 	uint32_t diag_tx_ok = 0;
 	uint32_t diag_tx_fail = 0;
@@ -612,18 +709,28 @@ int main(int argc, char *argv[])
 
 		uint64_t diag_now = now_ms();
 		if (diag_now - diag_last_ms >= 5000) {
-			fprintf(stderr, "vcpd: [diag] polls=%u nfds=%d video_polled=%u video_reads=%u running=%d pipe_fd=%d"
-				" | pipe=%u B nals=%u nal_bytes=%u lts=%u tx=%u/%u B fec=%u\n",
-				diag_polls, nfds, diag_poll_video, diag_video_reads,
+			char _ts[9]; { time_t _t = time(NULL); strftime(_ts, sizeof(_ts), "%H:%M:%S", localtime(&_t)); }
+			fprintf(stderr, "%s vcpd: [diag] polls=%u nfds=%d video=%u/%u running=%d pipe_fd=%d"
+				" | pipe=%u B"
+				" | nals=%u(idr=%u p=%u prm=%u) %u B"
+				" | lts=%u(idr=%u prm=%u) tx=%u/%u B fec=%u\n",
+				_ts, diag_polls, nfds, diag_poll_video, diag_video_reads,
 				ctx.video.running, ctx.video.pipe_fd,
-				diag_pipe_bytes, diag_nals, diag_nal_bytes,
-				diag_lts_pkts, diag_tx_ok, diag_tx_bytes, diag_fec_pkts);
+				diag_pipe_bytes,
+				diag_nals, diag_nal_idr, diag_nal_p, diag_nal_param, diag_nal_bytes,
+				diag_lts_pkts, diag_lts_idr, diag_lts_param,
+				diag_tx_ok, diag_tx_bytes, diag_fec_pkts);
 			diag_polls = 0;
 			diag_poll_video = 0;
 			diag_video_reads = 0;
 			diag_nals = 0;
 			diag_nal_bytes = 0;
+			diag_nal_idr = 0;
+			diag_nal_p = 0;
+			diag_nal_param = 0;
 			diag_lts_pkts = 0;
+			diag_lts_idr = 0;
+			diag_lts_param = 0;
 			diag_tx_bytes = 0;
 			diag_tx_ok = 0;
 			diag_tx_fail = 0;
@@ -755,6 +862,14 @@ int main(int argc, char *argv[])
 				/* HEVC NAL type from first byte after start code */
 				uint8_t hevc_nal_type = (nal_data[sc1_len] >> 1) & 0x3f;
 
+				/* Track NAL type for diagnostics */
+				if (hevc_nal_type == 19 || hevc_nal_type == 20)
+					diag_nal_idr++;
+				else if (hevc_nal_type >= 32 && hevc_nal_type <= 34)
+					diag_nal_param++;
+				else
+					diag_nal_p++;
+
 				/* Cache VPS(32)/SPS(33)/PPS(34) */
 				if (hevc_nal_type >= 32 && hevc_nal_type <= 34 &&
 				    nal_size <= PARAM_NAL_MAX_SIZE) {
@@ -776,6 +891,7 @@ int main(int argc, char *argv[])
 							size_t np = lts_encoder_encode(&ctx.lts_enc,
 								ctx.cached_params[p], ctx.cached_params_len[p],
 								LTS_ENC_FLAG_KEYFRAME, pp, 4);
+							diag_lts_param += (uint32_t)np;
 							for (size_t i = 0; i < np; i++) {
 								lts_retx_buf_store(ctx.retx_buf, &pp[i]);
 								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
@@ -797,6 +913,8 @@ int main(int argc, char *argv[])
 				size_t npkts = lts_encoder_encode(&ctx.lts_enc, nal_data, nal_size,
 								  is_idr ? LTS_ENC_FLAG_KEYFRAME : 0,
 								  lts_pkts, max_pkts);
+				if (is_idr)
+					diag_lts_idr += (uint32_t)npkts;
 
 				bool use_reliable = (ctx.reliable_mode == 2) ||
 					(ctx.reliable_mode == 3 && (int)npkts >= ctx.reliable_threshold);

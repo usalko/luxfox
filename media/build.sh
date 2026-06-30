@@ -49,13 +49,18 @@ stage_project_out() {
         cp -rf "$out_dir/lib/"* "$OEM_STAGING/usr/lib/" 2>/dev/null || true
     fi
 
-    # Configs and init scripts → rootfs only
+    # Configs and init scripts → rootfs staging
+    # out/etc/     — flat config files and init.d/ (deployed to /etc/ on device)
+    # out/root/    — mirrors the on-device root filesystem layout directly
     if [ -d "$out_dir/etc" ]; then
         mkdir -p "$MEDIA_ROOT_STAGING/etc"
         cp -rf "$out_dir/etc/"* "$MEDIA_ROOT_STAGING/etc/"
-        find "$MEDIA_ROOT_STAGING/etc/init.d" -maxdepth 1 -type f -name 'S*' \
-            -exec chmod +x {} \; 2>/dev/null || true
     fi
+    if [ -d "$out_dir/root" ]; then
+        cp -rf "$out_dir/root/"* "$MEDIA_ROOT_STAGING/"
+    fi
+    find "$MEDIA_ROOT_STAGING/etc/init.d" -maxdepth 1 -type f -name 'S*' \
+        -exec chmod +x {} \; 2>/dev/null || true
 }
 
 ##############################################################################
