@@ -29,6 +29,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <pthread.h>
@@ -114,6 +115,7 @@ typedef struct {
 
 	/* Ring buffer used in camera mode; NULL in test-pattern mode. */
 	video_ring_t      *ring;
+
 } mpp_ctx_t;
 
 /* ------------------------------------------------------------------ timing */
@@ -309,6 +311,46 @@ static void mpp_update_actual_fps(mpp_ctx_t *ctx, const struct v4l2_streamparm *
 	ctx->actual_fps     = (tpf_den + tpf_num / 2) / tpf_num;
 }
 
+/* Query VIDIOC_ENUM_FRAMEINTERVALS and return the supported fps value
+ * closest to req_fps.  Falls back to req_fps if enumeration is unavailable. */
+static int v4l2_snap_fps(int fd, uint32_t pixfmt, uint32_t w, uint32_t h, int req_fps)
+{
+	int best_fps  = 0;
+	int best_diff = INT_MAX;
+
+	struct v4l2_frmivalenum fi;
+	memset(&fi, 0, sizeof(fi));
+	fi.pixel_format = pixfmt;
+	fi.width        = w;
+	fi.height       = h;
+
+	for (fi.index = 0; xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fi) == 0; fi.index++) {
+		int fps = 0;
+		if (fi.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+			if (fi.discrete.numerator > 0)
+				fps = (int)(fi.discrete.denominator / fi.discrete.numerator);
+			int diff = abs(fps - req_fps);
+			if (fps > 0 && diff < best_diff) { best_diff = diff; best_fps = fps; }
+		} else {
+			/* stepwise / continuous: check min and max endpoints */
+			int fps_min = 0, fps_max = 0;
+			if (fi.stepwise.max.numerator > 0)
+				fps_min = (int)(fi.stepwise.max.denominator / fi.stepwise.max.numerator);
+			if (fi.stepwise.min.numerator > 0)
+				fps_max = (int)(fi.stepwise.min.denominator / fi.stepwise.min.numerator);
+			int d1 = fps_min > 0 ? abs(fps_min - req_fps) : INT_MAX;
+			int d2 = fps_max > 0 ? abs(fps_max - req_fps) : INT_MAX;
+			if (fps_min > 0 && d1 < best_diff) { best_diff = d1; best_fps = fps_min; }
+			if (fps_max > 0 && d2 < best_diff) { best_diff = d2; best_fps = fps_max; }
+		}
+	}
+
+	if (best_fps > 0 && best_fps != req_fps)
+		fprintf(stderr, "vcpd: [mpp] fps snap: requested=%d → %d (nearest supported)\n",
+			req_fps, best_fps);
+	return best_fps > 0 ? best_fps : req_fps;
+}
+
 static int v4l2_open(mpp_ctx_t *ctx)
 {
 	struct v4l2_capability      cap;
@@ -334,10 +376,13 @@ static int v4l2_open(mpp_ctx_t *ctx)
 	ctx->actual_width  = fmt.fmt.pix.width;
 	ctx->actual_height = fmt.fmt.pix.height;
 
+	int snapped_fps = v4l2_snap_fps(ctx->v4l2_fd, V4L2_PIX_FMT_MJPEG,
+					ctx->actual_width, ctx->actual_height,
+					ctx->src->fps > 0 ? ctx->src->fps : 25);
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	parm.parm.capture.timeperframe.numerator   = 1;
-	parm.parm.capture.timeperframe.denominator = (unsigned)ctx->src->fps;
+	parm.parm.capture.timeperframe.denominator = (unsigned)snapped_fps;
 	if (xioctl(ctx->v4l2_fd, VIDIOC_S_PARM, &parm) == 0) {
 		struct v4l2_streamparm actual = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
 		if (xioctl(ctx->v4l2_fd, VIDIOC_G_PARM, &actual) == 0)
@@ -457,12 +502,14 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stRcAttr.enRcMode                            = VENC_RC_MODE_H265CBR;
 	chn_attr.stRcAttr.stH265Cbr.u32Gop                   = (RK_U32)(ctx->src->gop > 0 ? ctx->src->gop : 5);
 	chn_attr.stRcAttr.stH265Cbr.u32BitRate                = (RK_U32)ctx->src->bitrate_kbps;
-	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen       = 1;
-	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum       = (RK_U32)ctx->src->fps;
-	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen        =
-		ctx->actual_fps_den > 0 ? ctx->actual_fps_den : 1;
-	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum        =
-		ctx->actual_fps_num > 0 ? ctx->actual_fps_num : (RK_U32)ctx->src->fps;
+	/* src and dst fps must match — no HW frame dropping.
+	 * We already snapped to a supported discrete fps in v4l2_snap_fps(). */
+	RK_U32 enc_fps_num = ctx->actual_fps_num > 0 ? ctx->actual_fps_num : (RK_U32)(ctx->src->fps > 0 ? ctx->src->fps : 25);
+	RK_U32 enc_fps_den = ctx->actual_fps_den > 0 ? ctx->actual_fps_den : 1;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateDen       = enc_fps_den;
+	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum       = enc_fps_num;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen        = enc_fps_den;
+	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum        = enc_fps_num;
 
 	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
 	if (ret != RK_SUCCESS) { RK_LOGE("RK_MPI_VENC_CreateChn failed %#X", ret); return ret; }
