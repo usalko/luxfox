@@ -775,7 +775,7 @@ int main(int argc, char *argv[])
 							lts_encoded_packet_t pp[4];
 							size_t np = lts_encoder_encode(&ctx.lts_enc,
 								ctx.cached_params[p], ctx.cached_params_len[p],
-								0, pp, 4);
+								LTS_ENC_FLAG_KEYFRAME, pp, 4);
 							for (size_t i = 0; i < np; i++) {
 								lts_retx_buf_store(ctx.retx_buf, &pp[i]);
 								if (pp[i].len <= ULAMA_FRAME_MAX_PAYLOAD)
@@ -793,8 +793,10 @@ int main(int argc, char *argv[])
 				lts_encoded_packet_t lts_pkts[64];
 				size_t max_pkts = nal_size / LTS_ENC_MAX_PAYLOAD + 2;
 				if (max_pkts > 64) max_pkts = 64;
+				bool is_idr = (hevc_nal_type == 19 || hevc_nal_type == 20);
 				size_t npkts = lts_encoder_encode(&ctx.lts_enc, nal_data, nal_size,
-								  0, lts_pkts, max_pkts);
+								  is_idr ? LTS_ENC_FLAG_KEYFRAME : 0,
+								  lts_pkts, max_pkts);
 
 				bool use_reliable = (ctx.reliable_mode == 2) ||
 					(ctx.reliable_mode == 3 && (int)npkts >= ctx.reliable_threshold);

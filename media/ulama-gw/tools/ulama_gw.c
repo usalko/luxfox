@@ -158,6 +158,7 @@ typedef struct {
 	uint32_t nal_gap_skipped;
 	uint32_t lts_rx_total;
 	uint64_t lts_payload_bytes;
+	uint32_t lts_stale;
 	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
 
@@ -735,7 +736,16 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 				lts_fec_decoder_add_data(&ctx->fec_dec, pkt.pkt_seq, pkt.flags,
 							 pkt.payload, pkt.payload_len);
 			}
-			if (!ctx->stats.lts_seq_valid) {
+			/* Skip stale packets from a previous epoch for seq tracking.
+			 * These are forward large-gap packets rejected by decoder:
+			 * unsigned gap > window*8 AND signed gap >= 0 (ahead in RFC 1982). */
+			uint16_t dec_gap = (uint16_t)(pkt.pkt_seq - ctx->lts_dec.next_emit);
+			bool is_stale = !ctx->lts_dec.first_packet &&
+					dec_gap > (uint16_t)(ctx->lts_dec.window_size * 8) &&
+					(int16_t)(pkt.pkt_seq - ctx->lts_dec.next_emit) >= 0;
+			if (is_stale) {
+				ctx->stats.lts_stale++;
+			} else if (!ctx->stats.lts_seq_valid) {
 				ctx->stats.lts_seq_min = pkt.pkt_seq;
 				ctx->stats.lts_seq_max = pkt.pkt_seq;
 				ctx->stats.lts_seq_valid = true;
@@ -933,12 +943,12 @@ int main(int argc, char *argv[])
 			uint32_t pps_unique = (uint32_t)(s->lts_unique * 1000 / (dt > 0 ? dt : 1));
 			uint32_t bps_in = (uint32_t)(s->lts_payload_bytes * 8000 / (dt > 0 ? dt : 1));
 			fprintf(stderr, "[stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
-				"LTS unique=%u dup=%u range=%u lost=%u | "
+				"LTS unique=%u dup=%u stale=%u range=%u lost=%u | "
 				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
 				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u | "
 				"pps_in=%u pps_uniq=%u bps_in=%u Kbit/s\n",
 				s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
-				s->lts_unique, s->lts_dup, seq_range, lost,
+				s->lts_unique, s->lts_dup, s->lts_stale, seq_range, lost,
 				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
 				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
 				s->burst_gaps, s->single_gaps, s->retx_arrived,

@@ -79,8 +79,27 @@ bool lts_decoder_insert(lts_decoder_t *dec, const lts_packet_t *pkt, uint64_t no
 		dec->next_emit = pkt->pkt_seq;
 		dec->first_packet = false;
 	} else {
-		uint16_t gap = (uint16_t)(pkt->pkt_seq - dec->next_emit);
+		uint16_t gap      = (uint16_t)(pkt->pkt_seq - dec->next_emit);
+		int16_t  sgap     = (int16_t)(pkt->pkt_seq - dec->next_emit);
+
 		if (gap > (uint16_t)(dec->window_size * 8)) {
+			/* Large gap (RFC 1982 direction via signed subtraction):
+			 *   backward (sgap < 0): sender restarted at a lower pkt_seq — reset.
+			 *   forward  (sgap >= 0): stale packet from a previous session that
+			 *     sits far ahead in sequence space — skip silently. */
+			if (sgap < 0) {
+				dec->next_emit = pkt->pkt_seq;
+				for (int i = 0; i < dec->window_size; i++)
+					dec->slots[i].occupied = false;
+			} else {
+				return false;
+			}
+		} else if (sgap > 0 &&
+		           (pkt->flags & LTS_FLAG_KEYFRAME) &&
+		           (pkt->flags & LTS_FLAG_FIRST_OF_FRAME)) {
+			/* New keyframe arrived ahead of next_emit within the normal window.
+			 * Flush buffered state and jump forward: we prefer the freshest
+			 * keyframe over waiting for lost P-frame packets. */
 			dec->next_emit = pkt->pkt_seq;
 			for (int i = 0; i < dec->window_size; i++)
 				dec->slots[i].occupied = false;
