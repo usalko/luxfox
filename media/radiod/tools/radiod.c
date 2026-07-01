@@ -43,8 +43,9 @@
 
 #define TX_SLOT_SIZE          4
 #define RX_SLOT_US            2000
-#define ACK_TIMEOUT_US        8000
-#define ACK_MAX_RETRY         2
+#define ACK_TIMEOUT_US        12000
+#define ACK_MAX_RETRY         6
+#define TX_PACE_US            300
 
 /* ---- Globals ---- */
 
@@ -232,6 +233,8 @@ static void usage(const char *prog)
 		"  -s, --socket PATH     IPC socket path (default: %s)\n"
 		"  -T, --tx-slot N       Max TX packets per slot (default: %u)\n"
 		"  -R, --rx-slot US      RX slot duration in µs (default: %u)\n"
+		"  -K, --ack-timeout US  Reliable ACK timeout in µs (default: %u)\n"
+		"  -Y, --ack-retry N     Reliable max retransmits   (default: %u)\n"
 		"      --relay           Enable mesh relay mode\n"
 		"  -S, --sync            Enable SYNC protocol (TDMA + election)\n"
 		"  -D, --dl-us US        SYNC DL slot duration (default: 2000)\n"
@@ -239,7 +242,8 @@ static void usage(const char *prog)
 		"  -G, --guard-us US     SYNC guard interval (default: 300)\n"
 		"  -v, --verbose         Verbose output\n"
 		"  -h, --help            Show this help\n",
-		prog, RADIO_IPC_SOCK_PATH, TX_SLOT_SIZE, RX_SLOT_US);
+		prog, RADIO_IPC_SOCK_PATH, TX_SLOT_SIZE, RX_SLOT_US,
+		ACK_TIMEOUT_US, ACK_MAX_RETRY);
 }
 
 static bool parse_mac(const char *text, uint8_t mac[6])
@@ -354,7 +358,9 @@ static void master_cycle(radio_sync_t *sync,
 			 const uint8_t own_mac[6],
 			 const uint8_t *default_dst,
 			 const radio_route_table_t *rt,
-			 radio_stats_t *stats)
+			 radio_stats_t *stats,
+			 uint32_t ack_timeout_us,
+			 uint32_t ack_max_retry)
 {
 	int64_t t_now = now_us();
 
@@ -400,7 +406,7 @@ static void master_cycle(radio_sync_t *sync,
 		usleep(sync->guard_us);
 	}
 
-	radio_async_tick(rxd, pcap, ACK_TIMEOUT_US, ACK_MAX_RETRY);
+	radio_async_tick(rxd, pcap, ack_timeout_us, ack_max_retry);
 }
 
 static void slave_cycle(radio_sync_t *sync,
@@ -410,7 +416,9 @@ static void slave_cycle(radio_sync_t *sync,
 			const uint8_t own_mac[6],
 			const uint8_t *default_dst,
 			const radio_route_table_t *rt,
-			radio_stats_t *stats)
+			radio_stats_t *stats,
+			uint32_t ack_timeout_us,
+			uint32_t ack_max_retry)
 {
 	/* Wait for SYNC beacon */
 	int64_t sync_deadline = sync->next_superframe_us > 0
@@ -473,6 +481,8 @@ static void slave_cycle(radio_sync_t *sync,
 	/* Listen until end of superframe */
 	if (sync->next_superframe_us > now_us())
 		radio_rx_slot(rxd, pcap, own_mac, sync->next_superframe_us);
+
+	radio_async_tick(rxd, pcap, ack_timeout_us, ack_max_retry);
 }
 
 static void candidate_cycle(radio_sync_t *sync,
@@ -686,6 +696,7 @@ int main(int argc, char **argv)
 
 	radio_tx_scheduler_init(&sched);
 	radio_rx_dispatcher_init(&rxd, &ipc);
+	rxd.async_max_retry = (uint8_t)(cfg.ack_max_retry > 0U ? cfg.ack_max_retry : 1U);
 	radio_route_table_init(&routes);
 	radio_watchdog_init(&wd, ts);
 	radio_stats_init(&stats, ts);
@@ -795,12 +806,14 @@ int main(int argc, char **argv)
 			case RADIO_ROLE_MASTER:
 				master_cycle(&sync_engine, &sched, &rxd,
 					     pcap_handle, iface_info.mac,
-					     default_dst, &routes, &stats);
+					     default_dst, &routes, &stats,
+					     cfg.ack_timeout_us, cfg.ack_max_retry);
 				break;
 			case RADIO_ROLE_SLAVE:
 				slave_cycle(&sync_engine, &sched, &rxd,
 					    pcap_handle, iface_info.mac,
-					    default_dst, &routes, &stats);
+					    default_dst, &routes, &stats,
+					    cfg.ack_timeout_us, cfg.ack_max_retry);
 				/* SYNC beacon = implicit heartbeat */
 				if (radio_sync_is_synced(&sync_engine))
 					radio_watchdog_feed(&wd, now_us());
@@ -845,6 +858,21 @@ int main(int argc, char **argv)
 					tx_inject_slot(slot, pcap_handle, iface_info.mac,
 					       default_dst, &rxd, &routes));
 				radio_stats_add_tx_packet(&stats, prio);
+
+				/*
+				 * Standalone mode used to blast several video fragments back-to-back
+				 * and only then open the RX slot. Reliable keyframe fragments need
+				 * an ACK from the ground station, but the ACK often collided with the
+				 * remaining burst. Give the peer a short gap after each injected data
+				 * frame, and for reliable packets immediately open a brief RX window so
+				 * the ACK can land before we send the next fragment.
+				 */
+				if (slot->reliability) {
+					int64_t ack_rx_deadline = now_us() + (int64_t)(cfg.ack_timeout_us / 2U);
+					radio_rx_slot(&rxd, pcap_handle, iface_info.mac, ack_rx_deadline);
+				}
+				if (i + 1U < cfg.tx_slot_size)
+					usleep(TX_PACE_US);
 			}
 
 			tx_end = now_us();

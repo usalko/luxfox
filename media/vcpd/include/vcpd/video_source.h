@@ -27,6 +27,8 @@ typedef struct {
 	int width;
 	int height;
 	int fps;
+	bool smartp;
+	int intra_refresh_rows;
 	bool running;
 } video_source_ffmpeg_t;
 
@@ -42,6 +44,8 @@ typedef struct {
 	int height;
 	int fps;
 	int gop;
+	bool smartp;
+	int intra_refresh_rows;
 	bool running;
 	bool test_pattern;
 	void *mpp_ctx;

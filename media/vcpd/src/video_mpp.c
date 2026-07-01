@@ -516,6 +516,13 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 	chn_attr.stRcAttr.stH265Cbr.fr32DstFrameRateNum       = enc_fps_num;
 	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateDen        = enc_fps_den;
 	chn_attr.stRcAttr.stH265Cbr.u32SrcFrameRateNum        = enc_fps_num;
+	chn_attr.stGopAttr.enGopMode                          = ctx->src->smartp
+		? VENC_GOPMODE_SMARTP : VENC_GOPMODE_NORMALP;
+	if (ctx->src->smartp) {
+		chn_attr.stGopAttr.s32VirIdrLen = (RK_S32)(chn_attr.stRcAttr.stH265Cbr.u32Gop > 1
+			? chn_attr.stRcAttr.stH265Cbr.u32Gop / 2 : 1);
+		chn_attr.stGopAttr.u32MaxLtrCount = 1;
+	}
 
 	RK_S32 ret = RK_MPI_VENC_CreateChn(VENC_CHN_ID, &chn_attr);
 	if (ret != RK_SUCCESS) { RK_LOGE("RK_MPI_VENC_CreateChn failed %#X", ret); return ret; }
@@ -532,6 +539,30 @@ static RK_S32 init_venc(mpp_ctx_t *ctx)
 		RK_LOGE("RK_MPI_VENC_StartRecvFrame failed %#X", ret);
 		RK_MPI_VENC_DestroyChn(VENC_CHN_ID);
 		return ret;
+	}
+
+	if (ctx->src->intra_refresh_rows > 0) {
+		VENC_INTRA_REFRESH_S intra_refresh;
+		memset(&intra_refresh, 0, sizeof(intra_refresh));
+		intra_refresh.bRefreshEnable = RK_TRUE;
+		intra_refresh.enIntraRefreshMode = INTRA_REFRESH_ROW;
+		intra_refresh.u32RefreshNum = (RK_U32)ctx->src->intra_refresh_rows;
+		ret = RK_MPI_VENC_SetIntraRefresh(VENC_CHN_ID, &intra_refresh);
+		if (ret != RK_SUCCESS) {
+			fprintf(stderr,
+				"vcpd: [mpp] warning: intra refresh setup failed %#X, continuing without it\n",
+				ret);
+		} else {
+			fprintf(stderr,
+				"vcpd: [mpp] recovery smartp=%s intra_refresh_rows=%d viridr=%d\n",
+				ctx->src->smartp ? "on" : "off",
+				ctx->src->intra_refresh_rows,
+				ctx->src->smartp ? (int)chn_attr.stGopAttr.s32VirIdrLen : 0);
+		}
+	} else {
+		fprintf(stderr,
+			"vcpd: [mpp] recovery smartp=%s intra_refresh=off\n",
+			ctx->src->smartp ? "on" : "off");
 	}
 
 	memset(ctx->venc_packs,  0, sizeof(ctx->venc_packs));

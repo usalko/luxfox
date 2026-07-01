@@ -91,6 +91,7 @@ typedef struct {
 	/* Async reliable TX slots */
 	radio_async_slot_t async_slots[RADIO_ASYNC_SLOTS];
 	uint16_t           async_tx_seq;
+	uint8_t            async_max_retry;
 
 	/* Mesh relay configuration */
 	bool                        relay_enabled;

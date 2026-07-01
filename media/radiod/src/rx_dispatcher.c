@@ -22,6 +22,7 @@ void radio_rx_dispatcher_init(radio_rx_dispatcher_t *rxd,
 		return;
 	memset(rxd, 0, sizeof(*rxd));
 	rxd->ipc = ipc;
+	rxd->async_max_retry = 2U;
 }
 
 void radio_rx_dispatcher_enable_relay(radio_rx_dispatcher_t *rxd,
@@ -205,7 +206,7 @@ static void send_ack_frame(pcap_t *pcap, const uint8_t own_mac[6],
 	ack_len = unow_build_action_frame_ex(
 		ack_pkt, sizeof(ack_pkt),
 		own_mac, dst_mac, seq_bytes, 2U,
-		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_ACK);
+		unow_get_tx_rate_500kbps(), UNOW_VENDOR_SUBTYPE_ACK);
 
 	if (ack_len > 0U)
 		pcap_inject(pcap, ack_pkt, ack_len);
@@ -252,7 +253,7 @@ static void radio_sync_relay_inject(radio_rx_dispatcher_t *rxd,
 	size_t wire_len = unow_build_action_frame_ex(
 		wire, sizeof(wire), own_mac, broadcast,
 		packed, packed_len,
-		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_SYNC);
+		unow_get_tx_rate_500kbps(), UNOW_VENDOR_SUBTYPE_SYNC);
 	if (wire_len > 0U) {
 		pcap_inject(pcap, wire, wire_len);
 		rxd->stats.sync_relayed++;
@@ -477,7 +478,8 @@ int radio_async_store(radio_rx_dispatcher_t *rxd,
 			slot->frame_len = frame_len;
 			slot->seq = seq;
 			slot->sent_us = now_us();
-			slot->attempts_left = 2;
+			slot->attempts_left = rxd->async_max_retry > 0U
+				? rxd->async_max_retry : 2U;
 			slot->active = true;
 			return i;
 		}

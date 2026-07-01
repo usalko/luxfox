@@ -133,6 +133,7 @@ parse_radiod_args() {
             iface)          RADIOD_ARGS="$RADIOD_ARGS --iface $value" ;;
             node_id)        RADIOD_ARGS="$RADIOD_ARGS --node-id $value" ;;
             dst_mac)        RADIOD_ARGS="$RADIOD_ARGS --dst-mac $value" ;;
+            tx_rate_mbps)   RADIOD_ARGS="$RADIOD_ARGS --tx-rate-mbps $value" ;;
             tx_slot_size)   RADIOD_ARGS="$RADIOD_ARGS --tx-slot $value" ;;
             rx_slot_us)     RADIOD_ARGS="$RADIOD_ARGS --rx-slot $value" ;;
             relay)          [ "$value" = "true" ] && RADIOD_ARGS="$RADIOD_ARGS --relay" ;;

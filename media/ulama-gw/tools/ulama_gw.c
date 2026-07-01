@@ -22,6 +22,9 @@
 #include "unow/radio_unow.h"
 #include "unow/unow_wire.h"
 
+#define UVCP_PREFIX "UVCP/1 "
+#define UVCP_PREFIX_LEN 7
+
 static volatile sig_atomic_t g_running = 1;
 
 static void sig_handler(int sig)
@@ -355,16 +358,45 @@ static int16_t seq_delta(uint16_t newer, uint16_t older)
 	return (int16_t)(newer - older);
 }
 
-/* Detect HEVC keyframe (VPS NAL type = 32) in raw bitstream. */
+static bool hevc_nal_is_random_access(uint8_t nal_type)
+{
+	return nal_type == 32 ||
+	       (nal_type >= 16 && nal_type <= 21);
+}
+
+/* Detect a HEVC random-access frame. SmartP / forced recovery may start
+ * directly with IDR/CRA/BLA instead of VPS, so scan the first few Annex-B NALs. */
 static bool video_is_keyframe(const uint8_t *data, size_t len)
 {
-	if (len < 5)
+	if (data == NULL || len < 5)
 		return false;
-	if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
-		return ((data[4] >> 1) & 0x3f) == 32;
-	if (len >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1)
-		return ((data[3] >> 1) & 0x3f) == 32;
+
+	int scanned = 0;
+	for (size_t i = 0; i + 4 < len && scanned < 8; i++) {
+		size_t hdr = 0;
+		if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+			hdr = i + 3;
+		} else if (i + 4 < len && data[i] == 0 && data[i + 1] == 0 &&
+			   data[i + 2] == 0 && data[i + 3] == 1) {
+			hdr = i + 4;
+		} else {
+			continue;
+		}
+		if (hdr >= len)
+			break;
+		if (hevc_nal_is_random_access((data[hdr] >> 1) & 0x3f))
+			return true;
+		scanned++;
+		i = hdr;
+	}
+
 	return false;
+}
+
+static bool payload_is_uvcp_control(const uint8_t *data, size_t len)
+{
+	return data != NULL && len >= UVCP_PREFIX_LEN &&
+		memcmp(data, UVCP_PREFIX, UVCP_PREFIX_LEN) == 0;
 }
 
 static void video_reorder_reset(video_reorder_ctx_t *vr)
@@ -533,13 +565,21 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 	}
 
 	if (keyframe) {
+		/* A keyframe is a clean random-access point: reset ordering to it. */
 		if (!vr->primed || vr->src_u16 != src_u16 || seq_delta(seq, vr->next_seq) != 0)
 			video_reorder_reset(vr);
 		vr->primed = true;
 		vr->src_u16 = src_u16;
 		vr->next_seq = seq;
 	} else if (!vr->primed || vr->src_u16 != src_u16) {
-		return;
+		/* Not yet primed: prime on the FIRST frame from this source, even if it
+		 * is not a keyframe. Hard-gating on keyframes stalls the whole pipeline
+		 * when large IDRs rarely reassemble — the browser decoder simply waits
+		 * for its own keyframe once the stream starts flowing. */
+		video_reorder_reset(vr);
+		vr->primed = true;
+		vr->src_u16 = src_u16;
+		vr->next_seq = seq;
 	}
 
 	if (seq_delta(seq, vr->next_seq) < 0)
@@ -666,6 +706,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	 * in vcpd always sets FRAGMENT even for single-fragment frames, but this
 	 * keeps the gateway correct if that ever changes. */
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
+		if (payload_is_uvcp_control(uf.payload, uf.payload_len))
+			continue;
 		queue_video_frame(ctx, uf.payload, uf.payload_len,
 				 src_u16, uf.seq,
 				 video_is_keyframe(uf.payload, uf.payload_len), now_ms());

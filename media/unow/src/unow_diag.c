@@ -183,7 +183,9 @@ static void unow_send_ack_frame(const uint8_t *dst_mac, uint16_t seq)
 
 	seq_bytes[0] = (uint8_t)(seq >> 8);
 	seq_bytes[1] = (uint8_t)(seq & 0xFFU);
-	ack_len = unow_build_action_frame_ex(ack_pkt, sizeof(ack_pkt), g_unow.iface.mac, dst_mac, seq_bytes, 2U, UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_ACK);
+	ack_len = unow_build_action_frame_ex(ack_pkt, sizeof(ack_pkt),
+		g_unow.iface.mac, dst_mac, seq_bytes, 2U,
+		unow_get_tx_rate_500kbps(), UNOW_VENDOR_SUBTYPE_ACK);
 	if (ack_len > 0U) {
 		pcap_inject(g_unow.pcap, ack_pkt, ack_len);
 		UNOW_LOGT("sent ack seq=%u", seq);
@@ -212,6 +214,12 @@ esp_err_t unow_diag_recv(unow_diag_frame_t *frame, int timeout_ms)
 
 		status = pcap_next_ex(g_unow.pcap, &header, &packet);
 		if (status == 1) {
+			if (header != NULL && header->caplen < header->len) {
+				UNOW_LOGW("truncated capture on %s: caplen=%u len=%u (increase snaplen)",
+					  g_unow.iface.name,
+					  (unsigned int)header->caplen,
+					  (unsigned int)header->len);
+			}
 			if (!unow_parse_action_frame(packet, header->caplen, frame)) {
 				continue;
 			}

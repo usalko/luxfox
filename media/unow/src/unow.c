@@ -139,6 +139,17 @@ void unow_set_tx_rate_500kbps(uint8_t rate_500kbps)
 	pthread_mutex_unlock(&g_unow.lock);
 }
 
+uint8_t unow_get_tx_rate_500kbps(void)
+{
+	uint8_t rate;
+
+	pthread_mutex_lock(&g_unow.lock);
+	rate = g_unow.tx_rate_500kbps;
+	pthread_mutex_unlock(&g_unow.lock);
+
+	return rate > 0U ? rate : UNOW_TX_RATE_1MBPS;
+}
+
 esp_err_t radio_espnow_init(uint8_t node_id)
 {
 	return unow_init_iface(node_id, NULL);

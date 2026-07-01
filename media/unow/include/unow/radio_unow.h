@@ -69,3 +69,4 @@ void radio_espnow_set_rx_callback(radio_espnow_rx_cb_t cb, void *user_ctx);
 void radio_espnow_get_stats(radio_espnow_stats_t *out);
 void unow_set_ack_params(uint32_t timeout_us, uint32_t max_retry);
 void unow_set_tx_rate_500kbps(uint8_t rate_500kbps);
+uint8_t unow_get_tx_rate_500kbps(void);

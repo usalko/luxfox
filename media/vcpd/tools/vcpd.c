@@ -64,7 +64,8 @@ static void usage(const char *prog)
 		"  --width       W          Video width              (default 640)\n"
 		"  --height      H          Video height             (default 480)\n"
 		"  --fps         FPS        Frame rate               (default 25)\n"
-		"  --gop         N          GOP size (1=all IDR)     (adaptive: =fps)\n"
+		"  --gop         N          GOP size (1=all IDR)     (adaptive: ~=3xfps)\n"
+		"  --idri-ms     MS         Force an IDR every N ms  (default 5000, 0=off)\n"
 		"  --transport   udp|unow   ULAMA transport          (default udp)\n"
 		"  --peer        ADDR:PORT  ULAMA TX peer (UDP)      (default 127.0.0.1:5000)\n"
 		"  --listen      ADDR:PORT  ULAMA RX listen (UVCP)   (default 0.0.0.0:5002)\n"
@@ -163,23 +164,59 @@ typedef struct {
 	char dst_mac_str[32];
 	uint32_t ack_timeout_us;
 	uint32_t ack_max_retry;
+	uint32_t idr_interval_ms;
+	uint64_t last_forced_idr_ms;
 	int benchmark_kbps;
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
 #define TX_FAIL_THRESHOLD 10
 
+/*
+ * Video fragment MTU (ULAMA payload bytes per fragment).
+ *
+ * Although ULAMA_FRAME_MAX_PAYLOAD is 2285, the rtl8192eu USB adapter in
+ * monitor mode silently drops injected 802.11 frames whose body approaches the
+ * ~1500-byte netdev MTU. Full-size keyframe fragments (~2.3 KB on the wire) never
+ * reached the air (kf_rx=0 at ~4% airtime, -36 dBm), while small P-frames passed.
+ *
+ * Keep every fragment under the injection ceiling, but NOT so small that ordinary
+ * P-frames (~1.3 KB) split into two fragments — that halved P-frame survival and
+ * dropped frames_rx from ~42 to ~27 at MTU 1200. 1400 keeps a typical P-frame in
+ * a single fragment (wire ~1.45 KB, under the limit) while a ~4.5 KB IDR becomes
+ * ~4 fragments that all fit.
+ */
+#define VIDEO_FRAG_MTU 1400
+
+/*
+ * Extra unreliable copies of every keyframe fragment (total sends = 1 + this).
+ * Video is sent UNRELIABLE: the radiod reliable-ACK path produced a retransmit
+ * storm (thousands of retx, ~87%% ACK timeouts) that congested the link and
+ * raised loss for every frame while keyframes still failed. Plain forward
+ * redundancy — repeating each keyframe fragment in separate passes — protects the
+ * random-access point without any ACK traffic or retransmit feedback loop.
+ */
+#define KEYFRAME_EXTRA_COPIES 2
+
 /* Pack and send one already-built ULAMA frame, tracking consecutive
  * TX failures for the main loop's transport-recovery logic. */
-static bool send_ulama_frame_raw(vcpd_ctx_t *ctx, const uint8_t *frame_buf, size_t frame_len)
+static bool send_ulama_frame_raw_ex(vcpd_ctx_t *ctx, const uint8_t *frame_buf,
+				    size_t frame_len, bool reliable)
 {
-	int rc = ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
+	int rc = reliable
+		? ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len)
+		: ulama_transport_tx_send(&ctx->ulama_tx, frame_buf, frame_len);
 	if (rc >= 0) {
 		tx_fail_count = 0;
 		return true;
 	}
 	tx_fail_count++;
 	return false;
+}
+
+static bool send_ulama_frame_raw(vcpd_ctx_t *ctx, const uint8_t *frame_buf, size_t frame_len)
+{
+	return send_ulama_frame_raw_ex(ctx, frame_buf, frame_len, false);
 }
 
 /* Send a single unfragmented ULAMA_CLASS_VIDEO frame (used for UVCP PONG
@@ -207,26 +244,42 @@ static bool send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	return send_ulama_frame_raw(ctx, frame_buf, frame_len);
 }
 
+static bool hevc_nal_is_random_access(uint8_t nal_type)
+{
+	return nal_type == 32 || /* VPS, commonly prepended to IDR */
+	       (nal_type >= 16 && nal_type <= 21); /* BLA/IDR/CRA */
+}
+
 /*
- * Peek at a raw HEVC bitstream to detect a keyframe (VPS NAL = type 32).
- * The ring slot for a GOP start is structured as:
- *   [00 00 00 01][VPS header byte][...][SPS NAL][PPS NAL][IDR NAL]
- * HEVC NAL type is (byte_after_start_code >> 1) & 0x3F.
- * VPS = 32, SPS = 33, PPS = 34, IDR = 19/20.
+ * Detect a HEVC random-access frame. SmartP / forced recovery may start
+ * directly with IDR/CRA/BLA instead of VPS, so scan the first few Annex-B NALs.
  */
 static bool is_hevc_keyframe(const uint8_t *data, size_t len)
 {
-	if (len < 5)
+	if (data == NULL || len < 5)
 		return false;
-	/* 4-byte start code 00 00 00 01 */
-	if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
-		return ((data[4] >> 1) & 0x3f) == 32;   /* VPS */
-	/* 3-byte start code 00 00 01 */
-	if (len >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1)
-		return ((data[3] >> 1) & 0x3f) == 32;
+
+	int scanned = 0;
+	for (size_t i = 0; i + 4 < len && scanned < 8; i++) {
+		size_t hdr = 0;
+		if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+			hdr = i + 3;
+		} else if (i + 4 < len && data[i] == 0 && data[i + 1] == 0 &&
+			   data[i + 2] == 0 && data[i + 3] == 1) {
+			hdr = i + 4;
+		} else {
+			continue;
+		}
+		if (hdr >= len)
+			break;
+		if (hevc_nal_is_random_access((data[hdr] >> 1) & 0x3f))
+			return true;
+		scanned++;
+		i = hdr;
+	}
+
 	return false;
 }
-
 /*
  * Fragment a complete H.265 frame (one ring slot) into ULAMA frames and send.
  * Each fragment: ULAMA header + up to ULAMA_FRAME_MAX_PAYLOAD bytes payload.
@@ -238,7 +291,8 @@ static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	if (len == 0)
 		return;
 
-	const size_t mtu = ULAMA_FRAME_MAX_PAYLOAD;
+	/* Fragment below the driver injection MTU (see VIDEO_FRAG_MTU). */
+	const size_t mtu = VIDEO_FRAG_MTU;
 	size_t nfrags = (len + mtu - 1) / mtu;
 	if (nfrags > 255) {
 		/* Frame too large — should never happen with VIDEO_RING_SLOT_MAX = 64KB */
@@ -250,39 +304,51 @@ static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	uint16_t seq  = ctx->ulama_seq++;
 	uint8_t  kf_flag = keyframe ? ULAMA_FLAG_VIDEO_KEYFRAME : 0;
 
+	/*
+	 * Video is UNRELIABLE. Keyframes get plain forward redundancy: each fragment
+	 * is transmitted (1 + KEYFRAME_EXTRA_COPIES) times. The copies go out in
+	 * separate whole-frame passes so a burst drop at the driver TX ring cannot
+	 * wipe every copy of the same fragment at once. Receiver de-dups by
+	 * (seq, frag_idx) via the reassembly received_mask.
+	 */
+	size_t passes = keyframe ? (size_t)(1u + KEYFRAME_EXTRA_COPIES) : 1u;
+
 	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
 
-	for (size_t i = 0; i < nfrags; i++) {
-		size_t off   = i * mtu;
-		size_t chunk = (off + mtu <= len) ? mtu : (len - off);
-		bool   last  = (i + 1 == nfrags);
+	if (ctx->verbose)
+		fprintf(stderr,
+			"vcpd: video frame %zu bytes → %zu frags, keyframe=%d copies=%zu\n",
+			len, nfrags, keyframe, passes);
 
-		ulama_frame_view_t uf = {
-			.src_node      = ctx->node_id,
-			.dst_node      = ctx->dst_node,
-			.flags         = ULAMA_FLAG_FRAGMENT | ULAMA_FLAG_DUP_ALLOWED | kf_flag
-					 | (last ? ULAMA_FLAG_LAST_FRAGMENT : 0),
-			.traffic_class = ULAMA_CLASS_VIDEO,
-			.seq           = seq,
-			.frag_idx      = (uint8_t)i,
-			.frag_total    = (uint8_t)nfrags,
-			.ttl           = ULAMA_FRAME_DEFAULT_TTL,
-			.payload       = data + off,
-			.payload_len   = chunk,
-		};
+	for (size_t pass = 0; pass < passes; pass++) {
+		for (size_t i = 0; i < nfrags; i++) {
+			size_t off   = i * mtu;
+			size_t chunk = (off + mtu <= len) ? mtu : (len - off);
+			bool   last  = (i + 1 == nfrags);
 
-		size_t frame_len = 0;
-		if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
-			fprintf(stderr, "vcpd: ulama_frame_pack failed for fragment %zu/%zu\n",
-				i + 1, nfrags);
-			continue;
+			ulama_frame_view_t uf = {
+				.src_node      = ctx->node_id,
+				.dst_node      = ctx->dst_node,
+				.flags         = ULAMA_FLAG_FRAGMENT | ULAMA_FLAG_DUP_ALLOWED | kf_flag
+						 | (last ? ULAMA_FLAG_LAST_FRAGMENT : 0),
+				.traffic_class = ULAMA_CLASS_VIDEO,
+				.seq           = seq,
+				.frag_idx      = (uint8_t)i,
+				.frag_total    = (uint8_t)nfrags,
+				.ttl           = ULAMA_FRAME_DEFAULT_TTL,
+				.payload       = data + off,
+				.payload_len   = chunk,
+			};
+
+			size_t frame_len = 0;
+			if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+				fprintf(stderr, "vcpd: ulama_frame_pack failed for fragment %zu/%zu\n",
+					i + 1, nfrags);
+				continue;
+			}
+
+			(void)send_ulama_frame_raw(ctx, frame_buf, frame_len);
 		}
-
-		if (ctx->verbose && i == 0)
-			fprintf(stderr, "vcpd: video frame %zu bytes → %zu frags, keyframe=%d\n",
-				len, nfrags, keyframe);
-
-		(void)send_ulama_frame_raw(ctx, frame_buf, frame_len);
 	}
 }
 
@@ -323,6 +389,7 @@ static void handle_uvcp_rx(vcpd_ctx_t *ctx)
 			if (!ctx->video.running)
 				vsrc_start(&ctx->video);
 			vsrc_request_idr(&ctx->video);
+			ctx->last_forced_idr_ms = now_ms();
 		}
 
 		if (msg.verb == UVCP_VERB_PING) {
@@ -436,6 +503,9 @@ static void vcpd_load_config(vcpd_ctx_t *ctx, const char *path)
 		else if (!strcmp(key, "height"))             ctx->video.height = atoi(val);
 		else if (!strcmp(key, "fps"))                ctx->video.fps = atoi(val);
 		else if (!strcmp(key, "gop"))                ctx->video.gop = atoi(val);
+		else if (!strcmp(key, "smartp"))             ctx->video.smartp = !strcmp(val, "true");
+		else if (!strcmp(key, "intra_refresh_rows")) ctx->video.intra_refresh_rows = atoi(val);
+		else if (!strcmp(key, "idr_interval_ms"))    ctx->idr_interval_ms = (uint32_t)atoi(val);
 		else if (!strcmp(key, "transport"))          strncpy(ctx->transport_str, val, sizeof(ctx->transport_str) - 1);
 		else if (!strcmp(key, "iface"))              strncpy(ctx->iface, val, sizeof(ctx->iface) - 1);
 		else if (!strcmp(key, "node"))               ctx->node_id = (uint8_t)atoi(val);
@@ -465,6 +535,9 @@ int main(int argc, char *argv[])
 	ctx.video.height = 480;
 	ctx.video.fps = 25;
 	ctx.video.gop = 0;
+	ctx.video.smartp = false;
+	ctx.video.intra_refresh_rows = 0;
+	ctx.idr_interval_ms = 1000;
 	ctx.ack_timeout_us = 2000;
 	ctx.ack_max_retry = 0;
 	ctx.node_id = 2;
@@ -483,6 +556,7 @@ int main(int argc, char *argv[])
 		{"height",    required_argument, NULL, 'H'},
 		{"fps",       required_argument, NULL, 'f'},
 		{"gop",       required_argument, NULL, 'g'},
+		{"idri-ms",   required_argument, NULL, 'I'},
 		{"transport", required_argument, NULL, 't'},
 		{"peer",      required_argument, NULL, 'p'},
 		{"listen",    required_argument, NULL, 'l'},
@@ -521,7 +595,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:t:p:l:i:n:d:S:m:T:F:Vvh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:g:I:t:p:l:i:n:d:S:m:APT:F:K:Y:B:C:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
 #ifndef VCPD_WITH_MPP
@@ -534,6 +608,7 @@ int main(int argc, char *argv[])
 		case 'H': ctx.video.height = atoi(optarg); break;
 		case 'f': ctx.video.fps = atoi(optarg); break;
 		case 'g': ctx.video.gop = atoi(optarg); break;
+		case 'I': ctx.idr_interval_ms = (uint32_t)atoi(optarg); break;
 		case 't': strncpy(ctx.transport_str, optarg, sizeof(ctx.transport_str) - 1); break;
 		case 'p': strncpy(ctx.peer_addr, optarg, sizeof(ctx.peer_addr) - 1); break;
 		case 'l': strncpy(ctx.listen_addr, optarg, sizeof(ctx.listen_addr) - 1); break;
@@ -566,12 +641,36 @@ int main(int argc, char *argv[])
 
 	/* Adaptive defaults based on fps if not explicitly set */
 	int fps = ctx.video.fps > 0 ? ctx.video.fps : 25;
-	if (ctx.video.gop == 0)
-		ctx.video.gop = fps > 5 ? fps : 5;
+	if (ctx.video.gop == 0) {
+		ctx.video.gop = fps > 10 ? 10 : fps;
+		if (ctx.video.gop < 5)
+			ctx.video.gop = 5;
+	}
+	/* Browser-first compatibility mode.
+	 * The current host pipeline/browser path still needs frequent real IDRs.
+	 * On this SDK row intra-refresh is rejected at runtime, and SmartP has been
+	 * observed to produce streams that keep the browser black despite non-zero
+	 * video_out. Force the live transport toward small, regular real IDRs. */
+	if (ctx.video.smartp || ctx.video.intra_refresh_rows > 0 ||
+	    ctx.video.gop > 10 || ctx.idr_interval_ms == 0 || ctx.idr_interval_ms > 1000) {
+		fprintf(stderr,
+			"vcpd: browser compatibility override: smartp=off intra_refresh=0 gop<=10 idr<=1000ms\n");
+		ctx.video.smartp = false;
+		ctx.video.intra_refresh_rows = 0;
+		if (ctx.video.gop > 10)
+			ctx.video.gop = 10;
+		if (ctx.video.gop < 5)
+			ctx.video.gop = 5;
+		if (ctx.idr_interval_ms == 0 || ctx.idr_interval_ms > 1000)
+			ctx.idr_interval_ms = 1000;
+	}
 	if (ctx.ack_max_retry == 0)
 		ctx.ack_max_retry = fps <= 5 ? 5 : 3;
-	fprintf(stderr, "vcpd: adaptive defaults for %d fps: gop=%d ack_retry=%u\n",
-		fps, ctx.video.gop, ctx.ack_max_retry);
+	fprintf(stderr,
+		"vcpd: adaptive defaults for %d fps: gop=%d ack_retry=%u smartp=%s intra_refresh_rows=%d\n",
+		fps, ctx.video.gop, ctx.ack_max_retry,
+		ctx.video.smartp ? "on" : "off",
+		ctx.video.intra_refresh_rows);
 
 	if (ctx.test_output[0]) {
 		return run_test_capture(&ctx.video, ctx.test_output, ctx.test_frames);
@@ -619,6 +718,8 @@ int main(int argc, char *argv[])
 		"vcpd: --- config ---\n"
 		"vcpd:   source     = %s\n"
 		"vcpd:   video      = %dx%d  fps=%d  gop=%d  bitrate=%d Kbit/s\n"
+		"vcpd:   recovery   = smartp=%s  intra_refresh_rows=%d\n"
+		"vcpd:   keyframe   = force_idr_every=%u ms\n"
 		"vcpd:   transport  = %s  node=%u → dst=%u  stream=%u\n"
 		"vcpd:   ack        = %u us / %u retry\n"
 		"vcpd:   autostart  = %s\n"
@@ -626,6 +727,8 @@ int main(int argc, char *argv[])
 		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE,
 		ctx.video.device,
 		ctx.video.width, ctx.video.height, ctx.video.fps, ctx.video.gop, ctx.video.bitrate_kbps,
+		ctx.video.smartp ? "on" : "off", ctx.video.intra_refresh_rows,
+		ctx.idr_interval_ms,
 		ulama_transport_kind_name(tk), ctx.node_id, ctx.dst_node, ctx.stream_id,
 		ctx.ack_timeout_us, ctx.ack_max_retry,
 		ctx.autostart ? "true" : "false");
@@ -643,6 +746,8 @@ int main(int argc, char *argv[])
 		ctx.uvcp_sess.last_ready_ms = now_ms();
 		ctx.uvcp_sess.lease_ms = UINT64_MAX / 2;
 		int vrc = vsrc_start(&ctx.video);
+		vsrc_request_idr(&ctx.video);
+		ctx.last_forced_idr_ms = now_ms();
 		fprintf(stderr, "vcpd: vsrc_start returned %d, pipe_fd=%d, running=%d\n",
 			vrc, ctx.video.pipe_fd, ctx.video.running);
 	}
@@ -714,6 +819,15 @@ int main(int argc, char *argv[])
 
 		uint64_t ts = now_ms();
 
+		if (ctx.video.running && ctx.idr_interval_ms > 0 &&
+		    ts - ctx.last_forced_idr_ms >= ctx.idr_interval_ms) {
+			vsrc_request_idr(&ctx.video);
+			ctx.last_forced_idr_ms = ts;
+			if (ctx.verbose)
+				fprintf(stderr, "vcpd: periodic IDR requested after %u ms\n",
+					ctx.idr_interval_ms);
+		}
+
 		if (!uvcp_session_is_active(&ctx.uvcp_sess, ts) && ctx.video.running) {
 			fprintf(stderr, "vcpd: lease expired, stopping video\n");
 			vsrc_stop(&ctx.video);
@@ -782,6 +896,8 @@ int main(int argc, char *argv[])
 					if (uvcp_session_is_active(&ctx.uvcp_sess, now_ms()) || ctx.autostart) {
 						fprintf(stderr, "vcpd: restarting video source\n");
 						vsrc_start(&ctx.video);
+						vsrc_request_idr(&ctx.video);
+						ctx.last_forced_idr_ms = now_ms();
 					}
 				}
 				continue;

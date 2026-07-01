@@ -7,6 +7,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#define UNOW_PCAP_SNAPLEN 4096
+
 static void unow_set_error(char *buffer, size_t buffer_size, const char *fmt, const char *arg)
 {
 	if (buffer == NULL || buffer_size == 0U) {
@@ -167,7 +169,10 @@ int unow_iface_open_pcap(const char *iface, pcap_t **out_handle, int *out_datali
 		unow_set_error(error_buf, error_buf_len, "pcap_create failed: %s", pcap_error);
 		return -1;
 	}
-	status = pcap_set_snaplen(handle, 2048);
+	/* Direct H.265 transport uses large ULAMA payloads (up to ~2.3 KB on wire).
+	 * A 2048-byte snaplen truncates those action frames on RX, so only short
+	 * telemetry/control packets survive capture. Keep generous headroom. */
+	status = pcap_set_snaplen(handle, UNOW_PCAP_SNAPLEN);
 	if (status != 0) {
 		unow_set_error(error_buf, error_buf_len, "pcap_set_snaplen failed: %s", pcap_geterr(handle));
 		pcap_close(handle);

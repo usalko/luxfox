@@ -25,6 +25,31 @@ is_running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
 }
 
+parse_args() {
+    ULAMA_GW_ARGS=""
+    [ -f "$CONFIG" ] || return 0
+
+    while IFS='=' read -r key value; do
+        case "$key" in \#*|"") continue ;; esac
+        value=$(echo "$value" | sed 's/#.*//' | xargs)
+        [ -z "$value" ] && continue
+
+        case "$key" in
+            cascade_in)    ULAMA_GW_ARGS="$ULAMA_GW_ARGS --cascade-in $value" ;;
+            cascade_out)   ULAMA_GW_ARGS="$ULAMA_GW_ARGS --cascade-out $value" ;;
+            transport)     ULAMA_GW_ARGS="$ULAMA_GW_ARGS --transport $value" ;;
+            listen)        ULAMA_GW_ARGS="$ULAMA_GW_ARGS --listen $value" ;;
+            peer)          ULAMA_GW_ARGS="$ULAMA_GW_ARGS --peer $value" ;;
+            iface)         ULAMA_GW_ARGS="$ULAMA_GW_ARGS --iface $value" ;;
+            channel)       ULAMA_GW_ARGS="$ULAMA_GW_ARGS --channel $value" ;;
+            tx_rate_mbps)  ULAMA_GW_ARGS="$ULAMA_GW_ARGS --tx-rate-mbps $value" ;;
+            node)          ULAMA_GW_ARGS="$ULAMA_GW_ARGS --node $value" ;;
+            dst_mac)       ULAMA_GW_ARGS="$ULAMA_GW_ARGS --dst-mac $value" ;;
+            verbose)       [ "$value" = "true" ] && ULAMA_GW_ARGS="$ULAMA_GW_ARGS --verbose" ;;
+        esac
+    done < "$CONFIG"
+}
+
 start() {
     if [ ! -x "$BIN" ]; then
         log "ERROR: binary not found or not executable: $BIN"
@@ -39,11 +64,12 @@ start() {
     fi
 
     log "starting daemon bin=$BIN"
+    parse_args
 
     if command -v start-stop-daemon >/dev/null 2>&1; then
-        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- --verbose
+        start-stop-daemon -S -b -m -p "$PIDFILE" -x "$BIN" -- $ULAMA_GW_ARGS
     else
-        "$BIN" --verbose >"$STDOUT_LOG" 2>"$STDERR_LOG" &
+        "$BIN" $ULAMA_GW_ARGS >"$STDOUT_LOG" 2>"$STDERR_LOG" &
         echo $! > "$PIDFILE"
     fi
 }

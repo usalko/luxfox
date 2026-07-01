@@ -137,6 +137,15 @@ for name in $RADIO_PROJECTS; do
     [ -d "$dir" ] || continue
     [ -f "$dir/Makefile" ] || continue
 
+    # Kill any running ulama_gw process (needed because it locks the binary during rebuild)
+    if [ "$name" = "ulama-gw" ]; then
+        if pgrep -f "ulama_gw" > /dev/null 2>&1; then
+            log_warn "Killing running ulama_gw process..."
+            sudo pkill -f "ulama_gw" || pkill -f "ulama_gw" 2>/dev/null || true
+            sleep 0.5  # Give the process time to die
+        fi
+    fi
+
     log_info "═══ $name (make) ═══"
     make -C "$dir" || { log_error "$name build FAILED"; exit 1; }
     stage_project_out "$dir/out" "$name"
@@ -146,6 +155,13 @@ done
 # Build host-side tools (for ground station)
 ##############################################################################
 if [ -f "$SCRIPT_DIR/ulama-gw/Makefile" ]; then
+    # Kill any running ulama_gw process before rebuilding
+    if pgrep -f "ulama_gw" > /dev/null 2>&1; then
+        log_warn "Killing running ulama_gw process for host-unow rebuild..."
+        sudo pkill -f "ulama_gw" || pkill -f "ulama_gw" 2>/dev/null || true
+        sleep 0.5
+    fi
+
     log_info "═══ ulama-gw (host-unow) ═══"
     make -C "$SCRIPT_DIR/ulama-gw" host-unow 2>/dev/null || log_warn "host-unow failed (libpcap-dev missing?)"
 fi
