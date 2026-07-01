@@ -56,6 +56,7 @@ int video_source_mpp_start(video_source_mpp_t *src);
 void video_source_mpp_stop(video_source_mpp_t *src);
 ssize_t video_source_mpp_read(video_source_mpp_t *src, uint8_t *buf, size_t len);
 void video_source_mpp_request_idr(video_source_mpp_t *src);
+int video_source_mpp_capture_mjpeg(video_source_mpp_t *src, const char *outpath, int max_frames);
 typedef video_source_mpp_t video_source_t;
 #define vsrc_request_idr(v)    video_source_mpp_request_idr(v)
 #else

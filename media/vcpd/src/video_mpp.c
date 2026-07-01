@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include "rk_debug.h"
+#include "rk_comm_vdec.h"
 #include "rockchip/mpp_err.h"
 #include "rk_mpi_cal.h"
 #include "rk_mpi_mb.h"
@@ -52,15 +53,30 @@
 #define V4L2_BUFFER_COUNT  4
 #define VDEC_CHN_ID        0
 #define VENC_CHN_ID        0
+#define MJPEG_INFLIGHT_SLOTS 8
+#define MJPEG_SUBMIT_BURST  6
+#define VDEC_SUBMIT_TIMEOUT_MS   5
+#define VDEC_GETFRAME_TIMEOUT_MS 2
+#define VENC_SEND_TIMEOUT_MS     5
+#define VENC_GETSTREAM_TIMEOUT_MS 2
 
 /* Event-loop poll interval (ms) — the "yield" between non-blocking drain passes.
  * At 15fps V4L2 delivers a frame every ~66ms; 5ms gives ~13 drain attempts per frame. */
 #define ENCODE_POLL_MS    5
 
+/* Backing file for the capture→decode MJPEG ring (see mpp_capture_thread). */
+#define MJPEG_RING_FILE   "/dev/shm/vcpd_mjpeg_ring"
+
 typedef struct {
 	void  *start;
 	size_t length;
 } mpp_v4l2_buffer_t;
+
+typedef struct {
+	_Atomic bool in_use;
+	uint32_t len;
+	uint8_t data[VIDEO_RING_SLOT_MAX];
+} mjpeg_submit_slot_t;
 
 #define MAX_VENC_PACKS 8
 
@@ -69,6 +85,7 @@ typedef struct {
 	uint32_t v4l2_dq_ok;
 	uint32_t vdec_submit_ok;
 	uint32_t vdec_submit_busy;
+	uint32_t vdec_submit_full;
 	uint32_t vdec_submit_drop;
 	uint32_t vdec_submit_calls;
 	uint32_t vdec_submit_us_max;
@@ -87,7 +104,8 @@ typedef struct {
 	uint64_t venc_getstream_us_total;
 	uint32_t nal_writes;
 	uint64_t nal_bytes;
-	uint32_t ring_drop;
+	uint32_t ring_drop;      /* encoded-output ring overrun (encode→sender)  */
+	uint32_t cap_ring_drop;  /* MJPEG capture ring overrun (encode < capture) */
 } mpp_diag_t;
 
 typedef struct {
@@ -108,6 +126,17 @@ typedef struct {
 	pthread_t          encode_thread;
 	bool               encode_thread_started;
 	volatile bool      stop;
+
+	/* Capture→decode decoupling: a dedicated capture thread services V4L2 at the
+	 * full camera rate and publishes raw MJPEG frames into mjpeg_ring; the encode
+	 * thread consumes them (VDEC→VENC). mjpeg_pipe is the wakeup channel, mirroring
+	 * the ring+pipe "channel" used between the encoder and the sender. */
+	video_ring_t      *mjpeg_ring;
+	int                mjpeg_pipe_rd;
+	int                mjpeg_pipe_wr;
+	pthread_t          capture_thread;
+	bool               capture_thread_started;
+	mjpeg_submit_slot_t mjpeg_submit[MJPEG_INFLIGHT_SLOTS];
 
 	bool               diag_lock_init;
 	pthread_mutex_t    diag_lock;
@@ -186,9 +215,15 @@ static void mpp_diag_note_vdec_getframe_latency(mpp_ctx_t *ctx, uint64_t us)
 static void mpp_diag_note_vdec_submit(mpp_ctx_t *ctx, RK_S32 ret)
 {
 	pthread_mutex_lock(&ctx->diag_lock);
-	if (ret == RK_SUCCESS)         ctx->diag.vdec_submit_ok++;
-	else if (ret == MPP_ERR_TIMEOUT) ctx->diag.vdec_submit_busy++;
-	else                             ctx->diag.vdec_submit_drop++;
+	if (ret == RK_SUCCESS)
+		ctx->diag.vdec_submit_ok++;
+	else if (ret == MPP_ERR_TIMEOUT || ret == RK_ERR_VDEC_BUSY)
+		ctx->diag.vdec_submit_busy++;
+	else if (ret == RK_ERR_VDEC_BUF_FULL || ret == RK_ERR_VDEC_NOBUF ||
+		 ret == MPP_ERR_BUFFER_FULL)
+		ctx->diag.vdec_submit_full++;
+	else
+		ctx->diag.vdec_submit_drop++;
 	pthread_mutex_unlock(&ctx->diag_lock);
 }
 
@@ -245,6 +280,13 @@ static void mpp_diag_note_ring_drop(mpp_ctx_t *ctx)
 	pthread_mutex_unlock(&ctx->diag_lock);
 }
 
+static void mpp_diag_note_cap_ring_drop(mpp_ctx_t *ctx)
+{
+	pthread_mutex_lock(&ctx->diag_lock);
+	ctx->diag.cap_ring_drop++;
+	pthread_mutex_unlock(&ctx->diag_lock);
+}
+
 static void mpp_diag_maybe_report(mpp_ctx_t *ctx)
 {
 	mpp_diag_t s;
@@ -276,13 +318,14 @@ static void mpp_diag_maybe_report(mpp_ctx_t *ctx)
 	uint32_t neg_den = ctx->actual_fps_den > 0 ? ctx->actual_fps_den : 1;
 	char ts[9]; { time_t t = time(NULL); strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&t)); }
 	fprintf(stderr,
-		"%s vcpd: [mpp] cap=%u dec=%u enc=%u nals=%u bytes=%llu rdrop=%u | "
+		"%s vcpd: [mpp] cap=%u dec=%u enc=%u sub=%u/%u/%u/%u nals=%u bytes=%llu rdrop=%u cdrop=%u | "
 		"fps cap=%u.%u dec=%u.%u enc=%u.%u | "
 		"lat_us vdec_in=%u/%u vdec_out=%u/%u venc_in=%u/%u venc_out=%u/%u | "
 		"negotiated=%u/%u fps\n",
 		ts,
 		s.v4l2_dq_ok, s.vdec_frame_ok, s.venc_stream_ok,
-		s.nal_writes, (unsigned long long)s.nal_bytes, s.ring_drop,
+		s.vdec_submit_ok, s.vdec_submit_busy, s.vdec_submit_full, s.vdec_submit_drop,
+		s.nal_writes, (unsigned long long)s.nal_bytes, s.ring_drop, s.cap_ring_drop,
 		fps_cap_x10 / 10, fps_cap_x10 % 10,
 		fps_dec_x10 / 10,  fps_dec_x10 % 10,
 		fps_enc_x10 / 10,  fps_enc_x10 % 10,
@@ -445,9 +488,143 @@ static void v4l2_cleanup(mpp_ctx_t *ctx)
 	}
 }
 
+int video_source_mpp_capture_mjpeg(video_source_mpp_t *src, const char *outpath, int max_frames)
+{
+	if (!src || !outpath || max_frames <= 0)
+		return -1;
+
+	mpp_ctx_t *ctx = calloc(1, sizeof(mpp_ctx_t));
+	if (!ctx)
+		return -1;
+	ctx->src = src;
+	ctx->v4l2_fd = -1;
+
+	if (v4l2_open(ctx) < 0) {
+		fprintf(stderr, "vcpd: [mjpeg-test] failed to open %s: %s\n",
+			src->device, strerror(errno));
+		free(ctx);
+		return -1;
+	}
+
+	if (v4l2_stream_on(ctx) < 0) {
+		fprintf(stderr, "vcpd: [mjpeg-test] stream on failed: %s\n",
+			strerror(errno));
+		v4l2_cleanup(ctx);
+		free(ctx);
+		return -1;
+	}
+
+	FILE *fp = fopen(outpath, "wb");
+	if (!fp) {
+		fprintf(stderr, "vcpd: [mjpeg-test] cannot open %s: %s\n",
+			outpath, strerror(errno));
+		v4l2_cleanup(ctx);
+		free(ctx);
+		return -1;
+	}
+
+	fprintf(stderr,
+		"vcpd: MJPEG TEST — capturing %d frames from %s to %s\n",
+		max_frames, src->device, outpath);
+	fprintf(stderr,
+		"vcpd: [mjpeg-test] capture req=%dx%d@%d fps, got=%ux%u @ %u/%u fps (~%u)\n",
+		src->width, src->height, src->fps,
+		ctx->actual_width, ctx->actual_height,
+		ctx->actual_fps_num > 0 ? ctx->actual_fps_num : (uint32_t)src->fps,
+		ctx->actual_fps_den > 0 ? ctx->actual_fps_den : 1,
+		ctx->actual_fps);
+
+	struct pollfd pfd = { .fd = ctx->v4l2_fd, .events = POLLIN };
+	uint64_t t0 = mono_ms();
+	uint64_t total_bytes = 0;
+	int frames = 0;
+
+	while (frames < max_frames) {
+		int pret = poll(&pfd, 1, 1000);
+		if (pret < 0) {
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "vcpd: [mjpeg-test] poll failed: %s\n", strerror(errno));
+			break;
+		}
+		if (pret == 0 || !(pfd.revents & POLLIN))
+			continue;
+
+		struct v4l2_buffer buf;
+		memset(&buf, 0, sizeof(buf));
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+		if (xioctl(ctx->v4l2_fd, VIDIOC_DQBUF, &buf) < 0) {
+			if (errno == EINTR || errno == EAGAIN)
+				continue;
+			fprintf(stderr, "vcpd: [mjpeg-test] DQBUF failed: %s\n", strerror(errno));
+			break;
+		}
+
+		if (buf.bytesused > 0) {
+			size_t wrote = fwrite(ctx->v4l2_bufs[buf.index].start, 1,
+				(size_t)buf.bytesused, fp);
+			if (wrote != (size_t)buf.bytesused) {
+				fprintf(stderr, "vcpd: [mjpeg-test] fwrite failed for %s\n", outpath);
+				(void)xioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf);
+				break;
+			}
+			total_bytes += buf.bytesused;
+			frames++;
+			if ((frames % 25) == 0) {
+				uint64_t elapsed = mono_ms() - t0;
+				fprintf(stderr,
+					"vcpd: [mjpeg-test] captured %d/%d frames (%llu bytes, %.1f fps)\n",
+					frames, max_frames,
+					(unsigned long long)total_bytes,
+					elapsed > 0 ? frames * 1000.0 / (double)elapsed : 0.0);
+			}
+		}
+
+		if (xioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf) < 0) {
+			fprintf(stderr, "vcpd: [mjpeg-test] QBUF failed: %s\n", strerror(errno));
+			break;
+		}
+	}
+
+	fflush(fp);
+	fclose(fp);
+	v4l2_cleanup(ctx);
+	free(ctx);
+
+	uint64_t elapsed = mono_ms() - t0;
+	fprintf(stderr,
+		"vcpd: MJPEG TEST DONE — %d frames, %llu bytes, %llu ms (%.1f fps)\n",
+		frames, (unsigned long long)total_bytes, (unsigned long long)elapsed,
+		elapsed > 0 ? frames * 1000.0 / (double)elapsed : 0.0);
+	fprintf(stderr, "vcpd: output: %s\n", outpath);
+	fprintf(stderr, "vcpd: to verify, run:\n");
+	fprintf(stderr, "  ffplay -f mjpeg %s\n", outpath);
+	fprintf(stderr, "  ffmpeg -f mjpeg -i %s -frames:v 5 frame_%%02d.jpg\n", outpath);
+	return frames > 0 ? 0 : 1;
+}
+
 /* ------------------------------------------------------------------ MPP helpers */
 
-static RK_S32 mjpeg_packet_free(void *opaque) { free(opaque); return RK_SUCCESS; }
+static RK_S32 mjpeg_submit_slot_release(void *opaque)
+{
+	mjpeg_submit_slot_t *slot = (mjpeg_submit_slot_t *)opaque;
+	if (slot != NULL)
+		atomic_store_explicit(&slot->in_use, false, memory_order_release);
+	return RK_SUCCESS;
+}
+
+static mjpeg_submit_slot_t *mjpeg_submit_slot_acquire(mpp_ctx_t *ctx)
+{
+	for (int i = 0; i < MJPEG_INFLIGHT_SLOTS; i++) {
+		bool expected = false;
+		if (atomic_compare_exchange_strong_explicit(&ctx->mjpeg_submit[i].in_use,
+				&expected, true,
+				memory_order_acq_rel, memory_order_acquire))
+			return &ctx->mjpeg_submit[i];
+	}
+	return NULL;
+}
 
 static RK_S32 init_vdec(uint32_t width, uint32_t height)
 {
@@ -583,12 +760,12 @@ static void deinit_vdec(void)
 	RK_MPI_VDEC_DestroyChn(VDEC_CHN_ID);
 }
 
-/*
- * Submit one MJPEG packet to VDEC.  Ownership of `packet` (heap-allocated)
- * is transferred to the MPI layer via pFreeCB; it will be freed when VDEC
- * is done with it.  Returns RK_SUCCESS or an error code.
+/* Submit one MJPEG packet to VDEC.
+ * The caller supplies both the packet buffer and its lifetime callback:
+ * - preallocated submit slot: opaque=slot, free_cb=mjpeg_submit_slot_release
  */
-static RK_S32 send_mjpeg_to_vdec_owned(mpp_ctx_t *ctx, void *packet, size_t len)
+static RK_S32 send_mjpeg_to_vdec_buffer(mpp_ctx_t *ctx, void *packet, size_t len,
+					void *opaque, RK_S32 (*free_cb)(void *))
 {
 	MB_EXT_CONFIG_S ext_config;
 	VDEC_STREAM_S   stream;
@@ -599,11 +776,15 @@ static RK_S32 send_mjpeg_to_vdec_owned(mpp_ctx_t *ctx, void *packet, size_t len)
 	memset(&ext_config, 0, sizeof(ext_config));
 	ext_config.pu8VirAddr = packet;
 	ext_config.u64Size    = len;
-	ext_config.pOpaque    = packet;
-	ext_config.pFreeCB    = mjpeg_packet_free;
+	ext_config.pOpaque    = opaque;
+	ext_config.pFreeCB    = free_cb;
 
 	RK_S32 ret = RK_MPI_SYS_CreateMB(&mb_blk, &ext_config);
-	if (ret != RK_SUCCESS) { free(packet); return ret; }
+	if (ret != RK_SUCCESS) {
+		if (free_cb)
+			(void)free_cb(opaque);
+		return ret;
+	}
 
 	memset(&stream, 0, sizeof(stream));
 	stream.pMbBlk        = mb_blk;
@@ -613,9 +794,9 @@ static RK_S32 send_mjpeg_to_vdec_owned(mpp_ctx_t *ctx, void *packet, size_t len)
 	stream.bBypassMbBlk  = RK_TRUE;
 
 	uint64_t t0 = mono_us();
-	ret = RK_MPI_VDEC_SendStream(VDEC_CHN_ID, &stream, 0);
+	ret = RK_MPI_VDEC_SendStream(VDEC_CHN_ID, &stream, VDEC_SUBMIT_TIMEOUT_MS);
 	mpp_diag_note_vdec_submit_latency(ctx, mono_us() - t0);
-	RK_MPI_MB_ReleaseMB(mb_blk);  /* frees packet via pFreeCB if not taken by VDEC */
+	RK_MPI_MB_ReleaseMB(mb_blk);  /* returns packet/slot via pFreeCB when released */
 	return ret;
 }
 
@@ -697,16 +878,20 @@ static void fill_color_bars_nv12(uint8_t *y_plane, uint8_t *uv_plane,
  *
  * Each task maps 1-to-1 to a Go channel operation:
  *
- *   task_capture        — select { case f := <-v4l2_ch: vdec_ch <- f }
- *   task_decode         — for f := range tryRecv(vdec_ch) { venc_ch <- f }
- *   task_encode         — for s := range tryRecv(venc_ch) { ring_ch <- s }
- *   task_pattern_submit — venc_ch <- generateColorBars(n)
+ *   task_capture_to_ring — select { case f := <-v4l2_ch: mjpeg_ch <- f }  (capture thread)
+ *   task_submit_mjpeg    — for f := range tryRecv(mjpeg_ch) { vdec_ch <- f } (encode thread)
+ *   task_decode          — for f := range tryRecv(vdec_ch) { venc_ch <- f }
+ *   task_encode          — for s := range tryRecv(venc_ch) { ring_ch <- s }
+ *   task_pattern_submit  — venc_ch <- generateColorBars(n)
  *
  * Threads call these tasks in a tight event loop — no blocking, no goto. */
 
-/* Poll V4L2 (ENCODE_POLL_MS timeout = event-loop yield).
- * If a frame is ready: DQBUF, copy, re-queue, submit MJPEG to VDEC. */
-static void task_capture(mpp_ctx_t *ctx, struct pollfd *pfd)
+/* Capture thread task: poll V4L2 (ENCODE_POLL_MS timeout = event-loop yield).
+ * If a frame is ready: DQBUF, publish the raw MJPEG into the capture ring for the
+ * encode thread, then re-queue the V4L2 buffer immediately. Keeping capture in
+ * its own thread lets V4L2 be serviced at the full camera rate instead of being
+ * backpressured by VDEC/VENC latency (which previously pinned cap/dec/enc together). */
+static void task_capture_to_ring(mpp_ctx_t *ctx, struct pollfd *pfd)
 {
 	poll(pfd, 1, ENCODE_POLL_MS);
 	if (!(pfd->revents & POLLIN))
@@ -725,18 +910,18 @@ static void task_capture(mpp_ctx_t *ctx, struct pollfd *pfd)
 	}
 	mpp_diag_inc_capture(ctx);
 
-	size_t   len = buf.bytesused;
-	uint8_t *pkt = len > 0 ? (uint8_t *)malloc(len) : NULL;
-	if (pkt) memcpy(pkt, ctx->v4l2_bufs[buf.index].start, len);
-	xioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf);  /* re-queue before encode */
-
-	if (pkt && len > 0) {
-		RK_S32 ret = send_mjpeg_to_vdec_owned(ctx, pkt, len);
-		mpp_diag_note_vdec_submit(ctx, ret);
-		/* pkt freed by MPI callback */
-	} else {
-		free(pkt);
+	size_t len = buf.bytesused;
+	if (len > 0) {
+		if (video_ring_push(ctx->mjpeg_ring, ctx->v4l2_bufs[buf.index].start,
+				    (uint32_t)len)) {
+			uint8_t sig = 1;
+			(void)write(ctx->mjpeg_pipe_wr, &sig, sizeof(sig));
+		} else {
+			/* Encode thread is behind — drop this frame to bound latency. */
+			mpp_diag_note_cap_ring_drop(ctx);
+		}
 	}
+	xioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf);  /* re-queue immediately */
 }
 
 /* Drain all decoded NV12 frames from VDEC and submit each to VENC.
@@ -747,16 +932,49 @@ static void task_decode(mpp_ctx_t *ctx)
 		VIDEO_FRAME_INFO_S frame;
 		memset(&frame, 0, sizeof(frame));
 		uint64_t t0 = mono_us();
-		RK_S32 ret = RK_MPI_VDEC_GetFrame(VDEC_CHN_ID, &frame, 0);
+		RK_S32 ret = RK_MPI_VDEC_GetFrame(VDEC_CHN_ID, &frame, VDEC_GETFRAME_TIMEOUT_MS);
 		mpp_diag_note_vdec_getframe_latency(ctx, mono_us() - t0);
 		if (ret != RK_SUCCESS) break;
 		mpp_diag_inc_vdec_frame(ctx);
 
 		uint64_t vs = mono_us();
-		RK_S32 sr = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame, 0);
+		RK_S32 sr = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame, VENC_SEND_TIMEOUT_MS);
 		mpp_diag_note_venc_submit_latency(ctx, mono_us() - vs);
 		RK_MPI_VDEC_ReleaseFrame(VDEC_CHN_ID, &frame);
 		if (sr == RK_SUCCESS) mpp_diag_inc_venc_submit(ctx);
+	}
+}
+
+/* Encode thread task: pull queued MJPEG frames from the capture ring into a
+ * fixed in-flight slot pool and submit them to VDEC in small bursts. This keeps
+ * VDEC fed without per-frame malloc/free and removes one memcpy from the hot path
+ * (ring -> heap). One V4L2->ring copy remains; eliminating that would require a
+ * larger V4L2 ownership / DMABUF redesign.
+ */
+static void task_submit_mjpeg(mpp_ctx_t *ctx)
+{
+	for (int submitted = 0; submitted < MJPEG_SUBMIT_BURST; submitted++) {
+		mjpeg_submit_slot_t *slot = mjpeg_submit_slot_acquire(ctx);
+		if (slot == NULL)
+			break;
+
+		if (!video_ring_pop(ctx->mjpeg_ring, slot->data, sizeof(slot->data), &slot->len)) {
+			atomic_store_explicit(&slot->in_use, false, memory_order_release);
+			break;
+		}
+		if (slot->len == 0) {
+			atomic_store_explicit(&slot->in_use, false, memory_order_release);
+			continue;
+		}
+
+		RK_S32 ret = send_mjpeg_to_vdec_buffer(ctx, slot->data, slot->len,
+						      slot, mjpeg_submit_slot_release);
+		mpp_diag_note_vdec_submit(ctx, ret);
+		if (ret != RK_SUCCESS) {
+			/* On failure the slot is released by send_mjpeg_to_vdec_buffer() via
+			 * the supplied callback; stop bursting and let decode/encode catch up. */
+			break;
+		}
 	}
 }
 
@@ -767,7 +985,8 @@ static void task_encode(mpp_ctx_t *ctx, int *frame_num)
 	for (;;) {
 		ctx->venc_stream.pstPack = ctx->venc_packs;
 		uint64_t t0 = mono_us();
-		if (RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream, 0) != RK_SUCCESS)
+		if (RK_MPI_VENC_GetStream(VENC_CHN_ID, &ctx->venc_stream,
+					 VENC_GETSTREAM_TIMEOUT_MS) != RK_SUCCESS)
 			break;
 		mpp_diag_note_venc_getstream_latency(ctx, mono_us() - t0);
 		mpp_emit_venc_stream(ctx);
@@ -830,18 +1049,42 @@ static void *mpp_pattern_thread(void *arg)
 	return NULL;
 }
 
+/* ------------------------------------------------------------------ camera capture thread */
+
+/* Dedicated V4L2 capture thread: services the camera at its full frame rate and
+ * publishes raw MJPEG frames into the capture ring, decoupled from VDEC/VENC. */
+static void *mpp_capture_thread(void *arg)
+{
+	mpp_ctx_t *ctx = (mpp_ctx_t *)arg;
+	struct pollfd pfd = { .fd = ctx->v4l2_fd, .events = POLLIN };
+
+	while (!ctx->stop)
+		task_capture_to_ring(ctx, &pfd);   /* select: V4L2 → MJPEG ring */
+
+	/* EOF the MJPEG channel so the encode thread never blocks on shutdown. */
+	if (ctx->mjpeg_pipe_wr >= 0) { close(ctx->mjpeg_pipe_wr); ctx->mjpeg_pipe_wr = -1; }
+	return NULL;
+}
+
 /* ------------------------------------------------------------------ camera encode thread */
 
 static void *mpp_encode_thread(void *arg)
 {
 	mpp_ctx_t *ctx = (mpp_ctx_t *)arg;
-	struct pollfd pfd = { .fd = ctx->v4l2_fd, .events = POLLIN };
+	struct pollfd pfd = { .fd = ctx->mjpeg_pipe_rd, .events = POLLIN };
 	int frame_num = 0;
 
 	while (!ctx->stop) {
-		task_capture(ctx, &pfd);          /* select: V4L2 → VDEC   */
-		task_decode(ctx);                  /* drain: VDEC → VENC    */
-		task_encode(ctx, &frame_num);      /* drain: VENC → ring    */
+		/* select: wait briefly for the capture thread to publish MJPEG frames,
+		 * but keep draining VDEC/VENC even when no new frame has arrived. */
+		poll(&pfd, 1, ENCODE_POLL_MS);
+		if (pfd.revents & POLLIN) {
+			uint8_t drain[64];
+			(void)read(ctx->mjpeg_pipe_rd, drain, sizeof(drain));  /* clear wakeups */
+		}
+		task_submit_mjpeg(ctx);            /* drain: MJPEG ring → VDEC */
+		task_decode(ctx);                  /* drain: VDEC → VENC       */
+		task_encode(ctx, &frame_num);      /* drain: VENC → ring       */
 		mpp_diag_maybe_report(ctx);
 	}
 	task_encode(ctx, &frame_num);         /* flush residual streams */
@@ -868,6 +1111,8 @@ int video_source_mpp_start(video_source_mpp_t *src)
 	ctx->src       = src;
 	ctx->v4l2_fd   = -1;
 	ctx->pipe_wr   = -1;
+	ctx->mjpeg_pipe_rd = -1;
+	ctx->mjpeg_pipe_wr = -1;
 
 	if (pthread_mutex_init(&ctx->diag_lock, NULL) != 0) { free(ctx); return -1; }
 	ctx->diag_lock_init = true;
@@ -953,7 +1198,53 @@ int video_source_mpp_start(video_source_mpp_t *src)
 			goto fail;
 		}
 
+		/* Capture→decode channel: a dedicated capture thread feeds raw MJPEG
+		 * frames through this ring so V4L2 runs at the full camera rate,
+		 * decoupled from VDEC/VENC (mirrors the encoder→sender ring+pipe). */
+		ctx->mjpeg_ring = video_ring_create(MJPEG_RING_FILE);
+		if (!ctx->mjpeg_ring) {
+			fprintf(stderr, "vcpd: [mpp] failed to create MJPEG ring at %s: %s\n",
+				MJPEG_RING_FILE, strerror(errno));
+			video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL;
+			deinit_venc(); deinit_vdec(); v4l2_cleanup(ctx);
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+
+		int mjpeg_pipefd[2];
+		if (pipe(mjpeg_pipefd) < 0) {
+			video_ring_destroy(ctx->mjpeg_ring, MJPEG_RING_FILE); ctx->mjpeg_ring = NULL;
+			video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL;
+			deinit_venc(); deinit_vdec(); v4l2_cleanup(ctx);
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+		ctx->mjpeg_pipe_rd = mjpeg_pipefd[0];
+		ctx->mjpeg_pipe_wr = mjpeg_pipefd[1];
+		fprintf(stderr, "vcpd: [mpp] MJPEG ring buffer %zu KB at %s\n",
+			VIDEO_RING_MMAP_SIZE / 1024, MJPEG_RING_FILE);
+
+		/* Start capture first, then encode: on encode-create failure the capture
+		 * thread rolls back cleanly (it only owns the MJPEG channel). */
+		if (pthread_create(&ctx->capture_thread, NULL, mpp_capture_thread, ctx) != 0) {
+			close(ctx->mjpeg_pipe_rd); ctx->mjpeg_pipe_rd = -1;
+			close(ctx->mjpeg_pipe_wr); ctx->mjpeg_pipe_wr = -1;
+			video_ring_destroy(ctx->mjpeg_ring, MJPEG_RING_FILE); ctx->mjpeg_ring = NULL;
+			video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL;
+			deinit_venc(); deinit_vdec(); v4l2_cleanup(ctx);
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+		ctx->capture_thread_started = true;
+
 		if (pthread_create(&ctx->encode_thread, NULL, mpp_encode_thread, ctx) != 0) {
+			ctx->stop = true;
+			pthread_join(ctx->capture_thread, NULL);
+			ctx->capture_thread_started = false;
+			ctx->stop = false;
+			if (ctx->mjpeg_pipe_rd >= 0) { close(ctx->mjpeg_pipe_rd); ctx->mjpeg_pipe_rd = -1; }
+			if (ctx->mjpeg_pipe_wr >= 0) { close(ctx->mjpeg_pipe_wr); ctx->mjpeg_pipe_wr = -1; }
+			video_ring_destroy(ctx->mjpeg_ring, MJPEG_RING_FILE); ctx->mjpeg_ring = NULL;
 			video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL;
 			v4l2_cleanup(ctx);
 			deinit_venc(); deinit_vdec();
@@ -972,6 +1263,7 @@ fail:
 	RK_MPI_SYS_Exit();
 fail_early:
 	ctx->stop = true;
+	if (ctx->capture_thread_started) pthread_join(ctx->capture_thread, NULL);
 	if (ctx->encode_thread_started) pthread_join(ctx->encode_thread, NULL);
 	if (ctx->diag_lock_init) pthread_mutex_destroy(&ctx->diag_lock);
 	free(ctx);
@@ -984,6 +1276,7 @@ void video_source_mpp_stop(video_source_mpp_t *src)
 
 	mpp_ctx_t *ctx = (mpp_ctx_t *)src->mpp_ctx;
 	ctx->stop = true;
+	if (ctx->capture_thread_started) pthread_join(ctx->capture_thread, NULL);
 	if (ctx->encode_thread_started) pthread_join(ctx->encode_thread, NULL);
 
 	v4l2_cleanup(ctx);
@@ -992,8 +1285,11 @@ void video_source_mpp_stop(video_source_mpp_t *src)
 
 	if (ctx->pipe_wr >= 0) { close(ctx->pipe_wr); ctx->pipe_wr = -1; }
 	if (src->pipe_fd >= 0) { close(src->pipe_fd); src->pipe_fd = -1; }
+	if (ctx->mjpeg_pipe_wr >= 0) { close(ctx->mjpeg_pipe_wr); ctx->mjpeg_pipe_wr = -1; }
+	if (ctx->mjpeg_pipe_rd >= 0) { close(ctx->mjpeg_pipe_rd); ctx->mjpeg_pipe_rd = -1; }
 
 	if (ctx->ring) { video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL; }
+	if (ctx->mjpeg_ring) { video_ring_destroy(ctx->mjpeg_ring, MJPEG_RING_FILE); ctx->mjpeg_ring = NULL; }
 
 	RK_MPI_SYS_Exit();
 	if (ctx->diag_lock_init) pthread_mutex_destroy(&ctx->diag_lock);

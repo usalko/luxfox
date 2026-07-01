@@ -75,6 +75,7 @@ static void usage(const char *prog)
 		"  --stream-id   ID         Stream ID                (default 0)\n"
 		"  --autostart              Start streaming immediately (no UVCP READY needed)\n"
 		"  --test        FILE       Capture raw encoder output to file and exit\n"
+		"  --test-mjpeg  FILE       Capture raw MJPEG from V4L2 to file and exit\n"
 		"  --test-frames N          Number of frames to capture in test mode (default 50)\n"
 		"  --test-pattern           Use color bars instead of camera\n"
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 8000)\n"
@@ -159,6 +160,7 @@ typedef struct {
 	bool verbose;
 	bool autostart;
 	char test_output[256];
+	char test_mjpeg_output[256];
 	int test_frames;
 	char transport_str[16];
 	char peer_addr[64];
@@ -637,6 +639,7 @@ int main(int argc, char *argv[])
 		{"dst-mac",   required_argument, NULL, 'm'},
 		{"autostart",    no_argument,       NULL, 'A'},
 		{"test",         required_argument, NULL, 'T'},
+		{"test-mjpeg",   required_argument, NULL, 'J'},
 		{"test-pattern", no_argument,       NULL, 'P'},
 		{"test-frames",  required_argument, NULL, 'F'},
 		{"ack-timeout",          required_argument, NULL, 'K'},
@@ -665,7 +668,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:g:I:t:p:l:i:n:d:S:m:APT:F:K:Y:B:C:Vvh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:g:I:t:p:l:i:n:d:S:m:AJT:P:F:K:Y:B:C:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
 #ifndef VCPD_WITH_MPP
@@ -688,6 +691,7 @@ int main(int argc, char *argv[])
 		case 'S': ctx.stream_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'A': ctx.autostart = true; break;
+		case 'J': strncpy(ctx.test_mjpeg_output, optarg, sizeof(ctx.test_mjpeg_output) - 1); break;
 		case 'T': strncpy(ctx.test_output, optarg, sizeof(ctx.test_output) - 1); break;
 		case 'P': ctx.video.test_pattern = true; break;
 		case 'F': ctx.test_frames = atoi(optarg); break;
@@ -745,6 +749,16 @@ int main(int argc, char *argv[])
 		fps, ctx.video.gop, ctx.ack_max_retry,
 		ctx.video.smartp ? "on" : "off",
 		ctx.video.intra_refresh_rows);
+
+	if (ctx.test_mjpeg_output[0]) {
+#ifdef VCPD_WITH_MPP
+		return video_source_mpp_capture_mjpeg(&ctx.video,
+			ctx.test_mjpeg_output, ctx.test_frames);
+#else
+		fprintf(stderr, "vcpd: --test-mjpeg requires VCPD_WITH_MPP build\n");
+		return 1;
+#endif
+	}
 
 	if (ctx.test_output[0]) {
 		return run_test_capture(&ctx.video, ctx.test_output, ctx.test_frames);

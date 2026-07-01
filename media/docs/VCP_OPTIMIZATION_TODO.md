@@ -548,6 +548,162 @@ at mtu=216. Encoder `--bitrate` must not exceed channel capacity.
 
 ---
 
+### Phase 6.5: MPP Local Throughput Validation (2026-07-01)
+
+This phase revisited the **local** `vcpd` capture/decode/encode path after the
+radio-side work above, because new field logs showed that the device-side MPP
+pipeline itself could become a bottleneck independently of the channel.
+
+#### Findings before fixes
+
+Initial `vcpd [mpp]` logs showed:
+
+| Stage | Observed fps |
+|-------|--------------|
+| cap   | ~9.6 fps |
+| dec   | ~9.6 fps |
+| enc   | ~9.6 fps |
+
+This first suggested that easycap or V4L2 capture itself was limited. That
+turned out to be a false conclusion.
+
+#### Root cause 1: serialized V4L2 -> VDEC -> VENC pipeline
+
+The original [vcpd/src/video_mpp.c](../vcpd/src/video_mpp.c) camera path used a
+single encode thread that serially performed:
+
+`VIDIOC_DQBUF -> VDEC_SendStream -> VDEC_GetFrame -> VENC_SendFrame -> VENC_GetStream -> VIDIOC_QBUF`
+
+Because V4L2 re-queue happened only after downstream processing, capture was
+artificially backpressured by decode/encode. The observed `cap==dec==enc` did
+**not** prove the source was limited; it only proved all stages were coupled.
+
+#### Fix 1: decouple capture and encode with a second ring
+
+Implemented in [vcpd/src/video_mpp.c](../vcpd/src/video_mpp.c):
+
+- Added a second ring buffer at `/dev/shm/vcpd_mjpeg_ring`
+- Added `mpp_capture_thread`: `V4L2 DQBUF -> MJPEG ring -> QBUF`
+- Added `mpp_encode_thread`: `MJPEG ring -> VDEC -> VENC -> output ring`
+- Preserved the existing ring+pipe selector architecture
+
+After this change, logs became:
+
+| Stage | Observed fps |
+|-------|--------------|
+| cap   | ~25.0 fps |
+| dec   | ~19.3 fps |
+| enc   | ~19.3 fps |
+
+Conclusion: easycap/V4L2 capture was healthy; the previous ~10 fps ceiling was
+an artifact of our threading architecture.
+
+#### Verification: direct raw MJPEG test
+
+Added `--test-mjpeg FILE` mode to `vcpd`, bypassing VDEC/VENC and dumping raw
+V4L2 MJPEG frames to a file. The captured file was verified with `ffplay`:
+
+```text
+Stream #0:0: Video: mjpeg (Baseline), yuvj422p, 320x240, 25 fps
+```
+
+This confirmed that the source path can indeed provide **25 fps MJPEG**.
+
+#### Root cause 2: per-frame heap churn + non-blocking VDEC/VENC handoff
+
+After capture was fixed, the remaining local bottleneck was the handoff
+`MJPEG ring -> malloc/memcpy -> CreateMB -> VDEC_SendStream`, plus a fully
+non-blocking `VDEC/VENC` loop that treated normal backpressure as drops.
+
+#### Fix 2: batched submit slots + bounded blocking timeouts
+
+Implemented in [vcpd/src/video_mpp.c](../vcpd/src/video_mpp.c):
+
+- Replaced per-frame `malloc/free` with a fixed pool of 8 in-flight submit slots
+- Removed one extra memcpy from the hot path
+- Submit MJPEG frames to VDEC in small bursts (`MJPEG_SUBMIT_BURST=6`)
+- Switched to short blocking timeouts, aligned with the SDK demo
+  [samples/example/demo/sample_demo_v4l2_mjpeg_vdec_venc.c](../samples/example/demo/sample_demo_v4l2_mjpeg_vdec_venc.c):
+  - `VDEC_SendStream`: 5 ms
+  - `VDEC_GetFrame`: 2 ms
+  - `VENC_SendFrame`: 5 ms
+  - `VENC_GetStream`: 2 ms
+- Expanded diagnostics to `sub=ok/busy/full/drop`
+
+#### Final result after fixes
+
+Field logs on device after deploy:
+
+```text
+cap=125 dec=125 enc=125 sub=125/0/0/0 nals=125 ... fps cap=25.0 dec=25.0 enc=25.0
+```
+
+Interpretation:
+
+- `cap=dec=enc=25 fps` — the local MPP pipeline now sustains the full target rate
+- `sub=125/0/0/0` — no VDEC submit backpressure (`busy/full`) and no hard submit drops
+- `rdrop=0 cdrop=0` — neither ring is overflowing
+
+#### Decision
+
+At this point **do not escalate to heavier local techniques yet**:
+
+- no immediate need for more aggressive batching,
+- no need to replace `/dev/shm` rings (already `tmpfs`, i.e. RAM-backed),
+- no need yet for deeper zero-copy / bind-only MPP redesign on the device side.
+
+The device-local `vcpd` pipeline is no longer the limiting factor for
+`320x240@25`. Further optimization effort should return to the transport / host
+side unless new evidence shows another local regression.
+
+#### Final conclusion from Phase 6.5
+
+The follow-up field logs after the last device build removed the remaining doubt:
+
+```text
+cap=125 dec=125 enc=125 sub=125/0/0/0 ... fps cap=25.0 dec=25.0 enc=25.0
+```
+
+This means the current `vcpd` implementation on device now sustains the full
+`320x240@25` pipeline locally:
+
+- capture is at target rate,
+- MJPEG decode is at target rate,
+- HEVC encode is at target rate,
+- no VDEC submit backpressure,
+- no local ring overruns.
+
+So the active bottleneck has definitively moved away from device-local MPP code
+and back to the **transport / host / radio delivery path**.
+
+From this point onward, transport-layer work has priority over deeper local MPP
+techniques. Any future local optimization (bind/zero-copy/etc.) should be treated
+as optional engineering cleanup, not as the current critical path.
+
+#### Active next focus: transport layer
+
+The next optimization cycle should focus on:
+
+1. Host/radio behavior under the new real `25 fps` source rate.
+2. Whether the transport path still exhibits a pps ceiling / fragment survival
+  issue once fed by a true 25 fps producer.
+3. Gateway-side frame assembly / reorder / keyframe survival under the higher
+  sustained source cadence.
+4. Whether the previously derived channel assumptions (`~95 pps ceiling`, MTU
+  tradeoffs, ACK strategy) still hold when the source is no longer locally
+  throttled to ~19 fps or ~10 fps.
+
+#### If local issues reappear, next diagnostics would be
+
+1. `MJPEG -> VDEC only` benchmark (disable HEVC encode)
+2. `test-pattern -> VENC only` benchmark
+3. Investigate `RK_MPI_SYS_Bind(VDEC -> VENC)` feasibility for a more direct
+   hardware pipeline
+
+But these are **not currently required** for the observed `25 fps` result.
+
+---
+
 ### Phase 7: Async Reliable Send (2026-06-27)
 
 **Problem**: `radio_espnow_send_reliable()` was **blocking** — it held the
