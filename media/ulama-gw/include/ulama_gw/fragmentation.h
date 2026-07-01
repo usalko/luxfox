@@ -7,8 +7,8 @@
 #include "ulama/ulama_frame.h"
 
 #define FRAG_MAX_FRAGMENTS 29
-#define FRAG_MAX_SLOTS 8
-#define FRAG_TIMEOUT_MS 200
+#define FRAG_MAX_SLOTS 16
+#define FRAG_TIMEOUT_MS 800
 #define FRAG_MAX_REASSEMBLED 65536   /* = VIDEO_RING_SLOT_MAX, one whole H.265 frame */
 
 typedef struct {

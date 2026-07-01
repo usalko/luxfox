@@ -95,7 +95,22 @@ static void usage(const char *prog)
 
 #define GW_MAX_NODES 254
 #define GW_VIDEO_REORDER_SLOTS 8
-#define GW_VIDEO_REORDER_HOLD_MS 50
+/*
+ * Reorder hold for ordinary sequence holes (a lost P-frame): keep it short so a
+ * loss only adds a little latency before we skip ahead.
+ *
+ * GW_VIDEO_KF_HOLD_MS is used ONLY while the missing frame is a keyframe that is
+ * still being reassembled. vcpd sends delayed keyframe copies on the next couple
+ * of frames (~100 ms and ~200 ms later), so with a 50 ms hold the gate always
+ * skipped the keyframe BEFORE its copies arrived, wasting the redundancy and
+ * causing a skip burst right after each keyframe (the visible "blinking"). Hold
+ * long enough for the copies to land, but only when a keyframe is actually in
+ * flight, so ordinary P-frame losses stay low-latency.
+ */
+#define GW_VIDEO_REORDER_HOLD_MS 120
+#define GW_VIDEO_KF_HOLD_MS 300
+#define GW_VIDEO_DONE_WINDOW 64
+#define GW_CTRL_KEEPALIVE_MS 20
 
 typedef struct {
 	uint32_t rx_pkts;
@@ -146,6 +161,12 @@ typedef struct {
 } video_reorder_ctx_t;
 
 typedef struct {
+	bool active;
+	uint8_t src_node;
+	uint16_t seq;
+} video_done_key_t;
+
+typedef struct {
 	gw_config_t gw;
 	char listen_addr[64];
 	char peer_addr[64];
@@ -161,6 +182,14 @@ typedef struct {
 	ulama_rx_transport_t ulama_rx;
 	frag_reassembly_ctx_t reassembly;
 	video_reorder_ctx_t video_reorder;
+	video_done_key_t video_done[GW_VIDEO_DONE_WINDOW];
+	uint16_t video_done_head;
+	bool wait_for_keyframe;
+	bool idr_request_in_flight;
+	uint8_t last_ctrl_payload[CASCADE_FRAME_MAX_PAYLOAD];
+	size_t last_ctrl_len;
+	uint64_t last_ctrl_tx_ms;
+	bool has_last_ctrl;
 	gw_stats_t stats;
 } app_ctx_t;
 
@@ -325,8 +354,37 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 			cf.version, cf.src, cf.dst, cf.traffic_class, cf.payload_len);
 	}
 
+	if (cf.traffic_class == CASCADE_CLASS_CONTROL &&
+	    cf.payload_len <= sizeof(ctx->last_ctrl_payload)) {
+		memcpy(ctx->last_ctrl_payload, cf.payload, cf.payload_len);
+		ctx->last_ctrl_len = cf.payload_len;
+		ctx->has_last_ctrl = true;
+	}
+
 	cascade_to_ulama_tx(ctx, &cf);
+	if (cf.traffic_class == CASCADE_CLASS_CONTROL)
+		ctx->last_ctrl_tx_ms = now_ms();
   }
+}
+
+static void maybe_send_ctrl_keepalive(app_ctx_t *ctx, uint64_t now_ms_value)
+{
+	if (!ctx->has_last_ctrl || ctx->last_ctrl_len == 0)
+		return;
+	if ((now_ms_value - ctx->last_ctrl_tx_ms) < GW_CTRL_KEEPALIVE_MS)
+		return;
+
+	cascade_frame_view_t cf = {
+		.version = CASCADE_FRAME_VERSION,
+		.src = 0,
+		.dst = 0,
+		.traffic_class = CASCADE_CLASS_CONTROL,
+		.payload = ctx->last_ctrl_payload,
+		.payload_len = ctx->last_ctrl_len,
+	};
+
+	cascade_to_ulama_tx(ctx, &cf);
+	ctx->last_ctrl_tx_ms = now_ms_value;
 }
 
 static bool send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
@@ -351,6 +409,32 @@ static bool send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 	}
 	free(buf);
 	return ok;
+}
+
+static void request_remote_idr(app_ctx_t *ctx)
+{
+	/*
+	 * UVCP READY already causes vcpd to request an IDR when the stream is active.
+	 * Reuse it as a lightweight recovery trigger after a detected video gap.
+	 */
+	static const uint8_t ready_msg[] = "UVCP/1 READY\n";
+	ulama_frame_view_t uf = {
+		.src_node = ctx->gw.node_id,
+		.dst_node = 1,
+		.flags = ULAMA_FLAG_DUP_ALLOWED,
+		.traffic_class = ULAMA_CLASS_CTRL,
+		.seq = ctx->seq_counter++,
+		.frag_idx = 0,
+		.frag_total = 1,
+		.ttl = ULAMA_FRAME_DEFAULT_TTL,
+		.payload = ready_msg,
+		.payload_len = sizeof(ready_msg) - 1,
+	};
+
+	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + 32];
+	size_t frame_len = 0;
+	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
+		(void)ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
 }
 
 static int16_t seq_delta(uint16_t newer, uint16_t older)
@@ -397,6 +481,25 @@ static bool payload_is_uvcp_control(const uint8_t *data, size_t len)
 {
 	return data != NULL && len >= UVCP_PREFIX_LEN &&
 		memcmp(data, UVCP_PREFIX, UVCP_PREFIX_LEN) == 0;
+}
+
+static bool video_done_contains(const app_ctx_t *ctx, uint8_t src_node, uint16_t seq)
+{
+	for (size_t i = 0; i < GW_VIDEO_DONE_WINDOW; i++) {
+		const video_done_key_t *key = &ctx->video_done[i];
+		if (key->active && key->src_node == src_node && key->seq == seq)
+			return true;
+	}
+	return false;
+}
+
+static void video_done_add(app_ctx_t *ctx, uint8_t src_node, uint16_t seq)
+{
+	video_done_key_t *key = &ctx->video_done[ctx->video_done_head];
+	key->active = true;
+	key->src_node = src_node;
+	key->seq = seq;
+	ctx->video_done_head = (uint16_t)((ctx->video_done_head + 1U) % GW_VIDEO_DONE_WINDOW);
 }
 
 static void video_reorder_reset(video_reorder_ctx_t *vr)
@@ -502,9 +605,20 @@ static void expire_reassembly_slots(app_ctx_t *ctx, uint64_t now_ms)
 }
 
 static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
-				size_t len, uint16_t src_u16)
+				size_t len, uint16_t src_u16, bool keyframe)
 {
-	bool keyframe = video_is_keyframe(data, len);
+	if (keyframe) {
+		ctx->wait_for_keyframe = false;
+		ctx->idr_request_in_flight = false;
+	} else if (ctx->wait_for_keyframe) {
+		/*
+		 * A sequence gap means at least one reference frame is gone. Feeding the
+		 * browser dependent P-frames after that produces the visible gray/corrupt
+		 * blink until the next IDR. Hold P-frames back and resume only on a fresh
+		 * keyframe.
+		 */
+		return;
+	}
 
 	cascade_frame_view_t cf = {
 		.version      = CASCADE_FRAME_VERSION,
@@ -525,6 +639,24 @@ static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
 	}
 }
 
+/*
+ * True when a keyframe for (src_node, seq) is currently mid-reassembly: at least
+ * one keyframe-flagged fragment has arrived but the frame is not complete yet.
+ * Used to hold the reorder gate longer for a keyframe that delayed copies will
+ * finish, without adding latency to ordinary P-frame holes.
+ */
+static bool reassembly_has_pending_keyframe(const frag_reassembly_ctx_t *rc,
+					    uint8_t src_node, uint16_t seq)
+{
+	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
+		const frag_reassembly_slot_t *slot = &rc->slots[i];
+		if (slot->active && slot->src_node == src_node && slot->seq == seq &&
+		    slot_has_keyframe_fragment(slot))
+			return true;
+	}
+	return false;
+}
+
 static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 {
 	video_reorder_ctx_t *vr = &ctx->video_reorder;
@@ -535,7 +667,8 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 	for (;;) {
 		video_reorder_slot_t *slot = video_reorder_find(vr, vr->next_seq);
 		if (slot != NULL) {
-			deliver_video_frame(ctx, slot->data, slot->len, slot->src_u16);
+			deliver_video_frame(ctx, slot->data, slot->len, slot->src_u16,
+					  slot->keyframe);
 			slot->active = false;
 			vr->next_seq++;
 			continue;
@@ -544,11 +677,28 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 		slot = video_reorder_find_next_ready(vr);
 		if (slot == NULL)
 			return;
-		if ((now_ms - slot->ready_ms) < GW_VIDEO_REORDER_HOLD_MS)
+
+		/*
+		 * Wait longer for the missing frame only when it is a keyframe that is
+		 * still being reassembled, so vcpd's delayed keyframe copies (~100 and
+		 * ~200 ms later) can complete it before we skip. Ordinary holes use the
+		 * short hold to keep latency low.
+		 */
+		uint8_t src_node = gw_addr_u16_to_u8(&ctx->gw, vr->src_u16);
+		uint32_t hold = reassembly_has_pending_keyframe(&ctx->reassembly,
+								 src_node, vr->next_seq)
+				? GW_VIDEO_KF_HOLD_MS : GW_VIDEO_REORDER_HOLD_MS;
+		if ((now_ms - slot->ready_ms) < hold)
 			return;
 
-		if (seq_delta(slot->seq, vr->next_seq) > 0)
+		if (seq_delta(slot->seq, vr->next_seq) > 0) {
 			ctx->stats.video_reorder_skips += (uint16_t)(slot->seq - vr->next_seq);
+			ctx->wait_for_keyframe = true;
+			if (!ctx->idr_request_in_flight) {
+				request_remote_idr(ctx);
+				ctx->idr_request_in_flight = true;
+			}
+		}
 		vr->next_seq = slot->seq;
 	}
 }
@@ -565,12 +715,24 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 	}
 
 	if (keyframe) {
-		/* A keyframe is a clean random-access point: reset ordering to it. */
-		if (!vr->primed || vr->src_u16 != src_u16 || seq_delta(seq, vr->next_seq) != 0)
+		/*
+		 * A keyframe is a clean random-access point. Resync the gate FORWARD to
+		 * it (cutting through any holes), but never backward: a late keyframe
+		 * copy that only finished after we already advanced past its seq must not
+		 * rewind delivery — that produced out-of-order frames and a skip burst
+		 * right after the keyframe. With the keyframe-aware hold above this branch
+		 * normally sees seq == next_seq (delivered in order).
+		 */
+		if (!vr->primed || vr->src_u16 != src_u16) {
 			video_reorder_reset(vr);
-		vr->primed = true;
-		vr->src_u16 = src_u16;
-		vr->next_seq = seq;
+			vr->primed = true;
+			vr->src_u16 = src_u16;
+			vr->next_seq = seq;
+		} else if (seq_delta(seq, vr->next_seq) >= 0) {
+			vr->next_seq = seq;
+		} else {
+			return; /* stale late keyframe — drop, wait for the next fresh one */
+		}
 	} else if (!vr->primed || vr->src_u16 != src_u16) {
 		/* Not yet primed: prime on the FIRST frame from this source, even if it
 		 * is not a keyframe. Hard-gating on keyframes stalls the whole pipeline
@@ -655,6 +817,10 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	}
 
 	if (uf.flags & ULAMA_FLAG_FRAGMENT) {
+		if (uf.traffic_class == ULAMA_CLASS_VIDEO &&
+		    video_done_contains(ctx, uf.src_node, uf.seq))
+			continue;
+
 		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, now_ms());
 		if (uf.traffic_class == ULAMA_CLASS_VIDEO)
 			ctx->stats.video_frags_rx++;
@@ -674,6 +840,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 				bool kf = (uf.flags & ULAMA_FLAG_VIDEO_KEYFRAME) ||
 					  video_is_keyframe(reassembled, reassembled_len);
+
+				video_done_add(ctx, uf.src_node, uf.seq);
 
 				if (kf) {
 					/* Discard all stale incomplete frames from this sender.
@@ -890,6 +1058,7 @@ int main(int argc, char *argv[])
 
 		/* Second pass: catch any cascade frames that arrived during RX */
 		handle_cascade_rx(&ctx);
+		maybe_send_ctrl_keepalive(&ctx, ts);
 		flush_video_reorder(&ctx, ts);
 
 		/* Print stats every 5 seconds */

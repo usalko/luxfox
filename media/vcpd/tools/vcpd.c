@@ -144,6 +144,9 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 	return 0;
 }
 
+/* Number of time-spread resend slots (in-flight frames awaiting delayed copies). */
+#define VCPD_RESEND_SLOTS 6
+
 typedef struct {
 	video_source_t video;
 	uvcp_session_t uvcp_sess;
@@ -167,6 +170,24 @@ typedef struct {
 	uint32_t idr_interval_ms;
 	uint64_t last_forced_idr_ms;
 	int benchmark_kbps;
+
+	/*
+	 * Time-spread redundancy ring. Every frame is stashed with a small number of
+	 * "resend credits"; on each SUBSEQUENT frame one credit is spent to resend a
+	 * full copy. Spacing the copies ~1 frame (~100 ms) apart — instead of
+	 * bursting them — defeats correlated losses (driver TX-ring burst drop / CTRL
+	 * collisions). Keyframes get more credits than P-frames. The copies share the
+	 * original seq, so the host de-dups them by (seq, frag_idx) and its ~120 ms
+	 * reorder hold lets a copy fill a lost original without added latency.
+	 */
+	struct vcpd_resend_slot {
+		uint8_t  buf[16 * 1024];
+		size_t   len;
+		uint16_t seq;
+		uint8_t  kf_flag;
+		int      credits;
+		bool     active;
+	} resend[VCPD_RESEND_SLOTS];
 } vcpd_ctx_t;
 
 static unsigned int tx_fail_count = 0;
@@ -181,22 +202,27 @@ static unsigned int tx_fail_count = 0;
  * reached the air (kf_rx=0 at ~4% airtime, -36 dBm), while small P-frames passed.
  *
  * Keep every fragment under the injection ceiling, but NOT so small that ordinary
- * P-frames (~1.3 KB) split into two fragments — that halved P-frame survival and
- * dropped frames_rx from ~42 to ~27 at MTU 1200. 1400 keeps a typical P-frame in
- * a single fragment (wire ~1.45 KB, under the limit) while a ~4.5 KB IDR becomes
- * ~4 fragments that all fit.
+ * P-frames split into two fragments — a 2-fragment P-frame roughly squares the
+ * per-fragment loss (frames_rx fell ~42 -> ~27 at MTU 1200). A wire frame adds
+ * ~42 B of radiotap+802.11+vendor headers on top of the ULAMA payload, and the
+ * rtl8192eu drops injected frames near the 1500 B netdev MTU, so 1440 keeps the
+ * wire size ~1496 B — just under the limit — fitting almost every P-frame in a
+ * single fragment while a ~4.5 KB IDR still splits into ~4 fragments that pass.
  */
-#define VIDEO_FRAG_MTU 1400
+#define VIDEO_FRAG_MTU 1440
 
 /*
- * Extra unreliable copies of every keyframe fragment (total sends = 1 + this).
- * Video is sent UNRELIABLE: the radiod reliable-ACK path produced a retransmit
- * storm (thousands of retx, ~87%% ACK timeouts) that congested the link and
- * raised loss for every frame while keyframes still failed. Plain forward
- * redundancy — repeating each keyframe fragment in separate passes — protects the
- * random-access point without any ACK traffic or retransmit feedback loop.
+ * Time-spread resend credits per frame type (extra full copies after the first
+ * send, one emitted per subsequent frame ~100 ms apart). Video is UNRELIABLE
+ * (the radiod reliable-ACK path caused a retransmit storm); this plain forward
+ * redundancy protects against the ~25% per-fragment loss seen even at low
+ * airtime / strong RSSI (external 2.4 GHz interference + driver TX-ring drops).
+ * Keyframes are bigger and costlier to lose, so they get more copies. The copies
+ * share the original seq; the host de-dups by (seq, frag_idx) and its ~120 ms
+ * reorder hold lets a copy fill a lost original without adding latency.
  */
 #define KEYFRAME_EXTRA_COPIES 2
+#define PFRAME_EXTRA_COPIES   1
 
 /* Pack and send one already-built ULAMA frame, tracking consecutive
  * TX failures for the main loop's transport-recovery logic. */
@@ -281,74 +307,118 @@ static bool is_hevc_keyframe(const uint8_t *data, size_t len)
 	return false;
 }
 /*
+ * Transmit one whole-frame pass: fragment the H.265 frame and inject every
+ * fragment once. All fragments share the same seq so the receiver reassembles
+ * them via frag_reassembly_insert(); repeated passes with the same seq are
+ * de-duplicated by (seq, frag_idx) through the reassembly received_mask.
+ */
+static void tx_video_frame_pass(vcpd_ctx_t *ctx, const uint8_t *data, size_t len,
+				uint16_t seq, uint8_t kf_flag)
+{
+	const size_t mtu = VIDEO_FRAG_MTU;
+	size_t nfrags = (len + mtu - 1) / mtu;
+	if (nfrags == 0 || nfrags > 255)
+		return;
+
+	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+
+	for (size_t i = 0; i < nfrags; i++) {
+		size_t off   = i * mtu;
+		size_t chunk = (off + mtu <= len) ? mtu : (len - off);
+		bool   last  = (i + 1 == nfrags);
+
+		ulama_frame_view_t uf = {
+			.src_node      = ctx->node_id,
+			.dst_node      = ctx->dst_node,
+			.flags         = ULAMA_FLAG_FRAGMENT | ULAMA_FLAG_DUP_ALLOWED | kf_flag
+					 | (last ? ULAMA_FLAG_LAST_FRAGMENT : 0),
+			.traffic_class = ULAMA_CLASS_VIDEO,
+			.seq           = seq,
+			.frag_idx      = (uint8_t)i,
+			.frag_total    = (uint8_t)nfrags,
+			.ttl           = ULAMA_FRAME_DEFAULT_TTL,
+			.payload       = data + off,
+			.payload_len   = chunk,
+		};
+
+		size_t frame_len = 0;
+		if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
+			fprintf(stderr, "vcpd: ulama_frame_pack failed for fragment %zu/%zu\n",
+				i + 1, nfrags);
+			continue;
+		}
+
+		(void)send_ulama_frame_raw(ctx, frame_buf, frame_len);
+	}
+}
+
+/*
  * Fragment a complete H.265 frame (one ring slot) into ULAMA frames and send.
- * Each fragment: ULAMA header + up to ULAMA_FRAME_MAX_PAYLOAD bytes payload.
- * All fragments of one frame share the same ulama_seq so the receiver can
- * reassemble them via frag_reassembly_insert().
+ *
+ * Every frame gets TIME-SPREAD forward redundancy: the current frame is sent
+ * once, then queued in the resend ring with a few credits. On each SUBSEQUENT
+ * frame one credit per in-flight frame is spent to resend a full copy, so the
+ * copies land ~100/200 ms after the original and fill losses within the host's
+ * ~120 ms reorder hold (no added latency). Keyframes get more credits than
+ * P-frames. Spreading copies across frames — not bursting — defeats correlated
+ * losses (driver TX-ring burst drop / CTRL collisions).
  */
 static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 {
 	if (len == 0)
 		return;
 
-	/* Fragment below the driver injection MTU (see VIDEO_FRAG_MTU). */
-	const size_t mtu = VIDEO_FRAG_MTU;
-	size_t nfrags = (len + mtu - 1) / mtu;
-	if (nfrags > 255) {
+	if ((len + VIDEO_FRAG_MTU - 1) / VIDEO_FRAG_MTU > 255) {
 		/* Frame too large — should never happen with VIDEO_RING_SLOT_MAX = 64KB */
 		fprintf(stderr, "vcpd: frame too large (%zu bytes), dropping\n", len);
 		return;
 	}
 
-	bool keyframe = is_hevc_keyframe(data, len);
-	uint16_t seq  = ctx->ulama_seq++;
-	uint8_t  kf_flag = keyframe ? ULAMA_FLAG_VIDEO_KEYFRAME : 0;
-
-	/*
-	 * Video is UNRELIABLE. Keyframes get plain forward redundancy: each fragment
-	 * is transmitted (1 + KEYFRAME_EXTRA_COPIES) times. The copies go out in
-	 * separate whole-frame passes so a burst drop at the driver TX ring cannot
-	 * wipe every copy of the same fragment at once. Receiver de-dups by
-	 * (seq, frag_idx) via the reassembly received_mask.
-	 */
-	size_t passes = keyframe ? (size_t)(1u + KEYFRAME_EXTRA_COPIES) : 1u;
-
-	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
+	bool     keyframe = is_hevc_keyframe(data, len);
+	uint16_t seq      = ctx->ulama_seq++;
+	uint8_t  kf_flag  = keyframe ? ULAMA_FLAG_VIDEO_KEYFRAME : 0;
 
 	if (ctx->verbose)
-		fprintf(stderr,
-			"vcpd: video frame %zu bytes → %zu frags, keyframe=%d copies=%zu\n",
-			len, nfrags, keyframe, passes);
+		fprintf(stderr, "vcpd: video frame %zu bytes seq=%u keyframe=%d\n",
+			len, seq, keyframe);
 
-	for (size_t pass = 0; pass < passes; pass++) {
-		for (size_t i = 0; i < nfrags; i++) {
-			size_t off   = i * mtu;
-			size_t chunk = (off + mtu <= len) ? mtu : (len - off);
-			bool   last  = (i + 1 == nfrags);
+	/* 1. Send the current frame once, fresh. */
+	tx_video_frame_pass(ctx, data, len, seq, kf_flag);
 
-			ulama_frame_view_t uf = {
-				.src_node      = ctx->node_id,
-				.dst_node      = ctx->dst_node,
-				.flags         = ULAMA_FLAG_FRAGMENT | ULAMA_FLAG_DUP_ALLOWED | kf_flag
-						 | (last ? ULAMA_FLAG_LAST_FRAGMENT : 0),
-				.traffic_class = ULAMA_CLASS_VIDEO,
-				.seq           = seq,
-				.frag_idx      = (uint8_t)i,
-				.frag_total    = (uint8_t)nfrags,
-				.ttl           = ULAMA_FRAME_DEFAULT_TTL,
-				.payload       = data + off,
-				.payload_len   = chunk,
-			};
+	/* 2. Spend one credit per in-flight frame: resend delayed copies now. */
+	for (int i = 0; i < VCPD_RESEND_SLOTS; i++) {
+		struct vcpd_resend_slot *s = &ctx->resend[i];
+		if (!s->active || s->credits <= 0)
+			continue;
+		tx_video_frame_pass(ctx, s->buf, s->len, s->seq, s->kf_flag);
+		if (--s->credits <= 0)
+			s->active = false;
+	}
 
-			size_t frame_len = 0;
-			if (!ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len)) {
-				fprintf(stderr, "vcpd: ulama_frame_pack failed for fragment %zu/%zu\n",
-					i + 1, nfrags);
-				continue;
+	/* 3. Stash the current frame for its own future delayed copies. */
+	int credits = keyframe ? KEYFRAME_EXTRA_COPIES : PFRAME_EXTRA_COPIES;
+	if (credits > 0 && len <= sizeof(ctx->resend[0].buf)) {
+		struct vcpd_resend_slot *dst = NULL;
+		for (int i = 0; i < VCPD_RESEND_SLOTS; i++) {
+			if (!ctx->resend[i].active) {
+				dst = &ctx->resend[i];
+				break;
 			}
-
-			(void)send_ulama_frame_raw(ctx, frame_buf, frame_len);
 		}
+		/* Ring full (bursty losses stalled draining): reuse the slot with the
+		 * fewest remaining credits so keyframes are least likely to be evicted. */
+		if (dst == NULL) {
+			dst = &ctx->resend[0];
+			for (int i = 1; i < VCPD_RESEND_SLOTS; i++)
+				if (ctx->resend[i].credits < dst->credits)
+					dst = &ctx->resend[i];
+		}
+		memcpy(dst->buf, data, len);
+		dst->len = len;
+		dst->seq = seq;
+		dst->kf_flag = kf_flag;
+		dst->credits = credits;
+		dst->active = true;
 	}
 }
 
@@ -642,7 +712,9 @@ int main(int argc, char *argv[])
 	/* Adaptive defaults based on fps if not explicitly set */
 	int fps = ctx.video.fps > 0 ? ctx.video.fps : 25;
 	if (ctx.video.gop == 0) {
-		ctx.video.gop = fps > 10 ? 10 : fps;
+		/* Default GOP for adaptive mode: min(fps, 25) to balance IDR frequency
+		 * (not too sparse for browser bootstrap, not too dense for throughput) */
+		ctx.video.gop = fps > 25 ? 25 : fps;
 		if (ctx.video.gop < 5)
 			ctx.video.gop = 5;
 	}
@@ -650,15 +722,17 @@ int main(int argc, char *argv[])
 	 * The current host pipeline/browser path still needs frequent real IDRs.
 	 * On this SDK row intra-refresh is rejected at runtime, and SmartP has been
 	 * observed to produce streams that keep the browser black despite non-zero
-	 * video_out. Force the live transport toward small, regular real IDRs. */
+	 * video_out. Force the live transport toward small, regular real IDRs.
+	 * Allow gop up to fps (IDR at least once per second) to balance throughput. */
 	if (ctx.video.smartp || ctx.video.intra_refresh_rows > 0 ||
-	    ctx.video.gop > 10 || ctx.idr_interval_ms == 0 || ctx.idr_interval_ms > 1000) {
+	    ctx.video.gop > fps || ctx.idr_interval_ms == 0 || ctx.idr_interval_ms > 1000) {
 		fprintf(stderr,
-			"vcpd: browser compatibility override: smartp=off intra_refresh=0 gop<=10 idr<=1000ms\n");
+			"vcpd: browser compatibility override: smartp=off intra_refresh=0 gop<=%d idr<=1000ms\n",
+			fps);
 		ctx.video.smartp = false;
 		ctx.video.intra_refresh_rows = 0;
-		if (ctx.video.gop > 10)
-			ctx.video.gop = 10;
+		if (ctx.video.gop > fps)
+			ctx.video.gop = fps;
 		if (ctx.video.gop < 5)
 			ctx.video.gop = 5;
 		if (ctx.idr_interval_ms == 0 || ctx.idr_interval_ms > 1000)

@@ -41,11 +41,23 @@
 
 /* ---- TDMA Constants ---- */
 
-#define TX_SLOT_SIZE          4
+#define TX_SLOT_SIZE          2
 #define RX_SLOT_US            2000
 #define ACK_TIMEOUT_US        12000
 #define ACK_MAX_RETRY         6
-#define TX_PACE_US            300
+/*
+ * Inter-packet pacing inside a TX slot. The rtl8192eu USB adapter silently drops
+ * the TAIL of a rapid inject burst (its TX ring/URB queue overflows), so a
+ * keyframe's 4 back-to-back full-size fragments lost fragments 2-3 on EVERY send
+ * — and because the drop is systematic, the time-spread keyframe copies all lost
+ * the same fragments and never completed reassembly (kf_lost stayed ~half while
+ * 1-2 fragment P-frames passed fine). Small TX_SLOT_SIZE (2) plus a generous gap
+ * lets the ring drain between injects; a 4-fragment keyframe now spans multiple
+ * cycles (with a ~2 ms RX slot between) instead of one ~1 ms burst. Airtime is
+ * far from saturated (~6%), and cycle rate (~700/s) dwarfs the ~45 pkt/s load,
+ * so throughput and latency are unaffected.
+ */
+#define TX_PACE_US            1500
 
 /* ---- Globals ---- */
 
