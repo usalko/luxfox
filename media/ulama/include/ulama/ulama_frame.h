@@ -20,6 +20,14 @@
 #define ULAMA_FLAG_DEGRADED 0x40
 #define ULAMA_FLAG_DUP_ALLOWED 0x80
 
+/*
+ * VIDEO_KEYFRAME: set on all fragments of a keyframe (IDR + VPS/SPS/PPS).
+ * Meaningful only for ULAMA_CLASS_VIDEO frames.
+ * Allows the receiver to flush stale incomplete P-frame reassembly on IDR arrival.
+ * Reuses bit 0x40 (DEGRADED), which is only relevant for mesh-relay CTRL frames.
+ */
+#define ULAMA_FLAG_VIDEO_KEYFRAME 0x40
+
 typedef enum {
 	ULAMA_CLASS_CTRL = 0,
 	ULAMA_CLASS_TELEMETRY = 1,

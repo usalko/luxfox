@@ -22,6 +22,7 @@ typedef struct {
 	/* Timing */
 	int64_t  period_start_us;
 	uint64_t tx_time_us;
+	uint64_t tx_airtime_us;
 	uint64_t rx_time_us;
 	uint64_t idle_time_us;
 
@@ -52,6 +53,7 @@ void radio_stats_init(radio_stats_t *st, int64_t now_us);
 
 /* Call at the start and end of TX/RX slots to accumulate time. */
 void radio_stats_add_tx_time(radio_stats_t *st, uint64_t us);
+void radio_stats_add_tx_airtime(radio_stats_t *st, uint64_t us);
 void radio_stats_add_rx_time(radio_stats_t *st, uint64_t us);
 void radio_stats_add_cycle(radio_stats_t *st);
 void radio_stats_add_tx_packet(radio_stats_t *st, uint8_t priority);

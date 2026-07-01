@@ -6,7 +6,17 @@
 
 #define CASCADE_FRAME_VERSION 1
 #define CASCADE_FRAME_HEADER_SIZE 6
-#define CASCADE_FRAME_MAX_PAYLOAD 65000
+/*
+ * Cascade frames travel over a UDP socket (cascade-in/cascade-out), so the
+ * total datagram (header + payload) must fit the IPv4 UDP payload ceiling of
+ * 65507 bytes (65535 - 20 byte IP header - 8 byte UDP header), or sendto()
+ * fails. This is slightly below VIDEO_RING_SLOT_MAX (65536) — a maximal
+ * ring-slot frame from vcpd is vanishingly rare in practice (typical encoded
+ * H.265 frames at the configured bitrates are a few KB to a few tens of KB),
+ * but deliver_video_frame()/send_cascade_frame() must still handle the
+ * rejection cleanly rather than silently dropping a frame on the floor.
+ */
+#define CASCADE_FRAME_MAX_PAYLOAD (65507 - CASCADE_FRAME_HEADER_SIZE)
 
 typedef enum {
 	CASCADE_CLASS_CONTROL = 0,

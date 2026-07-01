@@ -113,8 +113,14 @@ typedef struct {
 	pthread_mutex_t    diag_lock;
 	mpp_diag_t         diag;
 
-	/* Ring buffer used in camera mode; NULL in test-pattern mode. */
+	/* Ring buffer: holds one whole encoded H.265 frame per slot, used in
+	 * both camera and test-pattern mode so vsrc_read() always returns a
+	 * complete frame. */
 	video_ring_t      *ring;
+
+	/* true if this session decodes a real camera feed (V4L2 + VDEC);
+	 * false in test-pattern mode (VENC only, no VDEC). */
+	bool               is_camera;
 
 } mpp_ctx_t;
 
@@ -585,11 +591,11 @@ static RK_S32 send_mjpeg_to_vdec_owned(mpp_ctx_t *ctx, void *packet, size_t len)
 /*
  * Emit the current VENC stream to the output channel.
  *
- * Camera mode: all packs are concatenated into ONE ring slot so that
+ * All packs are concatenated into ONE ring slot so that
  * video_ring_pop_latest() always returns a complete frame (VPS+SPS+PPS+IDR
- * or P-frame group) and never a partial one.
- *
- * Test-pattern mode: packs are written directly into the pipe as raw bytes.
+ * or P-frame group) and never a partial one. Used by both camera and
+ * test-pattern mode — send_video_frame() in vcpd.c relies on each
+ * vsrc_read() call returning exactly one whole H.265 frame.
  */
 static uint64_t mpp_emit_venc_stream(mpp_ctx_t *ctx)
 {
@@ -599,39 +605,28 @@ static uint64_t mpp_emit_venc_stream(mpp_ctx_t *ctx)
 
 	uint64_t bytes_out = 0;
 
-	if (ctx->ring) {
-		/* Concatenate all packs into a single ring slot. */
-		static uint8_t concat_buf[VIDEO_RING_SLOT_MAX];
-		uint32_t concat_len = 0;
-		for (RK_U32 p = 0; p < npack; p++) {
-			void   *data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
-			RK_U32  dlen = ctx->venc_packs[p].u32Len;
-			if (!data || dlen == 0) continue;
-			uint32_t room = VIDEO_RING_SLOT_MAX - concat_len;
-			if (dlen > room) dlen = room;
-			if (dlen == 0) break;
-			memcpy(concat_buf + concat_len, data, dlen);
-			concat_len += dlen;
+	/* Concatenate all packs into a single ring slot. */
+	static uint8_t concat_buf[VIDEO_RING_SLOT_MAX];
+	uint32_t concat_len = 0;
+	for (RK_U32 p = 0; p < npack; p++) {
+		void   *data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
+		RK_U32  dlen = ctx->venc_packs[p].u32Len;
+		if (!data || dlen == 0) continue;
+		uint32_t room = VIDEO_RING_SLOT_MAX - concat_len;
+		if (dlen > room) dlen = room;
+		if (dlen == 0) break;
+		memcpy(concat_buf + concat_len, data, dlen);
+		concat_len += dlen;
+	}
+	if (concat_len > 0) {
+		bool pushed = video_ring_push(ctx->ring, concat_buf, concat_len);
+		if (pushed) {
+			uint8_t sig = 1;
+			(void)write(ctx->pipe_wr, &sig, sizeof(sig));
+		} else {
+			mpp_diag_note_ring_drop(ctx);
 		}
-		if (concat_len > 0) {
-			bool pushed = video_ring_push(ctx->ring, concat_buf, concat_len);
-			if (pushed) {
-				uint8_t sig = 1;
-				(void)write(ctx->pipe_wr, &sig, sizeof(sig));
-			} else {
-				mpp_diag_note_ring_drop(ctx);
-			}
-			bytes_out = concat_len;
-		}
-	} else {
-		/* Test-pattern: raw byte stream into the pipe. */
-		for (RK_U32 p = 0; p < npack; p++) {
-			void   *data = RK_MPI_MB_Handle2VirAddr(ctx->venc_packs[p].pMbBlk);
-			RK_U32  dlen = ctx->venc_packs[p].u32Len;
-			if (!data || dlen == 0) continue;
-			(void)write(ctx->pipe_wr, data, dlen);
-			bytes_out += dlen;
-		}
+		bytes_out = concat_len;
 	}
 
 	mpp_diag_note_venc_stream(ctx, npack, bytes_out);
@@ -865,7 +860,19 @@ int video_source_mpp_start(video_source_mpp_t *src)
 		ret = init_venc(ctx);
 		if (ret != RK_SUCCESS) { close(pipefd[0]); close(pipefd[1]); goto fail; }
 
+		ctx->ring = video_ring_create(VIDEO_RING_FILE);
+		if (!ctx->ring) {
+			fprintf(stderr, "vcpd: [mpp] failed to create ring at %s: %s\n",
+				VIDEO_RING_FILE, strerror(errno));
+			deinit_venc();
+			close(pipefd[0]); close(pipefd[1]);
+			goto fail;
+		}
+		fprintf(stderr, "vcpd: [mpp] ring buffer %zu KB at %s\n",
+			VIDEO_RING_MMAP_SIZE / 1024, VIDEO_RING_FILE);
+
 		if (pthread_create(&ctx->encode_thread, NULL, mpp_pattern_thread, ctx) != 0) {
+			video_ring_destroy(ctx->ring, VIDEO_RING_FILE); ctx->ring = NULL;
 			deinit_venc();
 			close(pipefd[0]); close(pipefd[1]);
 			goto fail;
@@ -874,6 +881,7 @@ int video_source_mpp_start(video_source_mpp_t *src)
 
 	} else {
 		/* ---- camera mode: V4L2 → VDEC → VENC → ring ---- */
+		ctx->is_camera = true;
 		if (v4l2_open(ctx) < 0) { close(pipefd[0]); close(pipefd[1]); goto fail; }
 
 		fprintf(stderr,
@@ -949,7 +957,7 @@ void video_source_mpp_stop(video_source_mpp_t *src)
 
 	v4l2_cleanup(ctx);
 	deinit_venc();
-	if (ctx->ring) deinit_vdec();
+	if (ctx->is_camera) deinit_vdec();
 
 	if (ctx->pipe_wr >= 0) { close(ctx->pipe_wr); ctx->pipe_wr = -1; }
 	if (src->pipe_fd >= 0) { close(src->pipe_fd); src->pipe_fd = -1; }
@@ -963,35 +971,39 @@ void video_source_mpp_stop(video_source_mpp_t *src)
 	src->running = false;
 }
 
+void video_source_mpp_request_idr(video_source_mpp_t *src)
+{
+	if (!src || !src->running || !src->mpp_ctx)
+		return;
+	/* Signal VENC to emit VPS+SPS+PPS+IDR at the start of the next frame.
+	 * Called when UVCP READY is received so the receiver can start decoding
+	 * within one frame interval instead of waiting for the next natural IDR. */
+	RK_MPI_VENC_RequestIDR(VENC_CHN_ID, RK_TRUE);
+}
+
 ssize_t video_source_mpp_read(video_source_mpp_t *src, uint8_t *buf, size_t len)
 {
 	if (!src || !src->running || src->pipe_fd < 0) return -1;
 
 	mpp_ctx_t *ctx = (mpp_ctx_t *)src->mpp_ctx;
+	if (!ctx || !ctx->ring) return -1;
 
-	if (ctx && ctx->ring) {
-		/*
-		 * Camera mode: pipe carries 1-byte wake signals only.
-		 * EOF on pipe means the encoder thread exited → shutdown.
-		 * Use pop_latest so the sender always transmits the freshest frame.
-		 */
-		uint8_t sig;
-		ssize_t r = read(src->pipe_fd, &sig, sizeof(sig));
-		if (r == 0) return 0;           /* EOF → shutdown */
-		if (r < 0) {
-			if (errno == EINTR || errno == EAGAIN) return 0;
-			return -1;
-		}
-		uint32_t chunk_len = 0;
-		if (!video_ring_pop_latest(ctx->ring, buf, len, &chunk_len))
-			return 0;  /* spurious signal */
-		return (ssize_t)chunk_len;
+	/*
+	 * Pipe carries 1-byte wake signals only (both camera and test-pattern
+	 * mode). EOF on pipe means the encoder thread exited → shutdown.
+	 * Use pop_latest so the sender always transmits the freshest frame.
+	 */
+	uint8_t sig;
+	ssize_t r = read(src->pipe_fd, &sig, sizeof(sig));
+	if (r == 0) return 0;           /* EOF → shutdown */
+	if (r < 0) {
+		if (errno == EINTR || errno == EAGAIN) return 0;
+		return -1;
 	}
-
-	/* Test-pattern: raw H.265 byte stream in the pipe. */
-	ssize_t n = read(src->pipe_fd, buf, len);
-	if (n < 0 && errno == EINTR) return 0;
-	return n;
+	uint32_t chunk_len = 0;
+	if (!video_ring_pop_latest(ctx->ring, buf, len, &chunk_len))
+		return 0;  /* spurious signal */
+	return (ssize_t)chunk_len;
 }
 
 #endif /* VCPD_WITH_MPP */

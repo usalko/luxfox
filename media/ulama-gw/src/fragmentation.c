@@ -96,7 +96,9 @@ bool frag_reassembly_insert(frag_reassembly_ctx_t *ctx, const ulama_frame_view_t
 	slot->fragments[frame->frag_idx].payload_len = copy_len;
 	slot->received_mask |= (1u << frame->frag_idx);
 
-	uint8_t expected_mask = (uint8_t)((1u << frame->frag_total) - 1);
+	uint32_t expected_mask = (frame->frag_total == 32)
+				 ? 0xFFFFFFFFu
+				 : (1u << frame->frag_total) - 1u;
 	return (slot->received_mask & expected_mask) == expected_mask;
 }
 
@@ -106,7 +108,9 @@ bool frag_reassembly_complete(frag_reassembly_ctx_t *ctx, uint8_t src_node, uint
 	if (!slot)
 		return false;
 
-	uint8_t expected_mask = (uint8_t)((1u << slot->frag_total) - 1);
+	uint32_t expected_mask = (slot->frag_total == 32)
+				 ? 0xFFFFFFFFu
+				 : (1u << slot->frag_total) - 1u;
 	if ((slot->received_mask & expected_mask) != expected_mask)
 		return false;
 
@@ -133,6 +137,20 @@ void frag_reassembly_expire(frag_reassembly_ctx_t *ctx, uint64_t now_ms)
 	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
 		frag_reassembly_slot_t *s = &ctx->slots[i];
 		if (s->active && (now_ms - s->first_ts_ms) > FRAG_TIMEOUT_MS)
+			s->active = false;
+	}
+}
+
+void frag_reassembly_flush_stale_video(frag_reassembly_ctx_t *ctx,
+				       uint8_t src_node, uint16_t keyframe_seq)
+{
+	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
+		frag_reassembly_slot_t *s = &ctx->slots[i];
+		if (!s->active || s->src_node != src_node)
+			continue;
+		/* Flush all incomplete frames whose seq < keyframe_seq (sequence space wrap-safe) */
+		int16_t delta = (int16_t)(keyframe_seq - s->seq);
+		if (delta > 0)
 			s->active = false;
 	}
 }

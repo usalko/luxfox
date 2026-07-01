@@ -16,11 +16,11 @@
 #include "ulama_gw/cascade_frame.h"
 #include "ulama_gw/gateway.h"
 #include "ulama_gw/fragmentation.h"
-#include "ulama_gw/lts_decoder.h"
-#include "ulama_gw/lts_fec_dec.h"
 #include "ulama/ulama_frame.h"
 #include "ulama/ulama_version.h"
 #include "ulama/transport.h"
+#include "unow/radio_unow.h"
+#include "unow/unow_wire.h"
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -82,41 +82,17 @@ static void usage(const char *prog)
 		"  --peer        ADDR:PORT  Send ULAMA frames to (UDP)        (default 127.0.0.1:5001)\n"
 		"  --iface       NAME       Monitor mode interface (UNOW)     (default mon0)\n"
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
+		"  --tx-rate-mbps N        Legacy radiotap TX rate for UNOW uplink (default 1)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
-		"  --gap-tolerance N        Max skipped packets per NAL before drop  (default 2)\n"
-		"  --nack-disable           Suppress NACK sending (for benchmarks)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
 }
 
-#define NAL_ASSEMBLE_MAX (64 * 1024)
-#define HEVC_PARAM_MAX 256
-
-typedef struct {
-	uint8_t vps[HEVC_PARAM_MAX];
-	size_t vps_len;
-	uint8_t sps[HEVC_PARAM_MAX];
-	size_t sps_len;
-	uint8_t pps[HEVC_PARAM_MAX];
-	size_t pps_len;
-	bool valid;
-} hevc_param_cache_t;
-
-typedef struct {
-	uint8_t buf[NAL_ASSEMBLE_MAX];
-	size_t len;
-	uint16_t first_seq;
-	uint16_t expect_seq;
-	bool active;
-	bool skip;
-	uint16_t gaps_tolerated;
-	uint16_t max_gap_tolerance;
-	size_t chunk_size;
-} nal_assembler_t;
-
 #define GW_MAX_NODES 254
+#define GW_VIDEO_REORDER_SLOTS 8
+#define GW_VIDEO_REORDER_HOLD_MS 50
 
 typedef struct {
 	uint32_t rx_pkts;
@@ -128,47 +104,43 @@ typedef struct {
 } gw_node_stats_t;
 
 typedef struct {
-	uint32_t nal_complete;
-	uint32_t nal_dropped;
-	uint32_t lts_rx;
-	uint32_t lts_gaps;
-	uint32_t lts_unique;
-	uint32_t lts_dup;
-	uint16_t lts_seq_min;
-	uint16_t lts_seq_max;
-	bool lts_seq_valid;
 	uint32_t ulama_rx_video;
 	uint32_t ulama_rx_telem;
 	uint32_t ulama_rx_ctrl;
 	uint32_t ctrl_tx;
-	uint32_t nack_sent;
 	uint64_t video_bytes_out;
 	uint64_t last_print_ms;
 	int32_t rssi_sum;
 	uint32_t rssi_count;
-	uint32_t nal_drop_1pkt;
-	uint32_t nal_drop_2_5pkt;
-	uint32_t nal_drop_6_15pkt;
-	uint32_t nal_drop_16plus;
-	uint32_t burst_gaps;
-	uint32_t single_gaps;
-	uint32_t retx_arrived;
-	uint32_t fec_recovered;
-	uint32_t fec_unrecoverable;
-	uint32_t nal_gap_skipped;
-	uint32_t lts_rx_total;
-	uint64_t lts_payload_bytes;
-	uint32_t lts_stale;
-	uint32_t lts_keyframe_flushes;
-	/* NAL type breakdown: ok = assembled+sent, drop = discarded */
-	uint32_t nal_ok_idr;
-	uint32_t nal_ok_param;
-	uint32_t nal_ok_p;
-	uint32_t nal_drop_idr;
-	uint32_t nal_drop_p;
+	/* Direct video delivery (replaces LTS/NAL-assembly stats) */
+	uint32_t video_frames_rx;         /* fully assembled frames forwarded to cascade */
+	uint32_t video_keyframes_rx;      /* fully assembled keyframes */
+	uint32_t video_frags_rx;          /* video fragments received */
+	uint32_t video_frames_dropped;    /* incomplete frames that failed to reassemble */
+	uint32_t video_frames_incomplete; /* reassembly slots expired before completion */
+	uint32_t video_keyframes_lost;    /* incomplete reassembly slots flagged as keyframes */
+	uint32_t video_keyframe_flushes;  /* stale P-frame reassembly flushed on IDR */
+	uint32_t video_reorder_skips;     /* skipped seq holes after short hold timeout */
 	uint32_t cascade_out_frames;
 	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
+
+typedef struct {
+	bool active;
+	bool keyframe;
+	uint16_t seq;
+	uint16_t src_u16;
+	uint64_t ready_ms;
+	size_t len;
+	uint8_t data[CASCADE_FRAME_MAX_PAYLOAD];
+} video_reorder_slot_t;
+
+typedef struct {
+	bool primed;
+	uint16_t src_u16;
+	uint16_t next_seq;
+	video_reorder_slot_t slots[GW_VIDEO_REORDER_SLOTS];
+} video_reorder_ctx_t;
 
 typedef struct {
 	gw_config_t gw;
@@ -177,6 +149,7 @@ typedef struct {
 	char dst_mac_str[32];
 	bool verbose;
 	int channel;
+	uint8_t tx_rate_500kbps;
 	uint16_t seq_counter;
 	int cascade_rx_fd;
 	struct sockaddr_in cascade_tx_addr;
@@ -184,17 +157,8 @@ typedef struct {
 	ulama_tx_transport_t ulama_tx;
 	ulama_rx_transport_t ulama_rx;
 	frag_reassembly_ctx_t reassembly;
-	lts_decoder_t lts_dec;
-	uint16_t lts_video_src;
-	uint8_t lts_video_src_node;
-	uint64_t last_nack_ms;
-	uint16_t nack_horizon;
-	bool nack_horizon_valid;
-	nal_assembler_t nal_asm;
-	lts_fec_decoder_t fec_dec;
+	video_reorder_ctx_t video_reorder;
 	gw_stats_t stats;
-	bool nack_disable;
-	hevc_param_cache_t param_cache;
 } app_ctx_t;
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
@@ -215,6 +179,21 @@ static int parse_addr(const char *str, struct sockaddr_in *out)
 		return -1;
 
 	return 0;
+}
+
+static bool parse_tx_rate_mbps(const char *text, uint8_t *rate_500kbps)
+{
+	long mbps;
+
+	if (text == NULL || rate_500kbps == NULL)
+		return false;
+
+	mbps = strtol(text, NULL, 10);
+	if (mbps < 1 || mbps > 63)
+		return false;
+
+	*rate_500kbps = (uint8_t)(mbps * 2);
+	return true;
 }
 
 static int open_udp_listener(const char *addr_str)
@@ -322,9 +301,6 @@ static void cascade_to_ulama_tx(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 /*
  * TDMA-prioritized cascade RX: process CTRL frames first (immediate),
  * then other classes (rate-limited by the caller's TX budget).
- *
- * ctrl_only: when true, only CTRL frames are transmitted;
- *            non-CTRL are silently consumed but not forwarded.
  */
 static void handle_cascade_rx(app_ctx_t *ctx)
 {
@@ -350,298 +326,243 @@ static void handle_cascade_rx(app_ctx_t *ctx)
   }
 }
 
-static void send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
+static bool send_cascade_frame(app_ctx_t *ctx, const cascade_frame_view_t *cf)
 {
 	size_t buf_size = CASCADE_FRAME_HEADER_SIZE + cf->payload_len;
 	uint8_t *buf = (uint8_t *)malloc(buf_size);
-	if (!buf) return;
+	if (!buf) return false;
 	size_t len = 0;
+	bool ok = false;
 	if (cascade_frame_pack(cf, buf, buf_size, &len)) {
-		sendto(ctx->cascade_tx_fd, buf, len, 0,
-		       (struct sockaddr *)&ctx->cascade_tx_addr, sizeof(ctx->cascade_tx_addr));
+		ssize_t sent = sendto(ctx->cascade_tx_fd, buf, len, 0,
+				      (struct sockaddr *)&ctx->cascade_tx_addr, sizeof(ctx->cascade_tx_addr));
+		if (sent == (ssize_t)len) {
+			ok = true;
+		} else {
+			fprintf(stderr, "gw: cascade-out sendto failed for %zu-byte frame (class=%u): %s\n",
+				cf->payload_len, cf->traffic_class, strerror(errno));
+		}
+	} else {
+		fprintf(stderr, "gw: cascade_frame_pack rejected %zu-byte payload (class=%u, max=%u)\n",
+			cf->payload_len, cf->traffic_class, CASCADE_FRAME_MAX_PAYLOAD);
 	}
 	free(buf);
+	return ok;
 }
 
-static uint8_t hevc_nal_type(const uint8_t *nal, size_t len)
+static int16_t seq_delta(uint16_t newer, uint16_t older)
 {
-	size_t off = 0;
-	if (len >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1)
-		off = 4;
-	else if (len >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1)
-		off = 3;
-	if (off >= len)
-		return 0xFF;
-	return (nal[off] >> 1) & 0x3F;
+	return (int16_t)(newer - older);
 }
 
-static void cache_hevc_param(hevc_param_cache_t *c, uint8_t type,
-			     const uint8_t *data, size_t len)
+/* Detect HEVC keyframe (VPS NAL type = 32) in raw bitstream. */
+static bool video_is_keyframe(const uint8_t *data, size_t len)
 {
-	if (len > HEVC_PARAM_MAX)
+	if (len < 5)
+		return false;
+	if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
+		return ((data[4] >> 1) & 0x3f) == 32;
+	if (len >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1)
+		return ((data[3] >> 1) & 0x3f) == 32;
+	return false;
+}
+
+static void video_reorder_reset(video_reorder_ctx_t *vr)
+{
+	if (vr == NULL)
 		return;
-	switch (type) {
-	case 32: memcpy(c->vps, data, len); c->vps_len = len; break;
-	case 33: memcpy(c->sps, data, len); c->sps_len = len; break;
-	case 34: memcpy(c->pps, data, len); c->pps_len = len; c->valid = true; break;
+	memset(vr, 0, sizeof(*vr));
+}
+
+static video_reorder_slot_t *video_reorder_find(video_reorder_ctx_t *vr, uint16_t seq)
+{
+	if (vr == NULL)
+		return NULL;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		video_reorder_slot_t *slot = &vr->slots[i];
+		if (slot->active && slot->seq == seq)
+			return slot;
+	}
+
+	return NULL;
+}
+
+static video_reorder_slot_t *video_reorder_find_next_ready(video_reorder_ctx_t *vr)
+{
+	video_reorder_slot_t *best = NULL;
+
+	if (vr == NULL || !vr->primed)
+		return NULL;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		video_reorder_slot_t *slot = &vr->slots[i];
+		if (!slot->active || slot->src_u16 != vr->src_u16)
+			continue;
+		if (seq_delta(slot->seq, vr->next_seq) < 0)
+			continue;
+		if (best == NULL || seq_delta(best->seq, slot->seq) > 0)
+			best = slot;
+	}
+
+	return best;
+}
+
+static video_reorder_slot_t *video_reorder_alloc(video_reorder_ctx_t *vr)
+{
+	if (vr == NULL)
+		return NULL;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		if (!vr->slots[i].active)
+			return &vr->slots[i];
+	}
+
+	return NULL;
+}
+
+static bool slot_is_video(const frag_reassembly_slot_t *slot)
+{
+	if (slot == NULL || !slot->active)
+		return false;
+
+	for (uint8_t i = 0; i < slot->frag_total; i++) {
+		if (!(slot->received_mask & (1u << i)))
+			continue;
+		if (slot->fragments[i].traffic_class == ULAMA_CLASS_VIDEO)
+			return true;
+	}
+
+	return false;
+}
+
+static bool slot_has_keyframe_fragment(const frag_reassembly_slot_t *slot)
+{
+	if (slot == NULL || !slot->active)
+		return false;
+
+	for (uint8_t i = 0; i < slot->frag_total; i++) {
+		if (!(slot->received_mask & (1u << i)))
+			continue;
+		if (slot->fragments[i].flags & ULAMA_FLAG_VIDEO_KEYFRAME)
+			return true;
+	}
+
+	return false;
+}
+
+static void expire_reassembly_slots(app_ctx_t *ctx, uint64_t now_ms)
+{
+	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
+		frag_reassembly_slot_t *slot = &ctx->reassembly.slots[i];
+
+		if (!slot->active || (now_ms - slot->first_ts_ms) <= FRAG_TIMEOUT_MS)
+			continue;
+
+		if (slot_is_video(slot)) {
+			ctx->stats.video_frames_incomplete++;
+			if (slot_has_keyframe_fragment(slot))
+				ctx->stats.video_keyframes_lost++;
+		}
+
+		slot->active = false;
 	}
 }
 
-static void inject_cached_params(app_ctx_t *ctx, uint16_t src_u16)
+static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
+				size_t len, uint16_t src_u16)
 {
-	hevc_param_cache_t *c = &ctx->param_cache;
-	if (!c->valid)
-		return;
-	const struct { const uint8_t *d; size_t l; } params[] = {
-		{c->vps, c->vps_len}, {c->sps, c->sps_len}, {c->pps, c->pps_len}
-	};
-	for (int i = 0; i < 3; i++) {
-		if (params[i].l == 0) continue;
-		cascade_frame_view_t cf = {
-			.version = CASCADE_FRAME_VERSION,
-			.src = src_u16,
-			.dst = 0,
-			.traffic_class = CASCADE_CLASS_VIDEO,
-			.payload = params[i].d,
-			.payload_len = params[i].l,
-		};
-		send_cascade_frame(ctx, &cf);
-	}
-}
-
-static void flush_nal(app_ctx_t *ctx, uint16_t src_u16)
-{
-	nal_assembler_t *a = &ctx->nal_asm;
-	if (!a->active || a->len == 0)
-		return;
-
-	uint8_t nt = hevc_nal_type(a->buf, a->len);
-
-	if (nt >= 32 && nt <= 34) {
-		cache_hevc_param(&ctx->param_cache, nt, a->buf, a->len);
-		ctx->stats.nal_ok_param++;
-	} else if (nt == 19 || nt == 20) {
-		inject_cached_params(ctx, src_u16);
-		ctx->stats.nal_ok_idr++;
-	} else {
-		ctx->stats.nal_ok_p++;
-	}
+	bool keyframe = video_is_keyframe(data, len);
 
 	cascade_frame_view_t cf = {
-		.version = CASCADE_FRAME_VERSION,
-		.src = src_u16,
-		.dst = 0,
+		.version      = CASCADE_FRAME_VERSION,
+		.src          = src_u16,
+		.dst          = 0,
 		.traffic_class = CASCADE_CLASS_VIDEO,
-		.payload = a->buf,
-		.payload_len = a->len,
+		.payload      = data,
+		.payload_len  = len,
 	};
-	send_cascade_frame(ctx, &cf);
-	ctx->stats.nal_complete++;
-	ctx->stats.cascade_out_frames++;
-	ctx->stats.video_bytes_out += a->len;
-
-	if (ctx->verbose)
-		fprintf(stderr, "gw: NAL complete seq=%u..%u len=%zu type=%u pkts=%u\n",
-			a->first_seq, (uint16_t)(a->expect_seq - 1), a->len, nt,
-			(uint16_t)(a->expect_seq - a->first_seq));
-
-	a->len = 0;
-	a->active = false;
-}
-
-static void drop_nal(app_ctx_t *ctx, uint16_t expected, uint16_t got)
-{
-	nal_assembler_t *a = &ctx->nal_asm;
-	ctx->stats.nal_dropped++;
-	ctx->stats.lts_gaps++;
-
-	if (a->len > 0) {
-		uint8_t nt = hevc_nal_type(a->buf, a->len);
-		if (nt == 19 || nt == 20)
-			ctx->stats.nal_drop_idr++;
-		else
-			ctx->stats.nal_drop_p++;
-	}
-
-	uint16_t pkt_count = (uint16_t)(got - a->first_seq);
-	if (pkt_count <= 1)
-		ctx->stats.nal_drop_1pkt++;
-	else if (pkt_count <= 5)
-		ctx->stats.nal_drop_2_5pkt++;
-	else if (pkt_count <= 15)
-		ctx->stats.nal_drop_6_15pkt++;
-	else
-		ctx->stats.nal_drop_16plus++;
-
-	uint16_t gap_size = (uint16_t)(got - expected);
-	if (gap_size > 1)
-		ctx->stats.burst_gaps++;
-	else
-		ctx->stats.single_gaps++;
-
-	if (ctx->verbose)
-		fprintf(stderr, "gw: NAL DROPPED gap at seq expected=%u got=%u gap=%u nal_pkts=%u (had %zu bytes)\n",
-			expected, got, gap_size, pkt_count, a->len);
-	a->len = 0;
-	a->active = false;
-}
-
-static void emit_lts_to_cascade(app_ctx_t *ctx, uint16_t src_u16)
-{
-	lts_packet_t emitted[64];
-	size_t n = lts_decoder_emit(&ctx->lts_dec, emitted, 64, now_ms());
-
-	nal_assembler_t *a = &ctx->nal_asm;
-
-	for (size_t i = 0; i < n; i++) {
-		lts_packet_t *pkt = &emitted[i];
-
-		/* Gap detected. If the packet after the gap is FIRST_OF_FRAME,
-		 * the gap crosses a NAL boundary (previous LAST_OF_FRAME was
-		 * lost). Drop the incomplete NAL and start fresh. */
-		if (a->active && pkt->pkt_seq != a->expect_seq) {
-			if (pkt->flags & LTS_FLAG_FIRST_OF_FRAME) {
-				drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
-			} else {
-				uint16_t gap = (uint16_t)(pkt->pkt_seq - a->expect_seq);
-				if (a->gaps_tolerated + gap <= a->max_gap_tolerance && a->chunk_size > 0) {
-					size_t fill_bytes = gap * a->chunk_size;
-					if (a->len + fill_bytes + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
-						memset(a->buf + a->len, 0x80, fill_bytes);
-						a->len += fill_bytes;
-					}
-					a->gaps_tolerated += gap;
-					ctx->stats.nal_gap_skipped += gap;
-					if (ctx->verbose)
-						fprintf(stderr, "gw: NAL gap filled seq expected=%u got=%u gap=%u fill=%zu bytes\n",
-							a->expect_seq, pkt->pkt_seq, gap, fill_bytes);
-				} else {
-					drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
-				}
-			}
-		}
-
-		/* LAST_OF_FRAME = end of a NAL from vcpd. */
-		if (pkt->flags & LTS_FLAG_LAST_OF_FRAME) {
-			if (a->active && a->len > 0) {
-				if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
-					memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
-					a->len += pkt->payload_len;
-				}
-				flush_nal(ctx, src_u16);
-			} else if (!a->active && pkt->payload_len > 0) {
-				memcpy(a->buf, pkt->payload, pkt->payload_len);
-				a->len = pkt->payload_len;
-				a->active = true;
-				a->first_seq = pkt->pkt_seq;
-				a->expect_seq = pkt->pkt_seq + 1;
-				flush_nal(ctx, src_u16);
-			} else {
-				a->active = false;
-				a->len = 0;
-			}
-			a->gaps_tolerated = 0;
-			continue;
-		}
-
-		/* Start new NAL or continue current */
-		if (!a->active) {
-			a->active = true;
-			a->len = 0;
-			a->first_seq = pkt->pkt_seq;
-			a->gaps_tolerated = 0;
-			a->chunk_size = pkt->payload_len;
-		}
-
-		if (a->len + pkt->payload_len <= NAL_ASSEMBLE_MAX) {
-			memcpy(a->buf + a->len, pkt->payload, pkt->payload_len);
-			a->len += pkt->payload_len;
-		} else {
-			drop_nal(ctx, a->expect_seq, pkt->pkt_seq);
-			continue;
-		}
-
-		a->expect_seq = pkt->pkt_seq + 1;
+	if (send_cascade_frame(ctx, &cf)) {
+		ctx->stats.video_frames_rx++;
+		if (keyframe)
+			ctx->stats.video_keyframes_rx++;
+		ctx->stats.cascade_out_frames++;
+		ctx->stats.video_bytes_out += len;
+	} else {
+		ctx->stats.video_frames_dropped++;
 	}
 }
 
-#define NACK_MIN_INTERVAL_MS 20
-
-static void try_send_nack(app_ctx_t *ctx, uint64_t now)
+static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 {
-	if (ctx->nack_disable)
-		return;
-	if (now - ctx->last_nack_ms < NACK_MIN_INTERVAL_MS)
-		return;
+	video_reorder_ctx_t *vr = &ctx->video_reorder;
 
-	/* Reset horizon when decoder has advanced past it */
-	if (ctx->nack_horizon_valid &&
-	    lts_seq_lt(ctx->nack_horizon, ctx->lts_dec.next_emit))
-		ctx->nack_horizon_valid = false;
-
-	uint16_t gaps[16];
-	size_t ngaps = lts_decoder_detect_gaps(&ctx->lts_dec, gaps, 16);
-	if (ngaps == 0)
+	if (!vr->primed)
 		return;
 
-	/* Filter out gaps at or below the NACK horizon (already NACKed once) */
-	if (ctx->nack_horizon_valid) {
-		size_t filtered = 0;
-		for (size_t i = 0; i < ngaps; i++) {
-			if (lts_seq_lt(ctx->nack_horizon, gaps[i]))
-				gaps[filtered++] = gaps[i];
+	for (;;) {
+		video_reorder_slot_t *slot = video_reorder_find(vr, vr->next_seq);
+		if (slot != NULL) {
+			deliver_video_frame(ctx, slot->data, slot->len, slot->src_u16);
+			slot->active = false;
+			vr->next_seq++;
+			continue;
 		}
-		ngaps = filtered;
-		if (ngaps == 0)
+
+		slot = video_reorder_find_next_ready(vr);
+		if (slot == NULL)
 			return;
+		if ((now_ms - slot->ready_ms) < GW_VIDEO_REORDER_HOLD_MS)
+			return;
+
+		if (seq_delta(slot->seq, vr->next_seq) > 0)
+			ctx->stats.video_reorder_skips += (uint16_t)(slot->seq - vr->next_seq);
+		vr->next_seq = slot->seq;
+	}
+}
+
+static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
+			      size_t len, uint16_t src_u16,
+			      uint16_t seq, bool keyframe, uint64_t now_ms)
+{
+	video_reorder_ctx_t *vr = &ctx->video_reorder;
+
+	if (len > CASCADE_FRAME_MAX_PAYLOAD) {
+		ctx->stats.video_frames_dropped++;
+		return;
 	}
 
-	lts_nack_t nack;
-	nack.stream_id = 0;
-	nack.start_seq = gaps[0];
-	nack.bitmask = 0;
-	uint16_t max_seq = gaps[0];
-	for (size_t i = 0; i < ngaps; i++) {
-		uint16_t offset = gaps[i] - gaps[0];
-		if (offset < 16)
-			nack.bitmask |= (uint16_t)(1 << offset);
-		if (lts_seq_lt(max_seq, gaps[i]))
-			max_seq = gaps[i];
+	if (keyframe) {
+		if (!vr->primed || vr->src_u16 != src_u16 || seq_delta(seq, vr->next_seq) != 0)
+			video_reorder_reset(vr);
+		vr->primed = true;
+		vr->src_u16 = src_u16;
+		vr->next_seq = seq;
+	} else if (!vr->primed || vr->src_u16 != src_u16) {
+		return;
 	}
 
-	/* Update horizon — don't NACK these seqs again */
-	ctx->nack_horizon = max_seq;
-	ctx->nack_horizon_valid = true;
-
-	uint8_t nack_buf[LTS_NACK_SIZE];
-	size_t nack_len = lts_encode_nack(&nack, nack_buf, sizeof(nack_buf));
-	if (nack_len == 0)
+	if (seq_delta(seq, vr->next_seq) < 0)
+		return;
+	if (video_reorder_find(vr, seq) != NULL)
 		return;
 
-	ulama_frame_view_t uf = {
-		.src_node = ctx->gw.node_id,
-		.dst_node = ctx->lts_video_src_node,
-		.flags = 0,
-		.traffic_class = ULAMA_CLASS_CTRL,
-		.seq = ctx->seq_counter++,
-		.frag_idx = 0,
-		.frag_total = 1,
-		.ttl = ULAMA_FRAME_DEFAULT_TTL,
-		.payload = nack_buf,
-		.payload_len = nack_len,
-	};
+	video_reorder_slot_t *slot = video_reorder_alloc(vr);
+	if (slot == NULL) {
+		ctx->stats.video_frames_dropped++;
+		return;
+	}
 
-	uint8_t frame_buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD];
-	size_t frame_len = 0;
-	if (ulama_frame_pack(&uf, frame_buf, sizeof(frame_buf), &frame_len))
-		ulama_transport_tx_send_reliable(&ctx->ulama_tx, frame_buf, frame_len);
+	memset(slot, 0, sizeof(*slot));
+	slot->active = true;
+	slot->keyframe = keyframe;
+	slot->seq = seq;
+	slot->src_u16 = src_u16;
+	slot->ready_ms = now_ms;
+	slot->len = len;
+	memcpy(slot->data, data, len);
 
-	ctx->last_nack_ms = now;
-	ctx->stats.nack_sent++;
-
-	if (ctx->verbose)
-		fprintf(stderr, "gw: NACK sent start_seq=%u bitmask=0x%04x (%zu gaps)\n",
-			nack.start_seq, nack.bitmask, ngaps);
+	flush_video_reorder(ctx, now_ms);
 }
 
 static void handle_ulama_rx(app_ctx_t *ctx)
@@ -681,6 +602,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 		ctx->stats.nodes[uf.src_node].rssi_sum += rssi;
 		ctx->stats.nodes[uf.src_node].rssi_count++;
 	}
+	ctx->stats.rssi_sum += rssi;
+	ctx->stats.rssi_count++;
 
 	uint16_t src_u16 = gw_addr_u8_to_u16(&ctx->gw, uf.src_node);
 	uint8_t cascade_class = gw_class_ulama_to_cascade(uf.traffic_class);
@@ -693,90 +616,59 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 
 	if (uf.flags & ULAMA_FLAG_FRAGMENT) {
 		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, now_ms());
+		if (uf.traffic_class == ULAMA_CLASS_VIDEO)
+			ctx->stats.video_frags_rx++;
+
 		if (complete) {
-			uint8_t reassembled[FRAG_MAX_REASSEMBLED];
-			size_t reassembled_len = 0;
-			if (frag_reassembly_complete(&ctx->reassembly, uf.src_node, uf.seq,
-						     reassembled, sizeof(reassembled), &reassembled_len)) {
-				if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
-					lts_packet_t pkt;
-					if (lts_decode_packet(reassembled, reassembled_len, &pkt)) {
-						uint64_t ts = now_ms();
-						ctx->lts_video_src_node = uf.src_node;
-						lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
-						emit_lts_to_cascade(ctx, src_u16);
-						try_send_nack(ctx, ts);
-					}
-				} else {
-					cascade_frame_view_t cf = {
-						.version = CASCADE_FRAME_VERSION,
-						.src = src_u16,
-						.dst = 0,
-						.traffic_class = cascade_class,
-						.payload = reassembled,
-						.payload_len = reassembled_len,
-					};
-					send_cascade_frame(ctx, &cf);
+			static uint8_t reassembled[FRAG_MAX_REASSEMBLED];
+			size_t  reassembled_len = 0;
+
+			if (!frag_reassembly_complete(&ctx->reassembly, uf.src_node, uf.seq,
+						      reassembled, sizeof(reassembled),
+						      &reassembled_len)) {
+				if (uf.traffic_class == ULAMA_CLASS_VIDEO)
+					ctx->stats.video_frames_dropped++;
+				continue;
+			}
+
+			if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
+				bool kf = (uf.flags & ULAMA_FLAG_VIDEO_KEYFRAME) ||
+					  video_is_keyframe(reassembled, reassembled_len);
+
+				if (kf) {
+					/* Discard all stale incomplete frames from this sender.
+					 * Equivalent to the old LTS keyframe_flush: prefer fresh IDR. */
+					frag_reassembly_flush_stale_video(&ctx->reassembly,
+									  uf.src_node, uf.seq);
+					ctx->stats.video_keyframe_flushes++;
 				}
+
+				queue_video_frame(ctx, reassembled, reassembled_len,
+						 src_u16, uf.seq, kf, now_ms());
+			} else {
+				/* Non-video fragmented frame: forward to cascade as before */
+				cascade_frame_view_t cf = {
+					.version       = CASCADE_FRAME_VERSION,
+					.src           = src_u16,
+					.dst           = 0,
+					.traffic_class = cascade_class,
+					.payload       = reassembled,
+					.payload_len   = reassembled_len,
+				};
+				send_cascade_frame(ctx, &cf);
 			}
 		}
 		continue;
 	}
 
+	/* Non-fragmented VIDEO frame (small P-frame < ULAMA_FRAME_MAX_PAYLOAD
+	 * bytes sent without FRAGMENT flag). Deliver directly. send_video_frame()
+	 * in vcpd always sets FRAGMENT even for single-fragment frames, but this
+	 * keeps the gateway correct if that ever changes. */
 	if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
-		lts_packet_t pkt;
-		if (lts_decode_packet(uf.payload, uf.payload_len, &pkt)) {
-			uint64_t ts = now_ms();
-			ctx->lts_video_src_node = uf.src_node;
-			ctx->stats.rssi_sum += rssi;
-			ctx->stats.rssi_count++;
-			ctx->stats.lts_rx_total++;
-
-			if (pkt.flags & LTS_FLAG_FEC) {
-				lts_packet_t recovered;
-				uint32_t unrec_before = ctx->fec_dec.unrecoverable;
-				if (lts_fec_decoder_add_parity(&ctx->fec_dec, pkt.stream_id,
-							       pkt.payload, pkt.payload_len, &recovered)) {
-					lts_decoder_insert(&ctx->lts_dec, &recovered, ts);
-					ctx->stats.fec_recovered++;
-				}
-				if (ctx->fec_dec.unrecoverable > unrec_before)
-					ctx->stats.fec_unrecoverable += ctx->fec_dec.unrecoverable - unrec_before;
-			} else {
-				bool is_dup = lts_decoder_insert(&ctx->lts_dec, &pkt, ts);
-				if (is_dup)
-					ctx->stats.lts_dup++;
-				else {
-					ctx->stats.lts_unique++;
-					ctx->stats.lts_payload_bytes += pkt.payload_len;
-					if (pkt.flags & LTS_FLAG_RETX)
-						ctx->stats.retx_arrived++;
-				}
-				lts_fec_decoder_add_data(&ctx->fec_dec, pkt.pkt_seq, pkt.flags,
-							 pkt.payload, pkt.payload_len);
-			}
-			/* Skip stale packets from a previous epoch for seq tracking.
-			 * These are forward large-gap packets rejected by decoder:
-			 * unsigned gap > window*8 AND signed gap >= 0 (ahead in RFC 1982). */
-			uint16_t dec_gap = (uint16_t)(pkt.pkt_seq - ctx->lts_dec.next_emit);
-			bool is_stale = !ctx->lts_dec.first_packet &&
-					dec_gap > (uint16_t)(ctx->lts_dec.window_size * 8) &&
-					(int16_t)(pkt.pkt_seq - ctx->lts_dec.next_emit) >= 0;
-			if (is_stale) {
-				ctx->stats.lts_stale++;
-			} else if (!ctx->stats.lts_seq_valid) {
-				ctx->stats.lts_seq_min = pkt.pkt_seq;
-				ctx->stats.lts_seq_max = pkt.pkt_seq;
-				ctx->stats.lts_seq_valid = true;
-			} else {
-				if (lts_seq_lt(pkt.pkt_seq, ctx->stats.lts_seq_min))
-					ctx->stats.lts_seq_min = pkt.pkt_seq;
-				if (lts_seq_lt(ctx->stats.lts_seq_max, pkt.pkt_seq))
-					ctx->stats.lts_seq_max = pkt.pkt_seq;
-			}
-			emit_lts_to_cascade(ctx, src_u16);
-			try_send_nack(ctx, ts);
-		}
+		queue_video_frame(ctx, uf.payload, uf.payload_len,
+				 src_u16, uf.seq,
+				 video_is_keyframe(uf.payload, uf.payload_len), now_ms());
 		continue;
 	}
 
@@ -792,9 +684,10 @@ static void handle_ulama_rx(app_ctx_t *ctx)
   }
 }
 
+static app_ctx_t ctx;
+
 int main(int argc, char *argv[])
 {
-	app_ctx_t ctx;
 	memset(&ctx, 0, sizeof(ctx));
 	strncpy(ctx.gw.cascade_in, "127.0.0.1:5601", sizeof(ctx.gw.cascade_in));
 	strncpy(ctx.gw.cascade_out, "127.0.0.1:5600", sizeof(ctx.gw.cascade_out));
@@ -805,7 +698,7 @@ int main(int argc, char *argv[])
 	ctx.gw.node_id = 1;
 	ctx.verbose = false;
 	ctx.channel = 0;
-	ctx.nal_asm.max_gap_tolerance = 2;
+	ctx.tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
@@ -815,10 +708,9 @@ int main(int argc, char *argv[])
 		{"peer",        required_argument, NULL, 'p'},
 		{"iface",       required_argument, NULL, 'i'},
 		{"channel",     required_argument, NULL, 'c'},
+		{"tx-rate-mbps", required_argument, NULL, 1000},
 		{"node",        required_argument, NULL, 'n'},
 		{"dst-mac",       required_argument, NULL, 'm'},
-		{"gap-tolerance",  required_argument, NULL, 'G'},
-		{"nack-disable",   no_argument,       NULL, 'N'},
 		{"version",       no_argument,       NULL, 'V'},
 		{"verbose",       no_argument,       NULL, 'v'},
 		{"help",        no_argument,       NULL, 'h'},
@@ -835,10 +727,14 @@ int main(int argc, char *argv[])
 		case 'p': strncpy(ctx.peer_addr, optarg, sizeof(ctx.peer_addr) - 1); break;
 		case 'i': strncpy(ctx.gw.iface, optarg, sizeof(ctx.gw.iface) - 1); break;
 		case 'c': ctx.channel = atoi(optarg); break;
+		case 1000:
+			if (!parse_tx_rate_mbps(optarg, &ctx.tx_rate_500kbps)) {
+				fprintf(stderr, "gw: invalid --tx-rate-mbps value: %s\n", optarg);
+				return 1;
+			}
+			break;
 		case 'n': ctx.gw.node_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
-		case 'G': ctx.nal_asm.max_gap_tolerance = (uint16_t)atoi(optarg); break;
-		case 'N': ctx.nack_disable = true; break;
 		case 'V':
 			fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s\n",
 				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
@@ -878,6 +774,9 @@ int main(int argc, char *argv[])
 
 	int rc;
 	if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
+		#if ULAMA_WITH_UNOW
+		unow_set_tx_rate_500kbps(ctx.tx_rate_500kbps);
+		#endif
 		uint8_t dst_mac[6];
 		bool has_mac = (ctx.dst_mac_str[0] && ulama_transport_parse_mac(ctx.dst_mac_str, dst_mac));
 		rc = ulama_transport_tx_init_unow(&ctx.ulama_tx, ctx.gw.node_id, ctx.gw.iface,
@@ -901,19 +800,20 @@ int main(int argc, char *argv[])
 	}
 
 	frag_reassembly_init(&ctx.reassembly);
-	lts_decoder_init(&ctx.lts_dec, LTS_REORDER_WINDOW, LTS_EMIT_DEADLINE_MS);
-	lts_fec_decoder_init(&ctx.fec_dec);
 
-	fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s lts_max=%d started (node=%u, transport=%s)\n",
+	fprintf(stderr, "ulama-gw: build #%d (%s@%s) %s started (node=%u, transport=%s)\n",
 		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE,
-		LTS_MAX_PAYLOAD, ctx.gw.node_id, ulama_transport_kind_name(tk));
+		ctx.gw.node_id, ulama_transport_kind_name(tk));
 	fprintf(stderr, "  cascade-in:  %s\n", ctx.gw.cascade_in);
 	fprintf(stderr, "  cascade-out: %s\n", ctx.gw.cascade_out);
 	if (tk == ULAMA_TRANSPORT_KIND_UDP) {
 		fprintf(stderr, "  ulama-listen: %s\n", ctx.listen_addr);
 		fprintf(stderr, "  ulama-peer:   %s\n", ctx.peer_addr);
 	} else {
-			fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
+		fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
+		fprintf(stderr, "  tx-rate: %u.%u Mbps\n",
+			ctx.tx_rate_500kbps / 2U,
+			(ctx.tx_rate_500kbps & 1U) ? 5U : 0U);
 		fprintf(stderr, "  radio-rx-fd: %d (%s)\n", ctx.ulama_rx.fd,
 			ctx.ulama_rx.fd >= 0 ? "poll active" : "poll DISABLED — check UNOW init");
 	}
@@ -948,32 +848,23 @@ int main(int argc, char *argv[])
 
 		/* Second pass: catch any cascade frames that arrived during RX */
 		handle_cascade_rx(&ctx);
+		flush_video_reorder(&ctx, ts);
 
 		/* Print stats every 5 seconds */
 		if (ts - ctx.stats.last_print_ms >= 5000) {
 			gw_stats_t *s = &ctx.stats;
 			uint64_t dt = ts - s->last_print_ms;
 			uint32_t vbps = (uint32_t)(s->video_bytes_out * 8000 / (dt > 0 ? dt : 1));
-			uint32_t seq_range = s->lts_seq_valid
-				? (uint16_t)(s->lts_seq_max - s->lts_seq_min + 1) : 0;
-			uint32_t lost = (seq_range > s->lts_unique) ? seq_range - s->lts_unique : 0;
 			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
-			uint32_t pps_in = (uint32_t)(s->lts_rx_total * 1000 / (dt > 0 ? dt : 1));
-			uint32_t pps_unique = (uint32_t)(s->lts_unique * 1000 / (dt > 0 ? dt : 1));
-			uint32_t bps_in = (uint32_t)(s->lts_payload_bytes * 8000 / (dt > 0 ? dt : 1));
 			char _ts[9]; { time_t _t = time(NULL); strftime(_ts, sizeof(_ts), "%H:%M:%S", localtime(&_t)); }
 			fprintf(stderr, "%s [stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
-				"LTS unique=%u dup=%u stale=%u range=%u lost=%u | "
-				"NAL ok=%u drop=%u | nack=%u | video_out=%u Kbit/s | rssi=%d | "
-				"drop_sz 1/%u 2-5/%u 6-15/%u 16+/%u | gaps burst=%u single=%u | retx_ok=%u | fec +%u -%u | gap_skip=%u | "
-				"pps_in=%u pps_uniq=%u bps_in=%u Kbit/s\n",
+				"video frames_rx=%u kf_rx=%u frags_rx=%u dropped=%u incomplete=%u kf_lost=%u kf_flushes=%u reorder_skip=%u | "
+				"video_out=%u Kbit/s | rssi=%d\n",
 				_ts, s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
-				s->lts_unique, s->lts_dup, s->lts_stale, seq_range, lost,
-				s->nal_complete, s->nal_dropped, s->nack_sent, vbps / 1000, avg_rssi,
-				s->nal_drop_1pkt, s->nal_drop_2_5pkt, s->nal_drop_6_15pkt, s->nal_drop_16plus,
-				s->burst_gaps, s->single_gaps, s->retx_arrived,
-				s->fec_recovered, s->fec_unrecoverable, s->nal_gap_skipped,
-				pps_in, pps_unique, bps_in / 1000);
+				s->video_frames_rx, s->video_keyframes_rx, s->video_frags_rx, s->video_frames_dropped,
+				s->video_frames_incomplete, s->video_keyframes_lost,
+				s->video_keyframe_flushes, s->video_reorder_skips,
+				vbps / 1000, avg_rssi);
 			/* Per-node summary */
 			bool any_node = false;
 			for (int ni = 0; ni < GW_MAX_NODES; ni++) {
@@ -993,29 +884,15 @@ int main(int argc, char *argv[])
 			if (any_node)
 				fprintf(stderr, "\n");
 
-			/* Capture keyframe_flushes from decoder before memset wipes stats */
-			s->lts_keyframe_flushes = ctx.lts_dec.keyframe_flushes;
-			ctx.lts_dec.keyframe_flushes = 0;
-
 			uint32_t fps_x10 = (uint32_t)(s->cascade_out_frames * 10000 / (dt > 0 ? dt : 1));
-			fprintf(stderr, "%s [pipeline] keyfl=%u | "
-				"ok: idr=%u param=%u p=%u | "
-				"drop: idr=%u p=%u | "
-				"cache=%s | fps_out=%u.%u\n",
-				_ts, s->lts_keyframe_flushes,
-				s->nal_ok_idr, s->nal_ok_param, s->nal_ok_p,
-				s->nal_drop_idr, s->nal_drop_p,
-				ctx.param_cache.valid ? "OK" : "MISS",
-				fps_x10 / 10, fps_x10 % 10);
+			fprintf(stderr, "%s [pipeline] fps_out=%u.%u\n",
+				_ts, fps_x10 / 10, fps_x10 % 10);
 
 			memset(s, 0, sizeof(*s));
 			s->last_print_ms = ts;
 		}
 
-		frag_reassembly_expire(&ctx.reassembly, ts);
-
-		/* Flush deadline-expired LTS slots through the NAL assembler */
-		emit_lts_to_cascade(&ctx, ctx.lts_video_src);
+		expire_reassembly_slots(&ctx, ts);
 	}
 
 	fprintf(stderr, "ulama-gw: shutting down\n");

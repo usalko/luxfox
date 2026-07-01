@@ -62,6 +62,7 @@ typedef struct {
 	const char *iface;
 	const char *sock_path;
 	uint8_t     node_id;
+	uint8_t     tx_rate_500kbps;
 	bool        verbose;
 	bool        relay;
 	bool        has_dst_mac;
@@ -82,6 +83,7 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->iface = "wlan0";
 	cfg->sock_path = RADIO_IPC_SOCK_PATH;
 	cfg->node_id = 1;
+	cfg->tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
 	cfg->tx_slot_size = TX_SLOT_SIZE;
 	cfg->rx_slot_us = RX_SLOT_US;
 	cfg->ack_timeout_us = ACK_TIMEOUT_US;
@@ -99,6 +101,8 @@ static int64_t now_us(void)
 	gettimeofday(&tv, NULL);
 	return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
 }
+
+static uint8_t g_tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
 
 /* ---- IPC TX callback ---- */
 
@@ -127,12 +131,27 @@ static void on_ipc_tx_request(const radio_tx_request_t *req,
 /* ---- TX helper: inject one slot into radio ---- */
 
 #if ULAMA_WITH_UNOW
-static void tx_inject_slot(const radio_tx_slot_t *slot,
-			   pcap_t *pcap,
-			   const uint8_t own_mac[6],
-			   const uint8_t default_dst[6],
-			   radio_rx_dispatcher_t *rxd,
-			   const radio_route_table_t *rt)
+static uint64_t estimate_unow_airtime_us(size_t wire_len, uint8_t rate_half_mbps)
+{
+	if (wire_len == 0U)
+		return 0U;
+	if (rate_half_mbps == 0U)
+		rate_half_mbps = g_tx_rate_500kbps > 0U ? g_tx_rate_500kbps : UNOW_TX_RATE_1MBPS;
+
+	/* Approximation for 802.11 management/action frames in monitor injection:
+	 * long preamble/PLCP (~192 us) + payload bits at the configured PHY rate.
+	 * radiotap legacy rate units are 500 kbit/s, so 1 Mbps = 2. */
+	uint64_t payload_us = (((uint64_t)wire_len * 8ULL * 2ULL) + rate_half_mbps - 1U)
+		/ (uint64_t)rate_half_mbps;
+	return 192ULL + payload_us;
+}
+
+static uint64_t tx_inject_slot(const radio_tx_slot_t *slot,
+			       pcap_t *pcap,
+			       const uint8_t own_mac[6],
+			       const uint8_t default_dst[6],
+			       radio_rx_dispatcher_t *rxd,
+			       const radio_route_table_t *rt)
 {
 	/* Choose destination MAC:
 	 * 1. Slot has explicit dst_mac (relay packet with known route) → use it
@@ -165,12 +184,13 @@ static void tx_inject_slot(const radio_tx_slot_t *slot,
 			wire, sizeof(wire),
 			own_mac, dst_mac,
 			seq_payload, slot->len + 2U,
-			UNOW_TX_RATE_1MBPS,
+			g_tx_rate_500kbps,
 			UNOW_VENDOR_SUBTYPE_DATA_SEQ);
 
 		if (wire_len > 0U) {
 			pcap_inject(pcap, wire, wire_len);
 			radio_async_store(rxd, wire, wire_len, seq);
+			return estimate_unow_airtime_us(wire_len, g_tx_rate_500kbps);
 		}
 	} else {
 		uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
@@ -181,11 +201,15 @@ static void tx_inject_slot(const radio_tx_slot_t *slot,
 			wire, sizeof(wire),
 			own_mac, dst_mac,
 			slot->data, slot->len,
-			UNOW_TX_RATE_1MBPS);
+			g_tx_rate_500kbps);
 
-		if (wire_len > 0U)
+		if (wire_len > 0U) {
 			pcap_inject(pcap, wire, wire_len);
+			return estimate_unow_airtime_us(wire_len, g_tx_rate_500kbps);
+		}
 	}
+
+	return 0U;
 }
 #endif
 
@@ -204,6 +228,7 @@ static void usage(const char *prog)
 		"  -i, --iface IFACE     Monitor interface (default: mon0)\n"
 		"  -n, --node-id ID      Node ID (default: 1)\n"
 		"  -d, --dst-mac MAC     Destination MAC (default: broadcast)\n"
+		"      --tx-rate-mbps N  Legacy radiotap TX rate for injected frames (default: 1)\n"
 		"  -s, --socket PATH     IPC socket path (default: %s)\n"
 		"  -T, --tx-slot N       Max TX packets per slot (default: %u)\n"
 		"  -R, --rx-slot US      RX slot duration in µs (default: %u)\n"
@@ -226,6 +251,21 @@ static bool parse_mac(const char *text, uint8_t mac[6])
 		return false;
 	for (int i = 0; i < 6; i++)
 		mac[i] = (uint8_t)o[i];
+	return true;
+}
+
+static bool parse_tx_rate_mbps(const char *text, uint8_t *rate_500kbps)
+{
+	long mbps;
+
+	if (text == NULL || rate_500kbps == NULL)
+		return false;
+
+	mbps = strtol(text, NULL, 10);
+	if (mbps < 1 || mbps > 63)
+		return false;
+
+	*rate_500kbps = (uint8_t)(mbps * 2);
 	return true;
 }
 
@@ -253,7 +293,7 @@ static void sync_inject_beacon(radio_sync_t *sync,
 	size_t wire_len = unow_build_action_frame_ex(
 		wire, sizeof(wire), own_mac, broadcast,
 		packed, packed_len,
-		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_SYNC);
+		g_tx_rate_500kbps, UNOW_VENDOR_SUBTYPE_SYNC);
 	if (wire_len > 0U)
 		pcap_inject(pcap, wire, wire_len);
 }
@@ -280,7 +320,7 @@ static void sync_inject_delay_req(radio_sync_t *sync,
 	size_t wire_len = unow_build_action_frame_ex(
 		wire, sizeof(wire), own_mac, broadcast,
 		packed, packed_len,
-		UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_DELAY_REQ);
+		g_tx_rate_500kbps, UNOW_VENDOR_SUBTYPE_DELAY_REQ);
 	if (wire_len > 0U)
 		pcap_inject(pcap, wire, wire_len);
 }
@@ -295,7 +335,7 @@ static void sync_inject_null_frame(pcap_t *pcap,
 	const uint8_t broadcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 	size_t wire_len = unow_build_action_frame(
 		wire, sizeof(wire), own_mac, broadcast,
-		&null_byte, 1, UNOW_TX_RATE_1MBPS);
+		&null_byte, 1, g_tx_rate_500kbps);
 	if (wire_len > 0U)
 		pcap_inject(pcap, wire, wire_len);
 }
@@ -333,7 +373,8 @@ static void master_cycle(radio_sync_t *sync,
 		slot = radio_tx_dequeue(sched, &prio);
 		if (slot == NULL)
 			break;
-		tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+		radio_stats_add_tx_airtime(stats,
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
 		radio_stats_add_tx_packet(stats, prio);
 	}
 
@@ -343,7 +384,8 @@ static void master_cycle(radio_sync_t *sync,
 		const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
 		if (slot == NULL)
 			break;
-		tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+		radio_stats_add_tx_airtime(stats,
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
 		radio_stats_add_tx_packet(stats, prio);
 	}
 	sleep_until(dl_deadline);
@@ -407,7 +449,8 @@ static void slave_cycle(radio_sync_t *sync,
 			slot = radio_tx_dequeue(sched, &prio);
 			if (slot == NULL)
 				break;
-			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+			radio_stats_add_tx_airtime(stats,
+				tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
 			radio_stats_add_tx_packet(stats, prio);
 			sent_data = true;
 		}
@@ -417,7 +460,8 @@ static void slave_cycle(radio_sync_t *sync,
 			const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
 			if (slot == NULL)
 				break;
-			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt);
+			radio_stats_add_tx_airtime(stats,
+				tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
 			radio_stats_add_tx_packet(stats, prio);
 			sent_data = true;
 		}
@@ -496,6 +540,7 @@ int main(int argc, char **argv)
 		{"iface",    required_argument, NULL, 'i'},
 		{"node-id",  required_argument, NULL, 'n'},
 		{"dst-mac",  required_argument, NULL, 'd'},
+		{"tx-rate-mbps", required_argument, NULL, 1000},
 		{"socket",   required_argument, NULL, 's'},
 		{"tx-slot",  required_argument, NULL, 'T'},
 		{"rx-slot",  required_argument, NULL, 'R'},
@@ -522,6 +567,12 @@ int main(int argc, char **argv)
 			}
 			cfg.has_dst_mac = true;
 			break;
+		case 1000:
+			if (!parse_tx_rate_mbps(optarg, &cfg.tx_rate_500kbps)) {
+				fprintf(stderr, "radiod: invalid --tx-rate-mbps value: %s\n", optarg);
+				return 1;
+			}
+			break;
 		case 's': cfg.sock_path = optarg; break;
 		case 'T': cfg.tx_slot_size = (uint32_t)atoi(optarg); break;
 		case 'R': cfg.rx_slot_us = (uint32_t)atoi(optarg); break;
@@ -541,6 +592,7 @@ int main(int argc, char **argv)
 	}
 
 	fix_system_clock();
+	g_tx_rate_500kbps = cfg.tx_rate_500kbps;
 
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
@@ -619,11 +671,13 @@ int main(int argc, char **argv)
 
 	fprintf(stderr,
 		"radiod: radio ready iface=%s mac=%02x:%02x:%02x:%02x:%02x:%02x "
-		"node_id=%u tx_slot=%u rx_slot=%u µs relay=%s\n",
+		"node_id=%u tx_slot=%u rx_slot=%u µs tx_rate=%u.%u Mbps relay=%s\n",
 		cfg.iface,
 		iface_info.mac[0], iface_info.mac[1], iface_info.mac[2],
 		iface_info.mac[3], iface_info.mac[4], iface_info.mac[5],
 		cfg.node_id, cfg.tx_slot_size, cfg.rx_slot_us,
+		cfg.tx_rate_500kbps / 2U,
+		(cfg.tx_rate_500kbps & 1U) ? 5U : 0U,
 		cfg.relay ? "on" : "off");
 
 	/* ---- Initialize subsystems ---- */
@@ -773,8 +827,9 @@ int main(int argc, char **argv)
 				if (slot == NULL)
 					break;
 
-				tx_inject_slot(slot, pcap_handle, iface_info.mac,
-					       default_dst, &rxd, &routes);
+				radio_stats_add_tx_airtime(&stats,
+					tx_inject_slot(slot, pcap_handle, iface_info.mac,
+					       default_dst, &rxd, &routes));
 				radio_stats_add_tx_packet(&stats, prio);
 			}
 
@@ -786,8 +841,9 @@ int main(int argc, char **argv)
 				if (slot == NULL)
 					break;
 
-				tx_inject_slot(slot, pcap_handle, iface_info.mac,
-					       default_dst, &rxd, &routes);
+				radio_stats_add_tx_airtime(&stats,
+					tx_inject_slot(slot, pcap_handle, iface_info.mac,
+					       default_dst, &rxd, &routes));
 				radio_stats_add_tx_packet(&stats, prio);
 			}
 
@@ -840,7 +896,7 @@ int main(int argc, char **argv)
 					wire, sizeof(wire),
 					iface_info.mac, broadcast_mac,
 					beacon_buf, beacon_len,
-					UNOW_TX_RATE_1MBPS);
+					g_tx_rate_500kbps);
 				if (wire_len > 0U)
 					pcap_inject(pcap_handle, wire, wire_len);
 			}

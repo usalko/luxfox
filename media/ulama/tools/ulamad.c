@@ -22,6 +22,7 @@
 #include "ulama/ulama_version.h"
 
 #define MSP_POLL_INTERVAL_MS 500
+#define TELEM_TX_INTERVAL_MS 166
 #define MSP_POLL_CODES_COUNT 6
 static const uint16_t MSP_POLL_CODES[MSP_POLL_CODES_COUNT] = {
 	MSP_ATTITUDE, MSP_ALTITUDE, MSP_ANALOG, MSP_RAW_GPS, MSP_STATUS, MSP_BATTERY_STATE,
@@ -853,7 +854,7 @@ int main(int argc, char **argv)
 					if (has_tx && msp_msg.direction == MSP_DIR_RESPONSE) {
 						struct timespec ts_telem;
 						clock_gettime(CLOCK_MONOTONIC, &ts_telem);
-						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= MSP_POLL_INTERVAL_MS * 1000000LL) {
+						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= TELEM_TX_INTERVAL_MS * 1000000LL) {
 							uint8_t msp_wire[MSP_V2_OVERHEAD + MSP_MAX_PAYLOAD];
 							size_t wire_len = msp_v1_build_response(msp_msg.code, msp_msg.payload,
 									msp_msg.payload_len, msp_wire, sizeof(msp_wire));
@@ -891,7 +892,7 @@ int main(int argc, char **argv)
 					if (has_tx && crsf_len <= ULAMA_FRAME_MAX_PAYLOAD) {
 						struct timespec ts_telem;
 						clock_gettime(CLOCK_MONOTONIC, &ts_telem);
-						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= MSP_POLL_INTERVAL_MS * 1000000LL) {
+						if (timespec_diff_ns(&ts_telem, &last_telem_tx) >= TELEM_TX_INTERVAL_MS * 1000000LL) {
 							ulama_frame_view_t tf = {
 								.src_node = cfg.node_id,
 								.dst_node = 0xFF,

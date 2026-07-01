@@ -10,6 +10,7 @@ unow_context_t g_unow = {
 	.iface = {
 		.name = UNOW_DEFAULT_IFACE,
 	},
+	.tx_rate_500kbps = UNOW_TX_RATE_1MBPS,
 	.ack_timeout_us = UNOW_ACK_TIMEOUT_US,
 	.ack_max_retry = UNOW_ACK_MAX_RETRY,
 };
@@ -128,6 +129,16 @@ void unow_deinit(void)
 	pthread_mutex_unlock(&g_unow.lock);
 }
 
+void unow_set_tx_rate_500kbps(uint8_t rate_500kbps)
+{
+	if (rate_500kbps == 0U)
+		rate_500kbps = UNOW_TX_RATE_1MBPS;
+
+	pthread_mutex_lock(&g_unow.lock);
+	g_unow.tx_rate_500kbps = rate_500kbps;
+	pthread_mutex_unlock(&g_unow.lock);
+}
+
 esp_err_t radio_espnow_init(uint8_t node_id)
 {
 	return unow_init_iface(node_id, NULL);
@@ -153,7 +164,7 @@ esp_err_t radio_espnow_send(const uint8_t *dst_mac, const uint8_t *payload, size
 	g_unow.stats.tx_enqueue_ok++;
 	g_unow.stats.tx_dequeue++;
 	g_unow.stats.tx_send_calls++;
-	packet_len = unow_build_action_frame(packet, sizeof(packet), g_unow.iface.mac, actual_dst, payload, len, UNOW_TX_RATE_1MBPS);
+	packet_len = unow_build_action_frame(packet, sizeof(packet), g_unow.iface.mac, actual_dst, payload, len, g_unow.tx_rate_500kbps);
 	if (packet_len == 0U) {
 		g_unow.stats.tx_send_fail++;
 		pthread_mutex_unlock(&g_unow.lock);
@@ -266,7 +277,7 @@ esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payl
 			slot->frame, sizeof(slot->frame),
 			g_unow.iface.mac, actual_dst,
 			seq_payload, len + 2U,
-			UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_DATA_SEQ);
+			g_unow.tx_rate_500kbps, UNOW_VENDOR_SUBTYPE_DATA_SEQ);
 		if (slot->frame_len == 0U) {
 			g_unow.stats.tx_send_fail++;
 			pthread_mutex_unlock(&g_unow.lock);
@@ -293,7 +304,7 @@ esp_err_t radio_espnow_send_reliable(const uint8_t *dst_mac, const uint8_t *payl
 			packet, sizeof(packet),
 			g_unow.iface.mac, actual_dst,
 			seq_payload, len + 2U,
-			UNOW_TX_RATE_1MBPS, UNOW_VENDOR_SUBTYPE_DATA_SEQ);
+			g_unow.tx_rate_500kbps, UNOW_VENDOR_SUBTYPE_DATA_SEQ);
 		if (packet_len > 0U) {
 			g_unow.stats.tx_send_calls++;
 			pcap_inject(g_unow.pcap, packet, packet_len);

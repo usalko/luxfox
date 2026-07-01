@@ -19,6 +19,12 @@ void radio_stats_add_tx_time(radio_stats_t *st, uint64_t us)
 		st->tx_time_us += us;
 }
 
+void radio_stats_add_tx_airtime(radio_stats_t *st, uint64_t us)
+{
+	if (st != NULL)
+		st->tx_airtime_us += us;
+}
+
 void radio_stats_add_rx_time(radio_stats_t *st, uint64_t us)
 {
 	if (st != NULL)
@@ -48,7 +54,7 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 {
 	int64_t elapsed_us;
 	double elapsed_s;
-	double tx_pct, rx_pct;
+	double tx_pct, air_pct, rx_pct;
 
 	if (st == NULL)
 		return 0;
@@ -59,18 +65,19 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	elapsed_s = (double)elapsed_us / 1000000.0;
 	tx_pct = elapsed_us > 0 ? (double)st->tx_time_us * 100.0 / (double)elapsed_us : 0.0;
+	air_pct = elapsed_us > 0 ? (double)st->tx_airtime_us * 100.0 / (double)elapsed_us : 0.0;
 	rx_pct = elapsed_us > 0 ? (double)st->rx_time_us * 100.0 / (double)elapsed_us : 0.0;
 
 	char ts[9]; { time_t _t = time(NULL); strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&_t)); }
 	fprintf(stderr,
 		"%s [radiod stats] %.1fs: cycles=%u tx_pkt=%u rx_pkt=%u "
-		"tx%%=%.1f rx%%=%.1f "
+		"tx%%=%.1f air%%=%.1f rx%%=%.1f "
 		"prio[C=%u T=%u V=%u B=%u] ",
 		ts, elapsed_s,
 		st->cycles,
 		st->tx_packets,
 		rxd != NULL ? rxd->stats.rx_dispatched : 0,
-		tx_pct, rx_pct,
+		tx_pct, air_pct, rx_pct,
 		st->tx_by_prio[0], st->tx_by_prio[1],
 		st->tx_by_prio[2], st->tx_by_prio[3]);
 

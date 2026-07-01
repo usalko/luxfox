@@ -51,7 +51,11 @@ typedef struct {
 int video_source_mpp_start(video_source_mpp_t *src);
 void video_source_mpp_stop(video_source_mpp_t *src);
 ssize_t video_source_mpp_read(video_source_mpp_t *src, uint8_t *buf, size_t len);
+void video_source_mpp_request_idr(video_source_mpp_t *src);
 typedef video_source_mpp_t video_source_t;
+#define vsrc_request_idr(v)    video_source_mpp_request_idr(v)
 #else
 typedef video_source_ffmpeg_t video_source_t;
+/* ffmpeg fallback: IDR request is no-op */
+#define vsrc_request_idr(v)    ((void)(v))
 #endif
