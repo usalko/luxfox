@@ -110,7 +110,30 @@ static void usage(const char *prog)
 #define GW_VIDEO_REORDER_HOLD_MS 120
 #define GW_VIDEO_KF_HOLD_MS 300
 #define GW_VIDEO_DONE_WINDOW 64
-#define GW_CTRL_KEEPALIVE_MS 20
+/*
+ * Control refresh interval for held-stick RC state.
+ *
+ * Real command responsiveness is handled by the change-driven path in
+ * handle_cascade_rx(): any changed control payload is forwarded to radio
+ * IMMEDIATELY. This keepalive only refreshes a HELD (unchanged) stick so the
+ * drone's CTRL watchdog (2000 ms) stays fed.
+ *
+ * History of the rate:
+ *  - 20 ms (50 Hz) forwarding every cascade duplicate → heavy uplink that
+ *    collided with the drone's downlink video on the half-duplex channel.
+ *  - 200 ms (5 Hz) and later 30 ms (33 Hz) both still tripped "CTRL link LOST".
+ *    That was NOT a rate problem: the keepalive frame was addressed to dst=0,
+ *    which the drone does not count as "CTRL for us", so it never fed the
+ *    watchdog regardless of rate. Fixed by addressing the keepalive to the real
+ *    control destination (see maybe_send_ctrl_keepalive).
+ *
+ * With correct addressing, a held stick only needs to feed a 2000 ms watchdog,
+ * so 100 ms (10 Hz) is used: ~20x safety margin against burst loss, while
+ * cutting steady-state uplink ~3x vs 33 Hz to reduce contention with downlink
+ * video. Responsiveness is unaffected (real moves go change-driven). The durable
+ * fix for uplink/downlink contention is still TDMA (Phase 8).
+ */
+#define GW_CTRL_KEEPALIVE_MS 100
 
 typedef struct {
 	uint32_t rx_pkts;
@@ -188,6 +211,8 @@ typedef struct {
 	bool idr_request_in_flight;
 	uint8_t last_ctrl_payload[CASCADE_FRAME_MAX_PAYLOAD];
 	size_t last_ctrl_len;
+	uint16_t last_ctrl_src;
+	uint16_t last_ctrl_dst;
 	uint64_t last_ctrl_tx_ms;
 	bool has_last_ctrl;
 	gw_stats_t stats;
@@ -356,14 +381,32 @@ static void handle_cascade_rx(app_ctx_t *ctx)
 
 	if (cf.traffic_class == CASCADE_CLASS_CONTROL &&
 	    cf.payload_len <= sizeof(ctx->last_ctrl_payload)) {
+		bool changed = !ctx->has_last_ctrl ||
+			ctx->last_ctrl_len != cf.payload_len ||
+			memcmp(ctx->last_ctrl_payload, cf.payload, cf.payload_len) != 0;
+
 		memcpy(ctx->last_ctrl_payload, cf.payload, cf.payload_len);
 		ctx->last_ctrl_len = cf.payload_len;
+		/* Remember where real control is addressed so the keepalive can reuse it.
+		 * The drone only feeds its CTRL watchdog for frames whose dst_node is its
+		 * own id or broadcast; a keepalive sent to dst=0 is ignored by that check
+		 * and lets the 2 s watchdog trip (CTRL LOST -> video suppressed). */
+		ctx->last_ctrl_src = cf.src;
+		ctx->last_ctrl_dst = cf.dst;
 		ctx->has_last_ctrl = true;
+
+		/* Forward control immediately only when it actually changed.
+		 * Unchanged RC payloads are already covered by the gateway heartbeat
+		 * replay path (maybe_send_ctrl_keepalive), so re-forwarding every
+		 * duplicate from cascade-core just creates bidirectional contention. */
+		if (changed) {
+			cascade_to_ulama_tx(ctx, &cf);
+			ctx->last_ctrl_tx_ms = now_ms();
+		}
+		continue;
 	}
 
 	cascade_to_ulama_tx(ctx, &cf);
-	if (cf.traffic_class == CASCADE_CLASS_CONTROL)
-		ctx->last_ctrl_tx_ms = now_ms();
   }
 }
 
@@ -376,8 +419,8 @@ static void maybe_send_ctrl_keepalive(app_ctx_t *ctx, uint64_t now_ms_value)
 
 	cascade_frame_view_t cf = {
 		.version = CASCADE_FRAME_VERSION,
-		.src = 0,
-		.dst = 0,
+		.src = ctx->last_ctrl_src,
+		.dst = ctx->last_ctrl_dst,
 		.traffic_class = CASCADE_CLASS_CONTROL,
 		.payload = ctx->last_ctrl_payload,
 		.payload_len = ctx->last_ctrl_len,

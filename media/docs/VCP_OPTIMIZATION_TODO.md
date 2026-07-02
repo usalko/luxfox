@@ -693,6 +693,195 @@ The next optimization cycle should focus on:
   tradeoffs, ACK strategy) still hold when the source is no longer locally
   throttled to ~19 fps or ~10 fps.
 
+#### First transport-layer finding after restoring true 25 fps source
+
+With device-local `vcpd` fixed to sustain `25 fps`, transport logs now show the
+radio path becoming the dominant bottleneck immediately:
+
+- Device-side `vcpd` is clean:
+  `cap=dec=enc=125`, `sub=125/0/0/0`, `rdrop=0`, `cdrop=0`
+- Drone-side `radiod` under stream load:
+  `tx_pkt≈350-370/5s`, `prio[T≈25 V≈330-345]`, `air%=8.4-11.7`, `rx%=91-92%`
+- Host-side `ulama-gw` under the same load:
+  `video_rx≈180-228/5s`, `frames_rx≈1-34/5s`, `frags_rx≈129-158/5s`,
+  `reorder_skip≈14-29`, `kf_lost≈1-4`, `fps_out≈0.1-6.7`
+
+Interpretation:
+
+1. The transport path is now the clear bottleneck.
+2. Host receives plenty of video traffic (`video_rx` / `frags_rx` are non-zero),
+   but full frame survival and in-order delivery are poor.
+3. `ulama-gw` is still self-loading the uplink aggressively with host→drone
+  control traffic: `ctrl_tx≈310-337/5s`, i.e. roughly **62-67 pps**.
+4. In half-duplex monitor-mode Wi-Fi this host uplink control stream competes
+   directly with the drone→host video stream and likely contributes materially to
+   the observed keyframe loss / reorder skips.
+
+#### Immediate transport-side action (step 1)
+
+The first low-risk transport mitigation is to **reduce idle control replay rate**
+in [ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c):
+
+- Old: `GW_CTRL_KEEPALIVE_MS = 20` (50 Hz idle replay)
+- New: `GW_CTRL_KEEPALIVE_MS = 200` (5 Hz idle replay)
+
+Rationale:
+
+- The radiod CTRL watchdog is on the order of seconds, not tens of milliseconds.
+- 5 Hz leaves a large safety margin for link liveness.
+- Cutting host idle replay from ~64 pps to ~5 pps removes a major source of
+  self-inflicted bidirectional contention without changing video format, MTU,
+  or reliability logic.
+
+#### Result of step 1
+
+Field logs after this change showed that transport quality improved only
+partially and, more importantly, revealed that the original diagnosis was
+incomplete:
+
+- Host `ctrl_tx` stayed high at `~260-280/5s`, not `~25/5s`.
+- Therefore, the majority of host→drone control traffic was **not** coming from
+  `maybe_send_ctrl_keepalive()` anymore.
+- It was coming from `handle_cascade_rx()` re-forwarding control payloads that
+  were already arriving from cascade-core at roughly `50-55 Hz`.
+
+This means the real issue is broader than heartbeat frequency: unchanged control
+payloads from cascade-core were being forwarded over radio again and again,
+despite the gateway already caching the last control state for heartbeat replay.
+
+#### Immediate transport-side action (step 2)
+
+Deduplicate unchanged control payloads in
+[ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c):
+
+- still cache every latest control payload,
+- forward immediately only when the payload actually changes,
+- rely on the existing low-rate gateway heartbeat to maintain liveness for
+  unchanged control state.
+
+This is safe because downstream already keeps its own last CRSF frame and
+replays it for FC keepalive; repeating identical control payloads at radio rate
+does not add semantic value, only contention.
+
+#### Updated transport priority order
+
+1. Reduce host CTRL keepalive pressure (done: 50 Hz -> 5 Hz).
+2. Deduplicate unchanged host control payloads before radio forwarding (done).
+3. Re-test and compare `ctrl_tx`, `video_rx`, `frames_rx`, `kf_rx`, `reorder_skip`,
+   and `fps_out`.
+4. Only after this, revisit heavier transport knobs: MTU, reliability policy,
+   ACK tuning, keyframe redundancy, or scheduler behavior.
+
+#### A/B result (2026-07-02): interference confirmed, control regressed
+
+Running the deduped/5 Hz control build against the previous 50 Hz build proved
+BOTH the hypothesis and its cost:
+
+Video (much better):
+- `ctrl_tx` dropped ~260-280/5s -> ~27-28/5s (5 Hz).
+- `fps_out` rose ~0.1-6.7 -> **8-19**.
+- `kf_lost` ~1-4 -> mostly **0** (occasional 1); `video_out` up to ~206 Kbit/s.
+
+=> The host uplink control stream was indeed a dominant cause of the drone's
+downlink video loss on this half-duplex channel.
+
+Control (regressed):
+- Operator reported laggy/"sticky" control.
+- Drone `radiod` logged repeated `CTRL link LOST — no CTRL frames for 2000 ms.
+  VIDEO TX suppressed` about every 7-10 s, each lasting ~2 s.
+
+Root cause of the regression:
+- With dedup, a **held** stick (constant payload) is no longer forwarded per
+  cascade update; it is only refreshed by the 5 Hz heartbeat.
+- In the drone's quasi-TDMA RX window (no cross-node sync), a 5 Hz control
+  stream is easily missed for >2000 ms under burst loss, so the CTRL watchdog
+  trips and **suppresses video** — hurting control latency AND video.
+
+This is the exact control-rate vs video-quality conflict that a real TDMA
+schedule resolves. It is not fixable by tuning a single rate.
+
+#### Interim mitigation (before TDMA)
+
+`GW_CTRL_KEEPALIVE_MS`: 200 -> **30** (~33 Hz held-stick refresh), dedup kept
+(changes still forward immediately). Goal: responsive control + stay well within
+the 2000 ms CTRL watchdog, while remaining lighter than the old 50 Hz
+forward-every-duplicate. This is a stopgap; the durable fix remains Phase 8 TDMA.
+
+Next A/B to compare at 33 Hz: `ctrl_tx` (~150-170/5s expected), absence of
+`CTRL link LOST` on the drone, control responsiveness, and whether `fps_out`
+holds up vs the 5 Hz run.
+
+#### A/B result (33 Hz): rate is NOT the lever — real bug found
+
+The 33 Hz run falsified the rate hypothesis and exposed the actual defect:
+
+- `ctrl_tx` rose ~27/5s -> ~167/5s (33 Hz, as intended).
+- Drone STILL logged `CTRL link LOST — no CTRL frames for 2000 ms` repeatedly.
+- Video got WORSE, not better: `fps_out` ~8-19 (5 Hz run) -> ~1-11 (33 Hz run),
+  because the extra host uplink again collided with the drone downlink.
+
+Raising control 6.6x did not feed the drone watchdog at all. Root cause (found
+in code):
+
+- Drone `radiod` feeds its CTRL watchdog only for CTRL frames whose `dst_node`
+  equals its own id (1) or broadcast `0xFF`
+  ([radiod/src/rx_dispatcher.c](../radiod/src/rx_dispatcher.c): `ctrl_for_us`).
+- The gateway keepalive built its frame with `.dst = 0`
+  ([ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c),
+  `maybe_send_ctrl_keepalive`). `gw_addr_u16_to_u8(0)` -> `dst_node = 0`.
+- `0 != 1` and `0 != 0xFF`, so **every keepalive was ignored by the drone's
+  watchdog**. Only rare genuine control changes (which carry cascade-core's real
+  dst) fed it, so a held stick starved the watchdog and tripped CTRL LOST after
+  2 s — which suppresses video, coupling control loss into video loss.
+
+This is why neither 5 Hz nor 33 Hz fixed control: both replay held-stick state
+via the mis-addressed keepalive.
+
+Fix: cache the real control frame's `src`/`dst` and reuse them for the keepalive
+(so keepalives are addressed to the drone exactly like real control). Kept the
+33 Hz refresh + dedup. Rebuilt `ulama-gw`.
+
+Expected next run: drone stops logging `CTRL link LOST` while a stick is held,
+control stops lagging, and video no longer gets suppression-induced dropouts.
+This does NOT remove the need for Phase 8 TDMA (uplink/downlink still contend on
+half-duplex), but it removes a real correctness bug on top of that contention.
+
+#### A/B result (keepalive dst fix): control FIXED, watchdog quiet
+
+The addressing fix worked. Operator confirmed "control was fine". Drone `radiod`
+log across the whole run has **zero** `CTRL link LOST` lines (previously one
+every ~7-10 s), so video TX is no longer suppression-cycled:
+
+- `ctrl_tx` steady ~167/5s (33 Hz), no watchdog trips.
+- `radiod` `prio[V=330-358]` steady, `qdrop=0`, no RX-only fallback.
+- Host video: `fps_out` ~2-11 with dips; `kf_lost` ~1-4; `reorder_skip` ~10-27.
+
+Interpretation: the two coupled control/video bugs are resolved (mis-addressed
+keepalive + suppression feedback). What remains is the raw half-duplex
+contention + adapter PER: video still loses fragments, especially when the
+operator actively moves sticks (visible at 07:11:17-32 where `ctrl_tx` rises to
+189-210 and `fps_out` drops to ~2.5-3.6).
+
+#### Follow-up: roll back the keepalive rate (33 Hz was a wrong-cause patch)
+
+The 33 Hz keepalive was raised earlier believing 5 Hz was too slow for control.
+That was a misdiagnosis — the real fault was the dst=0 addressing. With
+addressing fixed, a held stick only needs to keep a 2000 ms watchdog fed, and
+real moves already go change-driven immediately.
+
+So `GW_CTRL_KEEPALIVE_MS`: 30 -> **100** (10 Hz):
+- ~20x safety margin vs the 2000 ms watchdog even under burst loss,
+- steady-state uplink cut ~3x vs 33 Hz (from ~167/5s toward ~50/5s),
+- responsiveness unaffected (real moves are change-driven),
+- less uplink contention with downlink video → expect steadier `fps_out`.
+
+Next A/B: confirm drone still shows no `CTRL link LOST`, control stays crisp,
+and `fps_out` improves/steadies vs the 33 Hz run. If video is still not enough,
+that is the definitive cue to implement Phase 8 TDMA (no more keepalive tuning).
+
+
+
+
 #### If local issues reappear, next diagnostics would be
 
 1. `MJPEG -> VDEC only` benchmark (disable HEVC encode)
@@ -701,6 +890,144 @@ The next optimization cycle should focus on:
    hardware pipeline
 
 But these are **not currently required** for the observed `25 fps` result.
+
+---
+
+### Phase 8: TX Synchronization Gap + TDMA-by-default Plan (2026-07-02)
+
+#### The gap (verified in code)
+
+A review of the actual TX paths shows the "master" (host, node 254) does **not**
+follow any TX schedule, because it never goes through a scheduler at all:
+
+- Host runs `ulama-gw --transport unow`. In
+  [ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c) the transport init has
+  only two branches: `unow` and (else) `udp`. There is **no `radiod` branch**.
+  So `ulama-gw` injects control frames directly via `pcap_inject()` (unow),
+  with no TX scheduler, no slots, no coordination — it transmits whenever
+  cascade-core hands it a frame (~50 Hz).
+- Drone runs `vcpd`/`ulamad` through `radiod`, but `radiod` is started **without
+  `-S`**: logs show `relay=off`, no `SYNC protocol enabled` line, and stats have
+  no `sync[role=...]` suffix. So `radiod` only runs the **quasi-TDMA** loop
+  (`TX burst -> RX window`), which the design doc itself describes as operating
+  **without inter-node synchronization**.
+
+Net effect (asymmetric, unsynchronized):
+
+```
+Drone:  vcpd/ulamad -> radiod (quasi-TDMA, sync OFF) -> wifi
+Host:   ulama-gw    -> unow direct inject (no scheduler) -> wifi
+```
+
+So the master does not "fail to transmit in its slot" — it has **no slots and no
+schedule**. And enabling `-S` on the drone alone is useless: by the election
+rule (master = highest node_id = 254 = host), the drone would wait forever for a
+master beacon that the host never sends, or elect itself while the host still
+ignores beacons and slot boundaries.
+
+#### Why this matters for packet loss
+
+- `radiod` on the drone shows `qdrop=0`, empty queues, `air% ~ 8-12%` — the
+  radio is **not saturated**; losses are not queue overflow.
+- Host receives many fragments (`frags_rx ~ 130-158/5s`) but assembles few full
+  frames (`frames_rx ~ 1-40/5s`) — sporadic per-fragment corruption.
+- Host simultaneously injects ~50-64 pps of uplink control into the same
+  half-duplex channel carrying the drone's downlink video, with **no CSMA/CA
+  arbitration between the two nodes**.
+
+Uncoordinated half-duplex TX from both ends is very likely a major loss
+contributor. Caveat: it is probably **not the only** cause — the `rtl8192eu` in
+monitor mode has a documented high raw per-fragment PER even at low airtime, so
+TDMA will remove collisions but a residual PER floor may remain.
+
+#### Goal: SYNC/TDMA must be the DEFAULT mode
+
+SYNC/TDMA is already fully implemented in `radiod`
+([radiod/tools/radiod.c](../radiod/tools/radiod.c): `master_cycle`, `slave_cycle`,
+`candidate_cycle`, `radio_sync_tick`; superframe = SYNC beacon + DL + guard + UL
+slots; PTP-like clock sync; bully election by node_id). It is only gated off by
+`cfg.sync_enabled = false`. The missing pieces are: (1) host participation, and
+(2) flipping the default on with a safe fallback.
+
+Relevant constants: `SYNC_BEACON_INTERVAL_US = 12000` (12 ms superframe),
+`SYNC_MAX_SLOTS = 4`, default `dl=2000us ul=2000us guard=300us`.
+
+Topology note: video flows **drone -> host**. If the host (254) is master, the
+drone (1) is a slave, so:
+- DL (master host -> all) = control only (small, ~26-byte CRSF)
+- UL slot for node 1 (drone) = the heavy flow (video + telemetry)
+Therefore slot sizing must be asymmetric: shrink DL, enlarge the drone UL slot.
+
+#### Plan — Variant A (recommended): host runs radiod, gw speaks radiod IPC
+
+This reuses the existing, tested `radiod` sync engine on both ends instead of
+duplicating TDMA logic inside `ulama-gw`.
+
+Step A1 — Add a `radiod` transport branch to `ulama-gw`
+- File: [ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c)
+- The transport primitives already exist in
+  [ulama/src/common/transport.c](../ulama/src/common/transport.c):
+  `ulama_transport_tx_init_radiod()` / `ulama_transport_rx_init_radiod()`
+  (they connect to the radiod IPC unix socket via `radiod_acquire_fd`).
+- Add an `else if (tk == ULAMA_TRANSPORT_KIND_RADIOD)` branch that calls those
+  init functions (mirror how `vcpd` selects radiod transport).
+- Keep `unow`/`udp` branches for bench/back-compat.
+
+Step A2 — Run `radiod` on the host
+- Start `radiod --iface wlan0 --node-id 254 --sync` on the host, same monitor
+  interface `ulama-gw` uses today.
+- `ulama-gw` then runs `--transport radiod` and stops touching pcap directly.
+- Result: both control (host DL) and video (drone UL) go through the scheduler
+  and land in disjoint superframe slots.
+
+Step A3 — Make SYNC the default in `radiod`
+- File: [radiod/tools/radiod.c](../radiod/tools/radiod.c)
+- Flip `cfg->sync_enabled` default from `false` to `true` in `config_defaults()`.
+- Add an explicit opt-out flag (e.g. `--no-sync`) for bench/regression use, so
+  the old standalone quasi-TDMA path stays reachable.
+- Keep election automatic: highest node_id wins, so host(254)=master,
+  drone(1)=slave with no manual role config.
+
+Step A4 — Recompute superframe/slot budget for the real 25 fps video
+- Heavy path is the drone UL slot, not DL.
+- Shrink DL (`--dl-us`) toward control-only size; enlarge the drone UL
+  (`--ul-us`) so a full 25 fps video frame's fragments fit within one or a few
+  superframes at 6 Mbps.
+- Validate against `SYNC_BEACON_INTERVAL_US`; adjust beacon interval if the
+  superframe no longer closes in time.
+
+Step A5 — Field-validate SYNC (it has NEVER run live)
+- Confirm on host stats: `sync[role=MASTER ...]`; on drone: `sync[role=SLAVE ...]`
+  and `radio_sync_is_synced` true (beacon-fed watchdog).
+- Compare against the current run: expect `reorder_skip` and `kf_lost` to drop
+  and `fps_out` to rise, since drone video UL no longer collides with host
+  control DL.
+
+#### Plan — Variant B (not recommended): embed TDMA in the unow gw path
+
+Re-implement election/superframe/slotting directly in `ulama-gw`'s unow path.
+Rejected as default: duplicates the radiod sync engine, doubles maintenance, and
+diverges the two nodes' timing implementations. Only consider if running a second
+radiod process on the host proves infeasible.
+
+#### Risks / open items
+
+- SYNC has unit tests but **zero live field time** — treat first bring-up as
+  experimental; keep `--no-sync` fallback one flag away.
+- 1 Mbps is incompatible with video-in-slot (2 ms UL = 250 bytes < 1 fragment);
+  we are at 6 Mbps now, but slot math must be redone, not assumed.
+- Two radiod instances: ensure only one process owns the monitor iface; the host
+  `ulama-gw` must go through radiod IPC, not open pcap in parallel.
+- Host has no battery RTC concerns (unlike drone), but PTP offset filtering
+  should still be sanity-checked on the host master.
+
+#### Acceptance criteria for "TDMA on by default"
+
+1. Fresh boot of both nodes, no extra flags, yields host=MASTER / drone=SLAVE.
+2. `ulama-gw` transmits only through radiod (no direct pcap inject).
+3. Drone video UL and host control DL occupy disjoint slots (no overlap in logs).
+4. Measurable improvement vs current run in `kf_lost`, `reorder_skip`, `fps_out`.
+5. `--no-sync` still reproduces the old standalone behavior for A/B.
 
 ---
 
