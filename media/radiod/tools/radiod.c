@@ -96,13 +96,13 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->iface = "wlan0";
 	cfg->sock_path = RADIO_IPC_SOCK_PATH;
 	cfg->node_id = 1;
-	cfg->tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
+	cfg->tx_rate_500kbps = 12;  /* 6 Mbps = 12 * 500kbps */
 	cfg->tx_slot_size = TX_SLOT_SIZE;
 	cfg->rx_slot_us = RX_SLOT_US;
 	cfg->ack_timeout_us = ACK_TIMEOUT_US;
 	cfg->ack_max_retry = ACK_MAX_RETRY;
-	cfg->sync_dl_us = 2000;
-	cfg->sync_ul_us = 2000;
+	cfg->sync_dl_us = 1500;
+	cfg->sync_ul_us = 5000;
 	cfg->sync_guard_us = 300;
 	cfg->sync_enabled = true;
 }
@@ -157,6 +157,34 @@ static uint64_t estimate_unow_airtime_us(size_t wire_len, uint8_t rate_half_mbps
 	uint64_t payload_us = (((uint64_t)wire_len * 8ULL * 2ULL) + rate_half_mbps - 1U)
 		/ (uint64_t)rate_half_mbps;
 	return 192ULL + payload_us;
+}
+
+/* Estimated on-air time for a queued ULAMA payload of `payload_len` bytes,
+ * including the radiotap/802.11/vendor-action wire headers. Used to bound a
+ * UL/DL slot by airtime instead of wall-clock: pcap_inject only enqueues a
+ * frame (the airtime happens later on the wire), so a wall-clock loop can pile
+ * several frames into the driver that transmit long past the slot boundary. */
+#define TX_WIRE_HDR_OVERHEAD 48U
+static uint64_t estimate_payload_airtime_us(size_t payload_len)
+{
+	return estimate_unow_airtime_us(payload_len + TX_WIRE_HDR_OVERHEAD,
+					g_tx_rate_500kbps);
+}
+
+/* Peek the next packet the scheduler would dequeue (priority order P0..P3)
+ * without removing it, so the caller can check it fits the remaining slot. */
+static const radio_tx_slot_t *tx_peek_next(const radio_tx_scheduler_t *sched,
+					   uint8_t *out_prio)
+{
+	for (uint8_t p = 0; p < RADIO_PRIO_COUNT; p++) {
+		const radio_tx_slot_t *s = radio_tx_peek(sched, p);
+		if (s != NULL) {
+			if (out_prio != NULL)
+				*out_prio = p;
+			return s;
+		}
+	}
+	return NULL;
 }
 
 static uint64_t tx_inject_slot(const radio_tx_slot_t *slot,
@@ -241,7 +269,7 @@ static void usage(const char *prog)
 		"  -i, --iface IFACE     Monitor interface (default: mon0)\n"
 		"  -n, --node-id ID      Node ID (default: 1)\n"
 		"  -d, --dst-mac MAC     Destination MAC (default: broadcast)\n"
-		"      --tx-rate-mbps N  Legacy radiotap TX rate for injected frames (default: 1)\n"
+		"      --tx-rate-mbps N  Legacy radiotap TX rate for injected frames (default: 6)\n"
 		"  -s, --socket PATH     IPC socket path (default: %s)\n"
 		"  -T, --tx-slot N       Max TX packets per slot (default: %u)\n"
 		"  -R, --rx-slot US      RX slot duration in µs (default: %u)\n"
@@ -419,6 +447,28 @@ static void master_cycle(radio_sync_t *sync,
 		usleep(sync->guard_us);
 	}
 
+	/* Join/contention window — ALWAYS listen one extra slot.
+	 *
+	 * A not-yet-slotted slave announces itself with a bootstrap DELAY_REQ in
+	 * the post-DL region, but the UL loop above only opens RX windows for
+	 * slaves that ALREADY have a slot. With num_slots==0 that loop runs zero
+	 * times, so the master would never open any RX window and could never
+	 * admit its first slave — the mirror of the slave-side bootstrap deadlock,
+	 * and exactly why the drone's video/telemetry/ACK uplink stayed dead
+	 * (tx_pkt=0, dreq=0).
+	 *
+	 * Only open it while we have NO slaves. Once at least one slave holds a
+	 * slot, that slave transmits its per-superframe DELAY_REQ at the start of
+	 * its UL slot, which the master already receives inside the UL loop above —
+	 * so the extra window is redundant there. Worse, adding it unconditionally
+	 * lengthened every superframe by one ul_slot, pushing the master's beacon
+	 * later than the slave's computed next_superframe and causing the slave to
+	 * miss beacons and flap SLAVE->CANDIDATE->MASTER once video load arrived. */
+	if (sync->num_slots == 0) {
+		int64_t join_deadline = now_us() + sync->ul_slot_us;
+		radio_rx_slot(rxd, pcap, own_mac, join_deadline);
+	}
+
 	radio_async_tick(rxd, pcap, ack_timeout_us, ack_max_retry);
 }
 
@@ -433,10 +483,21 @@ static void slave_cycle(radio_sync_t *sync,
 			uint32_t ack_timeout_us,
 			uint32_t ack_max_retry)
 {
-	/* Wait for SYNC beacon */
-	int64_t sync_deadline = sync->next_superframe_us > 0
+	/* Wait for SYNC beacon.
+	 *
+	 * Compare next_superframe_us against NOW, not against 0. If we have fallen
+	 * behind — the predicted boundary is already in the past because the loop
+	 * was delayed while draining a burst of video TX — a `> 0` test would set a
+	 * deadline in the past, make this RX return immediately, and leave us
+	 * spinning on stale slot timing WITHOUT ever listening for the beacon. That
+	 * snowballs: we never re-hear the master, miss ~10 beacons, trip SYNC-lost,
+	 * fall back to CANDIDATE/MASTER, and degenerate into a dual-master free-for-
+	 * all that shreds video into never-completing keyframes. When late, re-open
+	 * a full beacon-interval window so we re-catch the beacon and re-anchor. */
+	int64_t now = now_us();
+	int64_t sync_deadline = (sync->next_superframe_us > now)
 		? sync->next_superframe_us + 2000
-		: now_us() + SYNC_BEACON_INTERVAL_US + 2000;
+		: now + SYNC_BEACON_INTERVAL_US + 2000;
 	radio_rx_slot(rxd, pcap, own_mac, sync_deadline);
 
 	if (!radio_sync_is_synced(sync))
@@ -455,35 +516,40 @@ static void slave_cycle(radio_sync_t *sync,
 		/* DELAY_REQ first */
 		sync_inject_delay_req(sync, pcap, own_mac, now_us());
 
-		/* Send data */
 		int64_t ul_deadline = sync->my_ul_end_us;
 		bool sent_data = false;
 
-		/* Flush CTRL first */
-		for (;;) {
-			if (now_us() >= ul_deadline)
-				break;
-			const radio_tx_slot_t *slot = radio_tx_peek(sched, RADIO_PRIO_CTRL);
-			if (slot == NULL)
-				break;
-			uint8_t prio;
-			slot = radio_tx_dequeue(sched, &prio);
-			if (slot == NULL)
-				break;
-			radio_stats_add_tx_airtime(stats,
-				tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
-			radio_stats_add_tx_packet(stats, prio);
-			sent_data = true;
-		}
-
+		/* Airtime-bounded UL send.
+		 *
+		 * A 1440-byte video fragment is ~2.2 ms on air at 6 Mbps. pcap_inject only
+		 * queues a frame into the driver — the airtime elapses later on the wire —
+		 * so the old `while (now < ul_deadline)` loop kept dequeuing and injecting
+		 * several fragments that then transmitted far past the UL slot, straight
+		 * into the master's beacon/DL window where the master is transmitting and
+		 * cannot receive (half duplex). That silently dropped most video and made
+		 * every multi-fragment keyframe impossible to reassemble (kf_rx=0). Bound
+		 * the slot by ESTIMATED AIRTIME instead, dequeuing (highest priority first)
+		 * only while the next frame still fits, so nothing overruns the slot. */
+		uint64_t air_budget = (sync->ul_slot_us > sync->guard_us)
+			? (uint64_t)(sync->ul_slot_us - sync->guard_us)
+			: (uint64_t)sync->ul_slot_us;
+		/* The DELAY_REQ injected just above also consumes slot airtime. */
+		uint64_t air_used = estimate_payload_airtime_us(DELAY_REQ_FRAME_SIZE);
 		while (now_us() < ul_deadline) {
 			uint8_t prio;
+			const radio_tx_slot_t *next = tx_peek_next(sched, &prio);
+			if (next == NULL)
+				break;
+			uint64_t air = estimate_payload_airtime_us(next->len);
+			if (air_used + air > air_budget)
+				break;  /* would overrun the slot; leave it for next superframe */
 			const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
 			if (slot == NULL)
 				break;
 			radio_stats_add_tx_airtime(stats,
 				tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
 			radio_stats_add_tx_packet(stats, prio);
+			air_used += air;
 			sent_data = true;
 		}
 

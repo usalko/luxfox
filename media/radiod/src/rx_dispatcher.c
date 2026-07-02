@@ -77,27 +77,32 @@ static bool dedup_check_and_add(radio_rx_dispatcher_t *rxd, uint16_t seq)
 }
 
 /* ================================================================
- * ULAMA-level dedup (by src_node + ulama_seq)
+ * ULAMA-level dedup (by src_node + ulama_seq + fragment identity)
  *
  * Prevents broadcast storm in mesh: the same ULAMA frame arrives
  * via different relay paths with different UNOW sequences.
  * ================================================================ */
 
 static bool ulama_dedup_check_and_add(radio_rx_dispatcher_t *rxd,
-				      uint8_t src_node, uint16_t seq)
+				      uint8_t src_node, uint16_t seq,
+				      uint8_t flags, uint8_t frag_idx)
 {
+	uint8_t key_frag_idx = (flags & ULAMA_FLAG_FRAGMENT) ? frag_idx : 0xFFU;
+
 	for (uint16_t i = 0; i < rxd->ulama_dedup_count; i++) {
 		uint16_t idx = (uint16_t)((rxd->ulama_dedup_head
 					   + RADIO_ULAMA_DEDUP_WINDOW
 					   - 1U - i) % RADIO_ULAMA_DEDUP_WINDOW);
 		radio_ulama_dedup_key_t *k = &rxd->ulama_dedup_ring[idx];
-		if (k->src_node == src_node && k->seq == seq)
+		if (k->src_node == src_node && k->seq == seq &&
+		    k->frag_idx == key_frag_idx)
 			return true;
 	}
 
 	radio_ulama_dedup_key_t *slot = &rxd->ulama_dedup_ring[rxd->ulama_dedup_head];
 	slot->src_node = src_node;
 	slot->seq = seq;
+	slot->frag_idx = key_frag_idx;
 	rxd->ulama_dedup_head = (uint16_t)((rxd->ulama_dedup_head + 1U)
 					    % RADIO_ULAMA_DEDUP_WINDOW);
 	if (rxd->ulama_dedup_count < RADIO_ULAMA_DEDUP_WINDOW)
@@ -401,7 +406,9 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 
 		/* ULAMA-level dedup (mesh anti-loop) */
 		if (is_ulama) {
-			if (ulama_dedup_check_and_add(rxd, src_node, ulama_seq)) {
+			uint8_t frag_idx = frame.len > 9U ? frame.payload[8] : 0U;
+			if (ulama_dedup_check_and_add(rxd, src_node, ulama_seq,
+							      flags, frag_idx)) {
 				rxd->stats.rx_ulama_dedup_dropped++;
 				continue;
 			}

@@ -1047,13 +1047,75 @@ Done in this session:
   clock jump could move the same process's TDMA deadline/sleep base mid-flight,
   causing the slave to miss its bootstrap `DELAY_REQ` / UL activity after the
   first sync event.
+- **Master-side bootstrap fix (2026-07-02, 2nd field run)** — `master_cycle` now
+  always opens a join/contention RX window (`radio_rx_slot(..., now+ul_slot_us)`)
+  after the UL-slot loop. Previously the master only listened inside
+  `for (i < num_slots)`, which runs zero times when it has no slaves, so a fresh
+  master never opened any RX window and could never hear the drone's bootstrap
+  `DELAY_REQ`. Field symptom: host `sync[rx=0] sync_rx[dreq=0]`, drone `radiod
+  tx_pkt=0` with `q[T=64 V=64]` filling and `qdrop V=...`, while drone `vcpd`
+  encoded 25 fps and submitted to IPC fine (`tx=125/... fail=0`). Control still
+  flowed host→drone (DL), so piloting "worked but stuck" — reliable CTRL was
+  never ACKed (`ack[ok=0 ... retx` climbing), forcing a retransmit storm. This
+  was the mirror of the slave bootstrap deadlock; both sides now bootstrap.
+- **SYNC stability fix (2026-07-02, 3rd field run)** — after bootstrap worked
+  (`dreq` climbing, `video_rx`/`frags_rx` flowing) the drone lost sync ~2s after
+  video started (`sync: SYNC lost, back to CANDIDATE`) and degenerated into a
+  dual-master free-for-all: fragments arrived but `frames_rx=0 kf_rx=0` with high
+  `reorder_skip`/`kf_lost`, so nothing decoded (`fps_out=0`). Two causes:
+  (1) the unconditional master join window lengthened every superframe by one
+  `ul_slot`, pushing the beacon past the slave's computed `next_superframe` →
+  chronic near-misses. Fixed by opening the join window only when
+  `num_slots == 0` (steady-state DELAY_REQ already arrives inside the slave's UL
+  slot). (2) the slave's beacon-wait used `next_superframe_us > 0`; once the loop
+  fell behind (video TX burst) the deadline was in the past, so the RX returned
+  instantly and the slave spun on stale slot timing without ever listening,
+  snowballing to SYNC-lost. Fixed by comparing against `now` and re-opening a
+  full `SYNC_BEACON_INTERVAL_US` hunt window when late so it re-anchors.
+- **Uplink video slot budget + airtime cap (2026-07-02, 4th field run)** — with
+  SYNC stable and control solid, video fragments reached the host
+  (`frags_rx~100/5s`) but NO frame ever completed (`frames_rx=0`) and NO keyframe
+  ever completed (`kf_rx=0`), with `kf_lost`/`incomplete`/`reorder_skip` all
+  climbing despite RSSI −37. Root cause: a `vcpd` video fragment is
+  VIDEO_FRAG_MTU=1440 B → ~1496 B on the wire → ~2187 µs of airtime at 6 Mbps,
+  but the UL slot was only 2000 µs — a single fragment could not fit. Worse,
+  `slave_cycle` injected by wall-clock (`while now < ul_deadline`) while
+  `pcap_inject` merely queues the frame into the driver (airtime elapses later),
+  so several fragments piled up and transmitted well past the slot into the
+  master's beacon/DL window, where the half-duplex master is transmitting and
+  cannot receive. The master's per-slot RX window (=ul_slot) was likewise too
+  short to receive one fragment. Net: ~70% uplink video loss, keyframes never
+  reassembled. Fix: (1) asymmetric slot budget in `config_defaults`
+  dl=1500/ul=5000/guard=300 — control is tiny, the drone UL is the heavy flow;
+  the slave adopts dl/ul/guard from the master's beacon, so only the host config
+  matters. (2) new `estimate_payload_airtime_us()` + `tx_peek_next()`; the slave
+  UL loop now dequeues (priority order) only while
+  `air_used + next_frame_air <= ul_slot - guard`, seeding `air_used` with the
+  DELAY_REQ airtime, so nothing overruns the slot. Superframe ~7.4 ms (~135/s),
+  ~2 fragments/UL → ~270 frags/s vs ~30-50 needed for 25 fps. Built + tested
+  (radiod 189/0).
+- **Fragment-aware ULAMA dedup (2026-07-02, 5th field run)** — after the airtime
+  fix the host received many video fragments (`video_rx~100/5s`) but still no
+  complete frames/keyframes (`frames_rx=0 kf_rx=0`). The smoking gun was host
+  `radiod` `dedup=0/<large>` rising: `vcpd` intentionally sends all fragments of
+  one video frame with the same ULAMA `seq` and different `frag_idx`, while
+  `rx_dispatcher`'s mesh anti-loop dedup key was only `(src_node, seq)`. It let
+  the first fragment through and dropped the rest before `ulama-gw` could
+  reassemble. Fix: `radio_ulama_dedup_key_t` now includes `frag_idx`, and
+  `ulama_dedup_check_and_add()` keys fragmented frames by
+  `(src_node, seq, frag_idx)` while unfragmented frames use `frag_idx=0xFF`.
+  Repeated copies of the same fragment are still deduped, but distinct fragments
+  of the same frame now all reach the gateway reassembler. Built + tested
+  (radiod 189/0).
 - Built clean: host `radiod` + host `ulama_gw` (x86, `host-unow`), target
   `radiod` + `vcpd` (ARM). Only a pre-existing `dst_node` maybe-uninitialized
   warning in `rx_dispatcher.c` (unrelated to these edits).
 
 Deferred:
-- **A4** (asymmetric DL/UL slot budget for 25 fps video-in-slot) — NOT tuned yet;
-  running on stock `dl=2000 ul=2000 guard=300`. Revisit after first live sync.
+- **A4** (asymmetric DL/UL slot budget for 25 fps video-in-slot) — first tuning
+  applied: default `dl=1500 ul=5000 guard=300` plus airtime-bounded slave UL.
+  Further tuning is only needed after the next field run if `frames_rx/fps_out`
+  still lag.
 - **A2/A5** — deployment + live validation is a field step (see runbook below).
 
 #### CRITICAL: SYNC bootstrap deadlock (why sync never worked live)

@@ -38,10 +38,13 @@ typedef struct {
 	bool     active;
 } radio_async_slot_t;
 
-/* ULAMA-level dedup key: (src_node, ulama_seq) */
+/* ULAMA-level dedup key: (src_node, ulama_seq, frag_idx).
+ * Fragmented video frames intentionally reuse one ULAMA seq for all fragments;
+ * frag_idx is therefore part of identity. */
 typedef struct {
 	uint8_t  src_node;
 	uint16_t seq;
+	uint8_t  frag_idx;
 } radio_ulama_dedup_key_t;
 
 /* RX statistics */

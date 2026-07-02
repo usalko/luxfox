@@ -10,17 +10,21 @@
 #   ./masha.sh status              — Show status and logs
 #   ./masha.sh logs                — Tail logs
 #
-# Options for 'start' and 'restart':
-#   --iface IFACE                  Default: wlan0
-#   --channel CH                   Default: 6
-#   --tx-rate-mbps RATE            Default: 6
-#   --node NODE_ID                 Default: 254
-#   --cascade-in ADDR:PORT         Default: 127.0.0.1:5601
-#   --cascade-out ADDR:PORT        Default: 127.0.0.1:5600
-#   --cascade-host HOST            Default: localhost (sets cascade-{in,out} to HOST:PORT)
+# Options for 'start' and 'restart' (shared):
+#   --iface IFACE                  Monitor interface name (default: wlan0)
+#   --channel CH                   WiFi channel (interface level, default: 6)
+#   --cascade-in ADDR:PORT         ulama-gw cascade input (default: 127.0.0.1:5601)
+#   --cascade-out ADDR:PORT        ulama-gw cascade output (default: 127.0.0.1:5600)
 #
-# Example:
-#   ./masha.sh start --iface wlan0 --channel 6 --tx-rate-mbps 6 --node 254
+# radiod-specific options:
+#   --node-id ID                   radiod node ID: 254=MASTER(host), 1=SLAVE(drone) (default: 254)
+#   --tx-rate-mbps RATE            PHY rate for radiotap injection (default: 6)
+#
+# Example (host with SYNC enabled):
+#   ./masha.sh start --iface wlan0 --channel 6 --node-id 254 --tx-rate-mbps 6
+# 
+# Example (drone node):
+#   ./masha.sh start --iface wlan0 --channel 6 --node-id 1 --tx-rate-mbps 6
 #
 ##############################################################################
 
@@ -81,7 +85,13 @@ parse_args() {
                 TX_RATE_MBPS="$2"
                 shift 2
                 ;;
+            --node-id)
+                NODE_ID="$2"
+                shift 2
+                ;;
             --node)
+                # Compatibility: accept both --node and --node-id
+                log_warn "Use --node-id instead of --node (they're radiod parameters, not interface level)"
                 NODE_ID="$2"
                 shift 2
                 ;;
@@ -131,6 +141,18 @@ check_interface() {
     fi
 }
 
+setup_interface() {
+    log_info "Setting up interface $IFACE on channel $CHANNEL..."
+    
+    # Set channel using iw (preferred method)
+    if ! sudo iw dev "$IFACE" set channel "$CHANNEL" 2>/dev/null; then
+        # Fallback to iwconfig
+        if ! sudo iwconfig "$IFACE" channel "$CHANNEL" 2>/dev/null; then
+            log_warn "Could not set channel (driver may not support dynamic channel, continuing anyway)"
+        fi
+    fi
+}
+
 ##############################################################################
 # Start/stop functions
 ##############################################################################
@@ -138,21 +160,27 @@ check_interface() {
 start_radiod() {
     log_info "Starting radiod..."
     
-    if pgrep -f "$RADIOD_BIN" > /dev/null 2>&1; then
+    if pgrep -f "radiod" > /dev/null 2>&1; then
         log_warn "radiod already running, stopping first..."
-        pkill -f "$RADIOD_BIN" || true
+        sudo pkill -f "radiod" || pkill -f "radiod" 2>/dev/null || true
         sleep 0.5
     fi
     
-    # Start radiod with monitor mode setup
+    # Setup interface channel before starting radiod
+    setup_interface
+    
     mkdir -p "$LOG_DIR"
     
-    # radiod should set up monitor mode itself, but ensure it's ready
+    # radiod parameters (from radiod --help):
+    # --iface: monitor interface name
+    # --node-id: 254=MASTER (host), 1=SLAVE (drone)
+    # --tx-rate-mbps: PHY rate for radiotap injections
+    # SYNC is ON by default; use --no-sync to disable
+    
     sudo "$RADIOD_BIN" \
         --iface "$IFACE" \
-        --channel "$CHANNEL" \
+        --node-id "$NODE_ID" \
         --tx-rate-mbps "$TX_RATE_MBPS" \
-        --node "$NODE_ID" \
         >"$RADIOD_LOG" 2>&1 &
     
     local radiod_pid=$!
@@ -162,6 +190,7 @@ start_radiod() {
     
     if ! ps -p "$radiod_pid" > /dev/null 2>&1; then
         log_error "radiod failed to start. Check: tail -f $RADIOD_LOG"
+        cat "$RADIOD_LOG" | head -20
         exit 1
     fi
     
@@ -171,24 +200,23 @@ start_radiod() {
 start_ulama_gw() {
     log_info "Starting ulama-gw..."
     
-    if pgrep -f "$ULAMA_GW_BIN" > /dev/null 2>&1; then
+    if pgrep -f "ulama_gw" > /dev/null 2>&1; then
         log_warn "ulama-gw already running, stopping first..."
-        pkill -f "$ULAMA_GW_BIN" || true
+        sudo pkill -f "ulama_gw" || pkill -f "ulama_gw" 2>/dev/null || true
         sleep 0.5
     fi
     
     mkdir -p "$LOG_DIR"
     
-    # ulama-gw connects to radiod via IPC (default transport should be radiod now)
-    # Add explicit transport=radiod to ensure connection
+    # ulama-gw connects to radiod daemon via IPC socket (/var/run/radiod.sock)
+    # radiod owns the monitor interface and handles SYNC/TDMA scheduling
+    # ulama-gw only needs cascade endpoints and transport=radiod
+    # (it inherits channel/node-id config from radiod via IPC)
+    
     sudo "$ULAMA_GW_BIN" \
         --cascade-in "$CASCADE_IN" \
         --cascade-out "$CASCADE_OUT" \
         --transport radiod \
-        --iface "$IFACE" \
-        --channel "$CHANNEL" \
-        --tx-rate-mbps "$TX_RATE_MBPS" \
-        --node "$NODE_ID" \
         >"$ULAMA_GW_LOG" 2>&1 &
     
     local gw_pid=$!
@@ -198,6 +226,7 @@ start_ulama_gw() {
     
     if ! ps -p "$gw_pid" > /dev/null 2>&1; then
         log_error "ulama-gw failed to start. Check: tail -f $ULAMA_GW_LOG"
+        cat "$ULAMA_GW_LOG" | head -20
         exit 1
     fi
     
@@ -325,20 +354,30 @@ main() {
             echo "Usage: $0 {start|stop|restart|status|logs} [OPTIONS]"
             echo ""
             echo "Commands:"
-            echo "  start        Start radiod and ulama-gw"
+            echo "  start        Start radiod and ulama-gw daemons"
             echo "  stop         Stop both processes"
             echo "  restart      Restart both processes"
-            echo "  status       Show current status"
-            echo "  logs         Tail both log files"
+            echo "  status       Show current status and configuration"
+            echo "  logs         Tail both log files (radiod + ulama-gw)"
             echo ""
             echo "Options for start/restart:"
-            echo "  --iface IFACE              (default: wlan0)"
-            echo "  --channel CH               (default: 6)"
-            echo "  --tx-rate-mbps RATE        (default: 6)"
-            echo "  --node NODE_ID             (default: 254)"
-            echo "  --cascade-in ADDR:PORT     (default: 127.0.0.1:5601)"
-            echo "  --cascade-out ADDR:PORT    (default: 127.0.0.1:5600)"
-            echo "  --cascade-host HOST        (sets cascade endpoints to HOST:PORT)"
+            echo ""
+            echo "  Shared (interface + IPC):"
+            echo "    --iface IFACE              Monitor interface (default: wlan0)"
+            echo "    --channel CH               WiFi channel via iw/iwconfig (default: 6)"
+            echo "    --cascade-in ADDR:PORT     ulama-gw input endpoint (default: 127.0.0.1:5601)"
+            echo "    --cascade-out ADDR:PORT    ulama-gw output endpoint (default: 127.0.0.1:5600)"
+            echo ""
+            echo "  radiod-specific:"
+            echo "    --node-id ID               254=MASTER(host) | 1=SLAVE(drone) (default: 254)"
+            echo "    --tx-rate-mbps RATE        PHY rate for radiotap injection (default: 6)"
+            echo ""
+            echo "Examples:"
+            echo "  Host (MASTER, SYNC enabled):"
+            echo "    \$0 start --iface wlan0 --channel 6 --node-id 254 --tx-rate-mbps 6"
+            echo ""
+            echo "  Drone (SLAVE, SYNC enabled):"
+            echo "    \$0 start --iface wlan0 --channel 6 --node-id 1 --tx-rate-mbps 6"
             exit 1
             ;;
     esac

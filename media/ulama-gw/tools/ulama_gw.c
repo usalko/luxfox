@@ -85,7 +85,7 @@ static void usage(const char *prog)
 		"  --peer        ADDR:PORT  Send ULAMA frames to (UDP)        (default 127.0.0.1:5001)\n"
 		"  --iface       NAME       Monitor mode interface (UNOW)     (default mon0)\n"
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
-		"  --tx-rate-mbps N        Legacy radiotap TX rate for UNOW uplink (default 1)\n"
+		"  --tx-rate-mbps N        Legacy radiotap TX rate for UNOW uplink (default 6)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 254)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
 		"  --verbose                Enable verbose logging\n"
@@ -951,7 +951,7 @@ int main(int argc, char *argv[])
 	ctx.gw.node_id = 254;
 	ctx.verbose = false;
 	ctx.channel = 0;
-	ctx.tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
+	ctx.tx_rate_500kbps = 12;  /* 6 Mbps = 12 * 500kbps */
 
 	static struct option long_opts[] = {
 		{"cascade-in",  required_argument, NULL, 'C'},
