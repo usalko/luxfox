@@ -137,12 +137,19 @@ for name in $RADIO_PROJECTS; do
     [ -d "$dir" ] || continue
     [ -f "$dir/Makefile" ] || continue
 
-    # Kill any running ulama_gw process (needed because it locks the binary during rebuild)
+    # Kill any running processes that lock the binary during rebuild
     if [ "$name" = "ulama-gw" ]; then
         if pgrep -f "ulama_gw" > /dev/null 2>&1; then
             log_warn "Killing running ulama_gw process..."
             sudo pkill -f "ulama_gw" || pkill -f "ulama_gw" 2>/dev/null || true
             sleep 0.5  # Give the process time to die
+        fi
+    fi
+    if [ "$name" = "radiod" ]; then
+        if pgrep -f "radiod" > /dev/null 2>&1; then
+            log_warn "Killing running radiod process..."
+            sudo pkill -f "radiod" || pkill -f "radiod" 2>/dev/null || true
+            sleep 0.5
         fi
     fi
 
@@ -154,17 +161,20 @@ done
 ##############################################################################
 # Build host-side tools (for ground station)
 ##############################################################################
-if [ -f "$SCRIPT_DIR/ulama-gw/Makefile" ]; then
-    # Kill any running ulama_gw process before rebuilding
-    if pgrep -f "ulama_gw" > /dev/null 2>&1; then
-        log_warn "Killing running ulama_gw process for host-unow rebuild..."
-        sudo pkill -f "ulama_gw" || pkill -f "ulama_gw" 2>/dev/null || true
-        sleep 0.5
-    fi
+for host_tool in "radiod" "ulama-gw"; do
+    tool_dir="$SCRIPT_DIR/$host_tool"
+    if [ -f "$tool_dir/Makefile" ]; then
+        # Kill any running processes before rebuilding
+        if pgrep -f "$host_tool" > /dev/null 2>&1; then
+            log_warn "Killing running $host_tool process for host-unow rebuild..."
+            sudo pkill -f "$host_tool" || pkill -f "$host_tool" 2>/dev/null || true
+            sleep 0.5
+        fi
 
-    log_info "═══ ulama-gw (host-unow) ═══"
-    make -C "$SCRIPT_DIR/ulama-gw" host-unow 2>/dev/null || log_warn "host-unow failed (libpcap-dev missing?)"
-fi
+        log_info "═══ $host_tool (host-unow) ═══"
+        make -C "$tool_dir" host-unow 2>/dev/null || log_warn "host-unow $host_tool failed (libpcap-dev missing?)"
+    fi
+done
 
 ##############################################################################
 # Update rootfs staging init scripts

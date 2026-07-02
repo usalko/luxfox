@@ -104,7 +104,7 @@ $(PKG_BUILD)/tests/%: $(CURRENT_DIR)/tests/%.c $(RADIOD_SRCS) $(ULAMA_LIB_SRCS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) $< $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) -o $@ $(HOST_LDFLAGS)
 
-$(PKG_BUILD)/host-unow-tools/radiod: $(TARGET_APP_SRC) $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)
+$(PKG_BUILD)/host-unow-tools/radiod: $(TARGET_APP_SRC) $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) $(ULAMA_VERSION_HDR)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_UNOW_CFLAGS) $< $(RADIOD_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) -o $@ $(HOST_UNOW_LDFLAGS)
 

@@ -104,7 +104,7 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->sync_dl_us = 2000;
 	cfg->sync_ul_us = 2000;
 	cfg->sync_guard_us = 300;
-	cfg->sync_enabled = false;
+	cfg->sync_enabled = true;
 }
 
 static int64_t now_us(void)
@@ -248,7 +248,8 @@ static void usage(const char *prog)
 		"  -K, --ack-timeout US  Reliable ACK timeout in µs (default: %u)\n"
 		"  -Y, --ack-retry N     Reliable max retransmits   (default: %u)\n"
 		"      --relay           Enable mesh relay mode\n"
-		"  -S, --sync            Enable SYNC protocol (TDMA + election)\n"
+		"  -S, --sync            Enable SYNC protocol (TDMA + election)  (default: ON)\n"
+		"      --no-sync         Disable SYNC; fall back to standalone quasi-TDMA\n"
 		"  -D, --dl-us US        SYNC DL slot duration (default: 2000)\n"
 		"  -U, --ul-us US        SYNC UL slot duration (default: 2000)\n"
 		"  -G, --guard-us US     SYNC guard interval (default: 300)\n"
@@ -488,6 +489,22 @@ static void slave_cycle(radio_sync_t *sync,
 
 		if (!sent_data)
 			sync_inject_null_frame(pcap, own_mac);
+	} else {
+		/* Bootstrap: synced but the master has not assigned us a UL slot yet.
+		 * The master only learns about a slave from its DELAY_REQ, but the normal
+		 * path above only sends DELAY_REQ once we already HAVE a slot — a
+		 * chicken-and-egg that would otherwise keep a fresh slave invisible
+		 * forever. Announce ourselves in the post-DL guard region (idle while the
+		 * master's num_slots is still 0). Clear any stale pending flag so a lost
+		 * announce is retried next superframe, and stagger by node_id so multiple
+		 * joining slaves do not always collide. */
+		sync->clock.delay_req_pending = false;
+		int64_t announce_us = sync->dl_end_us + (int64_t)sync->guard_us
+				    + (int64_t)sync->own_node_id * 200;
+		if (announce_us < sync->next_superframe_us) {
+			sleep_until(announce_us);
+			sync_inject_delay_req(sync, pcap, own_mac, now_us());
+		}
 	}
 
 	/* Listen until end of superframe */
@@ -571,6 +588,7 @@ int main(int argc, char **argv)
 		{"dl-us",    required_argument, NULL, 'D'},
 		{"ul-us",    required_argument, NULL, 'U'},
 		{"guard-us", required_argument, NULL, 'G'},
+		{"no-sync",  no_argument,       NULL, 1001},
 		{"version",  no_argument,       NULL, 'V'},
 		{"verbose",  no_argument,       NULL, 'v'},
 		{"help",     no_argument,       NULL, 'h'},
@@ -603,6 +621,7 @@ int main(int argc, char **argv)
 		case 'D': cfg.sync_dl_us = (uint16_t)atoi(optarg); break;
 		case 'U': cfg.sync_ul_us = (uint16_t)atoi(optarg); break;
 		case 'G': cfg.sync_guard_us = (uint16_t)atoi(optarg); break;
+		case 1001: cfg.sync_enabled = false; break;
 		case 'V':
 			fprintf(stderr, "radiod: build #%d (%s@%s) %s\n",
 				ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);

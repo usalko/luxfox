@@ -1029,6 +1029,74 @@ radiod process on the host proves infeasible.
 4. Measurable improvement vs current run in `kf_lost`, `reorder_skip`, `fps_out`.
 5. `--no-sync` still reproduces the old standalone behavior for A/B.
 
+#### Implementation status (2026-07-02) — Variant A applied
+
+Done in this session:
+- **A1** — `ulama-gw` now has a `ULAMA_TRANSPORT_KIND_RADIOD` branch
+  ([ulama-gw/tools/ulama_gw.c](../ulama-gw/tools/ulama_gw.c)):
+  `ulama_transport_tx_init_radiod(..., "ulama_gw_tx")` /
+  `_rx_init_radiod(..., "ulama_gw_rx")`; usage string is now `udp|unow|radiod`.
+- **A3** — `cfg->sync_enabled` default flipped to `true` in `config_defaults()`;
+  added `--no-sync` (long-opt code 1001 → `cfg.sync_enabled = false`) plus usage
+  text. `-S/--sync` is now "(default: ON)".
+- **Bootstrap deadlock fix** (mandatory prerequisite, see below) —
+  `slave_cycle` now announces an unslotted-but-synced node via `DELAY_REQ`.
+- **Live SYNC timing fix** — `clock_sync` no longer calls `settimeofday()` from
+  inside `radiod`. On real hardware the drone *did* hear the master's first
+  beacon (`clock_sync: stepped system clock ...` in field logs), but that wall-
+  clock jump could move the same process's TDMA deadline/sleep base mid-flight,
+  causing the slave to miss its bootstrap `DELAY_REQ` / UL activity after the
+  first sync event.
+- Built clean: host `radiod` + host `ulama_gw` (x86, `host-unow`), target
+  `radiod` + `vcpd` (ARM). Only a pre-existing `dst_node` maybe-uninitialized
+  warning in `rx_dispatcher.c` (unrelated to these edits).
+
+Deferred:
+- **A4** (asymmetric DL/UL slot budget for 25 fps video-in-slot) — NOT tuned yet;
+  running on stock `dl=2000 ul=2000 guard=300`. Revisit after first live sync.
+- **A2/A5** — deployment + live validation is a field step (see runbook below).
+
+#### CRITICAL: SYNC bootstrap deadlock (why sync never worked live)
+
+Root cause found while enabling the default: the onboarding path was a
+chicken-and-egg that no unit test exercised.
+- A slave sends `DELAY_REQ` (its "I exist, give me a slot" announcement) only
+  inside its own UL slot, i.e. only when `my_slot_index != 0xFF`.
+- The master allocates a slot for a slave **only after** receiving that slave's
+  `DELAY_REQ` (`radio_sync_on_delay_req_rx` → `alloc_slave` →
+  `radio_sync_update_slot_map`).
+- ⇒ A fresh slave has no slot, so it never announces, so it never gets a slot.
+  The drone (slave) could therefore never obtain a UL slot and never send video.
+- Compounding it: `clock.delay_req_pending` is cleared only on `DELAY_RESP` or on
+  a master change ([radiod/src/clock_sync.c](../radiod/src/clock_sync.c)), so a
+  single lost bootstrap `DELAY_REQ` would latch the flag and re-deadlock.
+
+Fix (applied in `slave_cycle`): when synced but `my_slot_index == 0xFF`, in the
+idle post-DL guard region, clear the stale `delay_req_pending` flag and inject a
+`DELAY_REQ` (staggered by `own_node_id * 200us`). This lets the master learn of
+the slave and assign a UL slot; a lost announce is retried every superframe.
+
+Additional live-only root cause found after first field bring-up: `radiod`
+computes TDMA deadlines with `gettimeofday()`/`usleep`, while `clock_sync` used
+to call `settimeofday()` after enough SYNC samples. That means the slave could
+receive a good SYNC, then immediately move its own wall clock by seconds/hours
+and invalidate the scheduler's current superframe math. The sync engine already
+tracks master/local offset explicitly, so stepping the host system clock from
+inside the radio daemon is unnecessary and was removed.
+
+#### Field bring-up runbook (first-ever live SYNC — treat as experimental)
+
+1. Redeploy **all four** rebuilt binaries: host `radiod` + host `ulama_gw`
+   (x86 `host-unow`), and target `radiod` + `vcpd` (ARM) on the drone.
+2. Host: run `radiod --iface <mon> --node-id 254` (sync now ON by default) and
+   `ulama-gw --transport radiod`. Only radiod may own the monitor iface.
+3. Drone: run `radiod --node-id 1` (sync ON by default); `vcpd`/`ulamad` use
+   `--transport radiod`.
+4. Expect host stats `sync[role=MASTER]`, drone `sync[role=SLAVE]` + synced true,
+   drone `my_slot_index != 0xFF` within a few superframes (bootstrap announce).
+5. Fallback if anything regresses: add `--no-sync` on both radiod instances to
+   restore the previous standalone quasi-TDMA behavior instantly.
+
 ---
 
 ### Phase 7: Async Reliable Send (2026-06-27)

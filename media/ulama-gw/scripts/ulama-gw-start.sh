@@ -88,4 +88,4 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[ulama-gw] starting gateway..."
-exec "$GW_BIN" --transport unow --iface "$MON_IFACE" --node 1 "${GW_ARGS[@]}"
+exec "$GW_BIN" --transport unow --iface "$MON_IFACE" --node 254 "${GW_ARGS[@]}"

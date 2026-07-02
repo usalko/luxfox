@@ -33,6 +33,7 @@ TARGET_BIN := ulama-gw
 HOST_TEST_SRCS := $(wildcard $(CURRENT_DIR)/tests/*.c)
 HOST_TEST_BINS := $(patsubst $(CURRENT_DIR)/tests/%.c,$(PKG_BUILD)/tests/%,$(HOST_TEST_SRCS))
 HOST_TOOL_BINS := $(PKG_BUILD)/host-tools/ulama_gw
+ULAMA_VERSION_HDR := $(ULAMA_ROOT)/include/ulama/ulama_version.h
 
 TARGET_LIB_A := libulama_gw.a
 
@@ -91,7 +92,7 @@ $(PKG_BUILD)/src/%.o: $(CURRENT_DIR)/src/%.c
 $(TARGET_LIB_A): $(GW_OBJS)
 	$(AR) -rcs $@ $(GW_OBJS)
 
-$(TARGET_BIN): $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)
+$(TARGET_BIN): $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) $(ULAMA_VERSION_HDR)
 	$(CC) $(CFLAGS) $< $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) -o $@ $(APP_LDFLAGS)
 
 host: $(HOST_TEST_BINS) $(HOST_TOOL_BINS)
@@ -115,11 +116,11 @@ $(PKG_BUILD)/tests/%: $(CURRENT_DIR)/tests/%.c $(GW_SRCS) $(ULAMA_LIB_SRCS)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) $< $(GW_SRCS) $(ULAMA_LIB_SRCS) -o $@ $(HOST_LDFLAGS)
 
-$(PKG_BUILD)/host-tools/ulama_gw: $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS)
+$(PKG_BUILD)/host-tools/ulama_gw: $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS) $(ULAMA_VERSION_HDR)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_CFLAGS) $< $(GW_SRCS) $(ULAMA_LIB_SRCS) -o $@ $(HOST_LDFLAGS)
 
-$(PKG_BUILD)/host-unow-tools/ulama_gw: $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS)
+$(PKG_BUILD)/host-unow-tools/ulama_gw: $(TARGET_APP_SRC) $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) $(ULAMA_VERSION_HDR)
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_UNOW_CFLAGS) $< $(GW_SRCS) $(ULAMA_LIB_SRCS) $(UNOW_SRCS) -o $@ $(HOST_UNOW_LDFLAGS)
 

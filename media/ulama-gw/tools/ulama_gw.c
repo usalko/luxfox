@@ -80,13 +80,13 @@ static void usage(const char *prog)
 		"Usage: %s [options]\n"
 		"  --cascade-in  ADDR:PORT  Listen for cascade-core outbound (default 127.0.0.1:5601)\n"
 		"  --cascade-out ADDR:PORT  Send to cascade-core inbound     (default 127.0.0.1:5600)\n"
-		"  --transport   udp|unow   Radio transport                   (default udp)\n"
+		"  --transport   udp|unow|radiod  Radio transport             (default udp)\n"
 		"  --listen      ADDR:PORT  Listen for ULAMA frames (UDP)     (default 0.0.0.0:5000)\n"
 		"  --peer        ADDR:PORT  Send ULAMA frames to (UDP)        (default 127.0.0.1:5001)\n"
 		"  --iface       NAME       Monitor mode interface (UNOW)     (default mon0)\n"
 		"  --channel     N          WiFi channel; auto-configures iface before start (UNOW)\n"
 		"  --tx-rate-mbps N        Legacy radiotap TX rate for UNOW uplink (default 1)\n"
-		"  --node        ID         Gateway node ID (1-253)           (default 1)\n"
+		"  --node        ID         Gateway node ID (1-253)           (default 254)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
@@ -948,7 +948,7 @@ int main(int argc, char *argv[])
 	strncpy(ctx.gw.iface, "mon0", sizeof(ctx.gw.iface));
 	strncpy(ctx.listen_addr, "0.0.0.0:5000", sizeof(ctx.listen_addr));
 	strncpy(ctx.peer_addr, "127.0.0.1:5001", sizeof(ctx.peer_addr));
-	ctx.gw.node_id = 1;
+	ctx.gw.node_id = 254;
 	ctx.verbose = false;
 	ctx.channel = 0;
 	ctx.tx_rate_500kbps = UNOW_TX_RATE_1MBPS;
@@ -1026,7 +1026,18 @@ int main(int argc, char *argv[])
 	}
 
 	int rc;
-	if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
+	if (tk == ULAMA_TRANSPORT_KIND_RADIOD) {
+		/* radiod owns the monitor interface and the TDMA schedule; the gateway
+		 * just speaks the radiod IPC socket (same as vcpd/ulamad on the drone). */
+		rc = ulama_transport_tx_init_radiod(&ctx.ulama_tx, ctx.gw.node_id,
+						    NULL, "ulama_gw_tx");
+		if (rc < 0) {
+			fprintf(stderr, "gw: failed to init radiod TX (is radiod running?): %s\n", strerror(errno));
+			goto cleanup;
+		}
+		rc = ulama_transport_rx_init_radiod(&ctx.ulama_rx, ctx.gw.node_id,
+						    NULL, "ulama_gw_rx");
+	} else if (tk == ULAMA_TRANSPORT_KIND_UNOW) {
 		#if ULAMA_WITH_UNOW
 		unow_set_tx_rate_500kbps(ctx.tx_rate_500kbps);
 		#endif
@@ -1062,6 +1073,10 @@ int main(int argc, char *argv[])
 	if (tk == ULAMA_TRANSPORT_KIND_UDP) {
 		fprintf(stderr, "  ulama-listen: %s\n", ctx.listen_addr);
 		fprintf(stderr, "  ulama-peer:   %s\n", ctx.peer_addr);
+	} else if (tk == ULAMA_TRANSPORT_KIND_RADIOD) {
+		fprintf(stderr, "  transport: radiod IPC (TDMA scheduler owns the radio)\n");
+		fprintf(stderr, "  radio-rx-fd: %d (%s)\n", ctx.ulama_rx.fd,
+			ctx.ulama_rx.fd >= 0 ? "poll active" : "poll DISABLED — is radiod running?");
 	} else {
 		fprintf(stderr, "  iface: %s\n", ctx.gw.iface);
 		fprintf(stderr, "  tx-rate: %u.%u Mbps\n",
