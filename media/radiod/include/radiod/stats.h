@@ -44,6 +44,10 @@ typedef struct {
 	uint32_t delay_req_tx;
 	uint8_t  current_role;
 	uint8_t  current_master;
+	uint8_t  sync_state;
+	uint8_t  num_slots;
+	uint8_t  my_slot_index;
+	uint8_t  num_known_slaves;
 } radio_stats_t;
 
 void radio_stats_init(radio_stats_t *st, int64_t now_us);

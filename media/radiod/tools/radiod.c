@@ -443,9 +443,11 @@ static void master_cycle(radio_sync_t *sync,
 			 uint32_t ack_max_retry)
 {
 	int64_t t_now = now_us();
+	int64_t superframe_deadline;
 
 	radio_sync_update_slot_map(sync, t_now);
 	sync_inject_beacon(sync, pcap, own_mac, t_now);
+	superframe_deadline = t_now + sync->superframe_period_us;
 
 	/* DL slot: send our data */
 	int64_t dl_deadline = now_us() + sync->dl_duration_us;
@@ -498,6 +500,9 @@ static void master_cycle(radio_sync_t *sync,
 	}
 
 	radio_async_tick(rxd, pcap, ack_timeout_us, ack_max_retry);
+
+	if (superframe_deadline > now_us())
+		sleep_until(superframe_deadline);
 }
 
 static void slave_cycle(radio_sync_t *sync,

@@ -13,7 +13,7 @@ static int64_t compute_base_superframe_period_us(const radio_sync_t *s)
 	period = (int64_t)s->dl_duration_us +
 		(int64_t)s->num_slots * ((int64_t)s->ul_slot_us + s->guard_us) +
 		s->guard_us;
-	if (period <= 0)
+	if (period < SYNC_BEACON_INTERVAL_US)
 		period = SYNC_BEACON_INTERVAL_US;
 	return period;
 }
@@ -234,12 +234,20 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 
 	uint8_t active_ids[SYNC_MAX_NODES];
 	uint8_t n_active = 0;
+	int64_t base_period;
+	int64_t bootstrap_gap;
 	int64_t stale_threshold;
 
-	s->superframe_period_us = compute_base_superframe_period_us(s);
+	base_period = compute_base_superframe_period_us(s);
+	bootstrap_gap = (s->bootstrap_period > 0)
+		? (base_period * (int64_t)s->bootstrap_period) + s->bootstrap_window_us
+		: 0;
+	s->superframe_period_us = base_period;
 	if (s->bootstrap_window_us > 0)
 		s->superframe_period_us += s->bootstrap_window_us;
 	stale_threshold = s->superframe_period_us * 5;
+	if (bootstrap_gap > 0 && stale_threshold < bootstrap_gap + base_period)
+		stale_threshold = bootstrap_gap + base_period;
 	if (stale_threshold < 60000)
 		stale_threshold = 60000;
 

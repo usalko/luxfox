@@ -132,12 +132,21 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	if (st->current_role > 0) {
 		static const char *role_names[] = {"CAND", "MASTER", "SLAVE"};
+		static const char *state_names[] = {
+			"SEARCH", "SYNCED", "HOLD_TX", "HOLD_RX", "M_TX", "M_RX"
+		};
 		const char *rn = st->current_role <= 2
 			? role_names[st->current_role] : "?";
-		fprintf(stderr, " sync[role=%s master=%u tx=%u rx=%u relay=%u dreq=%u]",
-			rn, st->current_master,
+		const char *sn = st->sync_state <= 5 ? state_names[st->sync_state] : "?";
+		fprintf(stderr,
+			" sync[role=%s state=%s master=%u tx=%u rx=%u relay=%u dreq=%u slots=%u my=%u known=%u]",
+			rn, sn,
+			st->current_master,
 			st->sync_tx, st->sync_rx, st->sync_relay,
-			st->delay_req_tx);
+			st->delay_req_tx,
+			st->num_slots,
+			st->my_slot_index,
+			st->num_known_slaves);
 	}
 
 	if (rxd != NULL && (rxd->stats.rx_sync > 0 ||
@@ -184,4 +193,8 @@ void radio_stats_update_sync(radio_stats_t *st,
 	st->delay_req_tx = s->delay_req_tx_count;
 	st->current_role = (uint8_t)s->role;
 	st->current_master = s->current_master_id;
+	st->sync_state = (uint8_t)s->state;
+	st->num_slots = s->num_slots;
+	st->my_slot_index = s->my_slot_index;
+	st->num_known_slaves = s->num_known_slaves;
 }

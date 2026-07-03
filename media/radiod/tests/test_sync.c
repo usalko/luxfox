@@ -38,7 +38,7 @@ static sync_frame_t make_sync(uint8_t master_id, uint32_t seq, int64_t master_ti
 static int64_t expected_period(uint16_t dl, uint8_t num_slots, uint16_t ul, uint16_t guard)
 {
 	int64_t p = (int64_t)dl + (int64_t)num_slots * ((int64_t)ul + guard) + guard;
-	return p > 0 ? p : SYNC_BEACON_INTERVAL_US;
+	return p < SYNC_BEACON_INTERVAL_US ? SYNC_BEACON_INTERVAL_US : p;
 }
 
 static void test_init_candidate(void)
@@ -271,6 +271,55 @@ static void test_beacon_contains_slot_map_and_no_delay_resp(void)
 	CHECK(beacon.bootstrap_period == SYNC_BOOTSTRAP_PERIOD);
 }
 
+static void test_bootstrap_join_promotes_slave_to_slotted(void)
+{
+	radio_sync_t master, slave;
+	radio_sync_init(&master, 254, 1500, 5000, 300);
+	radio_sync_init(&slave, 1, 1500, 5000, 300);
+
+	radio_sync_tick(&master, 0);
+	radio_sync_tick(&master, SYNC_ELECTION_TIMEOUT_US);
+	CHECK(master.role == RADIO_ROLE_MASTER);
+
+	/* Force the next beacon to be a bootstrap-active superframe. */
+	master.superframe_seq = SYNC_BOOTSTRAP_PERIOD - 1;
+
+	sync_frame_t beacon1;
+	radio_sync_build_beacon(&master, &beacon1, 1000);
+	CHECK(beacon1.superframe_seq == SYNC_BOOTSTRAP_PERIOD);
+	CHECK(beacon1.num_slots == 0);
+	CHECK(beacon1.bootstrap_window_us == SYNC_BOOTSTRAP_WINDOW_US);
+
+	CHECK(radio_sync_on_sync_rx(&slave, &beacon1, 5000, 254));
+	CHECK(slave.role == RADIO_ROLE_SLAVE);
+	CHECK(slave.my_slot_index == 0xFF);
+	radio_sync_compute_timing(&slave, 5000);
+
+	delay_req_frame_t dreq;
+	CHECK(radio_sync_build_delay_req(&slave, &dreq,
+		slave.next_superframe_us - slave.bootstrap_window_us + 500));
+	CHECK(dreq.requester_node_id == 1);
+	CHECK(dreq.target_node_id == 254);
+
+	radio_sync_on_delay_req_rx(&master, &dreq,
+		beacon1.superframe_seq * 1000 + 100);
+	radio_sync_update_slot_map(&master, beacon1.superframe_seq * 1000 + 200);
+	CHECK(master.num_slots == 1);
+	CHECK(master.slot_map[0] == 1);
+
+	sync_frame_t beacon2;
+	radio_sync_build_beacon(&master, &beacon2, 2000);
+	CHECK(beacon2.superframe_seq == SYNC_BOOTSTRAP_PERIOD + 1);
+	CHECK(beacon2.num_slots == 1);
+	CHECK(beacon2.slot_map[0] == 1);
+
+	CHECK(radio_sync_on_sync_rx(&slave, &beacon2, 17000, 254));
+	CHECK(slave.my_slot_index == 0);
+	radio_sync_compute_timing(&slave, 17000);
+	CHECK(slave.my_ul_start_us > 0);
+	CHECK(radio_sync_should_transmit_ul(&slave));
+}
+
 static void test_relay_prepare(void)
 {
 	radio_sync_t s;
@@ -456,6 +505,7 @@ int main(void)
 		{"dedup_passes_new_seq", test_dedup_passes_new_seq},
 		{"delay_req_generation", test_delay_req_generation},
 		{"beacon_contains_slot_map_and_no_delay_resp", test_beacon_contains_slot_map_and_no_delay_resp},
+		{"bootstrap_join_promotes_slave_to_slotted", test_bootstrap_join_promotes_slave_to_slotted},
 		{"relay_prepare", test_relay_prepare},
 		{"holdover_tx_then_rx_only_then_candidate", test_holdover_tx_then_rx_only_then_candidate},
 		{"resync_exits_holdover", test_resync_exits_holdover},
