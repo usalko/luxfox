@@ -412,7 +412,7 @@ static int64_t sync_bootstrap_announce_us(const radio_sync_t *sync)
 	int64_t usable;
 
 	if (!sync_bootstrap_window_active(sync) || sync->bootstrap_window_us == 0)
-		return 0;
+		return -1;
 
 	window_start = sync->next_superframe_us - sync->bootstrap_window_us;
 	headroom = sync->bootstrap_window_us > 1200 ? 200 : 0;
@@ -593,7 +593,8 @@ static void slave_cycle(radio_sync_t *sync,
 		 * a seq-dependent hash spreads multiple joiners across that window so they
 		 * do not keep colliding on every retry. */
 		int64_t announce_us = sync_bootstrap_announce_us(sync);
-		if (announce_us < sync->next_superframe_us) {
+		if (announce_us > now_us() &&
+		    announce_us < sync->next_superframe_us) {
 			sleep_until(announce_us);
 			sync_inject_delay_req(sync, pcap, own_mac, now_us());
 		}
