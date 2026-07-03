@@ -357,6 +357,7 @@ static void sync_inject_delay_req(radio_sync_t *sync,
 				  const uint8_t own_mac[6],
 				  int64_t ts)
 {
+	static uint32_t dreq_tx_trace_count;
 	delay_req_frame_t dreq;
 	if (!radio_sync_build_delay_req(sync, &dreq, ts))
 		return;
@@ -365,6 +366,20 @@ static void sync_inject_delay_req(radio_sync_t *sync,
 	size_t packed_len;
 	if (!delay_req_pack(&dreq, packed, sizeof(packed), &packed_len))
 		return;
+
+	if (dreq_tx_trace_count < 32 || (dreq_tx_trace_count % 128U) == 0U) {
+		fprintf(stderr,
+			"sync: tx dreq requester=%u target=%u seq=%u len=%zu first=%02x:%02x:%02x:%02x\n",
+			dreq.requester_node_id,
+			dreq.target_node_id,
+			dreq.superframe_seq,
+			packed_len,
+			packed_len > 0 ? packed[0] : 0,
+			packed_len > 1 ? packed[1] : 0,
+			packed_len > 2 ? packed[2] : 0,
+			packed_len > 3 ? packed[3] : 0);
+	}
+	dreq_tx_trace_count++;
 
 	uint8_t wire[sizeof(struct unow_radiotap_tx_header) +
 		     sizeof(struct unow_dot11_mgmt_header) +
@@ -403,6 +418,13 @@ static bool sync_bootstrap_window_active(const radio_sync_t *sync)
 		(sync->superframe_seq % sync->bootstrap_period) == 0;
 }
 
+static int64_t sync_bootstrap_window_start_us(const radio_sync_t *sync)
+{
+	if (!sync_bootstrap_window_active(sync) || sync->bootstrap_window_us == 0)
+		return -1;
+	return sync->next_superframe_us - sync->bootstrap_window_us;
+}
+
 static int64_t sync_bootstrap_announce_us(const radio_sync_t *sync)
 {
 	uint32_t hash;
@@ -414,7 +436,9 @@ static int64_t sync_bootstrap_announce_us(const radio_sync_t *sync)
 	if (!sync_bootstrap_window_active(sync) || sync->bootstrap_window_us == 0)
 		return -1;
 
-	window_start = sync->next_superframe_us - sync->bootstrap_window_us;
+	window_start = sync_bootstrap_window_start_us(sync);
+	if (window_start < 0)
+		return -1;
 	headroom = sync->bootstrap_window_us > 1200 ? 200 : 0;
 	tailroom = sync->bootstrap_window_us > 1200 ? 1000 : 1;
 	usable = sync->bootstrap_window_us - headroom - tailroom;
@@ -490,13 +514,16 @@ static void master_cycle(radio_sync_t *sync,
 
 	/* Bootstrap/contention window.
 	 *
-	 * On configured superframes the master extends the frame with an advertised
-	 * RX-only window where unslotted slaves may send DELAY_REQ. Slotted slaves
-	 * account for the same extension in next_superframe_us, so the beacon cadence
-	 * stays self-consistent across the whole network. */
+	 * The slave computes the announce window from `next_superframe_us - window`,
+	 * so the master must listen in the tail of the superframe, not immediately
+	 * after DL/UL. Otherwise both sides agree on the period but disagree on the
+	 * actual position of the window inside it. */
 	if (sync_bootstrap_window_active(sync)) {
-		int64_t join_deadline = now_us() + sync->bootstrap_window_us;
-		radio_rx_slot(rxd, pcap, own_mac, join_deadline);
+		int64_t join_start = sync_bootstrap_window_start_us(sync);
+		if (join_start > now_us())
+			sleep_until(join_start);
+		if (superframe_deadline > now_us())
+			radio_rx_slot(rxd, pcap, own_mac, superframe_deadline);
 	}
 
 	radio_async_tick(rxd, pcap, ack_timeout_us, ack_max_retry);

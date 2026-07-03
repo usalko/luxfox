@@ -335,6 +335,44 @@ static void test_relay_prepare(void)
 	CHECK(s.sync_relay_count == 1);
 }
 
+static void test_master_ul_packet_refreshes_known_slave(void)
+{
+	radio_sync_t master;
+	radio_sync_init(&master, 254, 1500, 5000, 300);
+	radio_sync_tick(&master, 0);
+	radio_sync_tick(&master, SYNC_ELECTION_TIMEOUT_US);
+	CHECK(master.role == RADIO_ROLE_MASTER);
+
+	delay_req_frame_t dreq = {
+		.requester_node_id = 1,
+		.target_node_id = 254,
+		.superframe_seq = 1,
+	};
+	radio_sync_on_delay_req_rx(&master, &dreq, 100000);
+	radio_sync_update_slot_map(&master, 100100);
+	CHECK(master.num_known_slaves == 1);
+	CHECK(master.num_slots == 1);
+
+	/* Without a fresh DELAY_REQ the node would age out around 112ms.
+	 * A normal ULAMA packet must refresh liveness too. */
+	radio_sync_on_ul_packet_rx(&master, 1, 180000);
+	radio_sync_update_slot_map(&master, 230000);
+	CHECK(master.num_known_slaves == 1);
+	CHECK(master.num_slots == 1);
+	CHECK(master.slot_map[0] == 1);
+}
+
+static void test_master_ul_packet_does_not_add_unknown_slave(void)
+{
+	radio_sync_t master;
+	radio_sync_init(&master, 254, 1500, 5000, 300);
+	radio_sync_tick(&master, 0);
+	radio_sync_tick(&master, SYNC_ELECTION_TIMEOUT_US);
+	radio_sync_on_ul_packet_rx(&master, 1, 100000);
+	CHECK(master.num_known_slaves == 0);
+	CHECK(master.num_slots == 0);
+}
+
 static void test_holdover_tx_then_rx_only_then_candidate(void)
 {
 	radio_sync_t s;
@@ -507,6 +545,8 @@ int main(void)
 		{"beacon_contains_slot_map_and_no_delay_resp", test_beacon_contains_slot_map_and_no_delay_resp},
 		{"bootstrap_join_promotes_slave_to_slotted", test_bootstrap_join_promotes_slave_to_slotted},
 		{"relay_prepare", test_relay_prepare},
+		{"master_ul_packet_refreshes_known_slave", test_master_ul_packet_refreshes_known_slave},
+		{"master_ul_packet_does_not_add_unknown_slave", test_master_ul_packet_does_not_add_unknown_slave},
 		{"holdover_tx_then_rx_only_then_candidate", test_holdover_tx_then_rx_only_then_candidate},
 		{"resync_exits_holdover", test_resync_exits_holdover},
 		{"role_change_counter", test_role_change_counter},

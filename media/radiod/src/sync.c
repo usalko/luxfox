@@ -114,6 +114,8 @@ static sync_slave_info_t *alloc_slave(radio_sync_t *s, uint8_t node_id,
 			s->slaves[i].active = true;
 			s->slaves[i].last_seen_us = now_us;
 			s->num_known_slaves++;
+			fprintf(stderr, "sync: node %u joined (known=%u)\n",
+				node_id, s->num_known_slaves);
 			return &s->slaves[i];
 		}
 	}
@@ -181,16 +183,77 @@ void radio_sync_on_delay_req_rx(radio_sync_t *s,
 				const delay_req_frame_t *dreq,
 				int64_t local_rx_us)
 {
+	static uint32_t dreq_trace_count;
+
 	if (s == NULL || dreq == NULL)
 		return;
-	if (s->role != RADIO_ROLE_MASTER)
+	if (s->role != RADIO_ROLE_MASTER) {
+		if (dreq_trace_count < 32 || (dreq_trace_count % 128U) == 0U) {
+			fprintf(stderr,
+				"sync: drop dreq requester=%u target=%u seq=%u role=%u\n",
+				dreq->requester_node_id,
+				dreq->target_node_id,
+				dreq->superframe_seq,
+				(unsigned)s->role);
+		}
+		dreq_trace_count++;
 		return;
-	if (dreq->target_node_id != s->own_node_id)
+	}
+	if (dreq->target_node_id != s->own_node_id) {
+		if (dreq_trace_count < 32 || (dreq_trace_count % 128U) == 0U) {
+			fprintf(stderr,
+				"sync: drop dreq requester=%u target=%u own=%u seq=%u\n",
+				dreq->requester_node_id,
+				dreq->target_node_id,
+				s->own_node_id,
+				dreq->superframe_seq);
+		}
+		dreq_trace_count++;
 		return;
+	}
 
 	sync_slave_info_t *sl = find_slave(s, dreq->requester_node_id);
 	if (sl == NULL)
 		sl = alloc_slave(s, dreq->requester_node_id, local_rx_us);
+	if (sl == NULL) {
+		if (dreq_trace_count < 32 || (dreq_trace_count % 128U) == 0U) {
+			fprintf(stderr,
+				"sync: drop dreq requester=%u target=%u seq=%u no-slave-slot known=%u\n",
+				dreq->requester_node_id,
+				dreq->target_node_id,
+				dreq->superframe_seq,
+				s->num_known_slaves);
+		}
+		dreq_trace_count++;
+		return;
+	}
+
+	sl->last_seen_us = local_rx_us;
+	if (dreq_trace_count < 32 || (dreq_trace_count % 128U) == 0U) {
+		fprintf(stderr,
+			"sync: accept dreq requester=%u target=%u seq=%u known=%u active=%u last_seen=%lld\n",
+			dreq->requester_node_id,
+			dreq->target_node_id,
+			dreq->superframe_seq,
+			s->num_known_slaves,
+			(unsigned)sl->active,
+			(long long)local_rx_us);
+	}
+	dreq_trace_count++;
+}
+
+void radio_sync_on_ul_packet_rx(radio_sync_t *s,
+				uint8_t src_node,
+				int64_t local_rx_us)
+{
+	if (s == NULL)
+		return;
+	if (s->role != RADIO_ROLE_MASTER)
+		return;
+	if (src_node == 0 || src_node == s->own_node_id)
+		return;
+
+	sync_slave_info_t *sl = find_slave(s, src_node);
 	if (sl == NULL)
 		return;
 
@@ -248,6 +311,8 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 	stale_threshold = s->superframe_period_us * 5;
 	if (bootstrap_gap > 0 && stale_threshold < bootstrap_gap + base_period)
 		stale_threshold = bootstrap_gap + base_period;
+	if (stale_threshold < SYNC_SLAVE_TIMEOUT_US)
+		stale_threshold = SYNC_SLAVE_TIMEOUT_US;
 	if (stale_threshold < 60000)
 		stale_threshold = 60000;
 
@@ -255,6 +320,13 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 		if (!s->slaves[i].active)
 			continue;
 		if (now_us - s->slaves[i].last_seen_us > stale_threshold) {
+			fprintf(stderr,
+				"sync: node %u timed out (silent %lld us > "
+				"%lld us), known=%u\n",
+				s->slaves[i].node_id,
+				(long long)(now_us - s->slaves[i].last_seen_us),
+				(long long)stale_threshold,
+				s->num_known_slaves > 0 ? s->num_known_slaves - 1 : 0);
 			s->slaves[i].active = false;
 			if (s->num_known_slaves > 0)
 				s->num_known_slaves--;

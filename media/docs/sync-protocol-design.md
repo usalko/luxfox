@@ -505,6 +505,7 @@ void radio_sync_on_delay_req_rx(radio_sync_t *s,
 
 /* Собрать SYNC beacon для отправки.
  * Заполняет frame и delay_resp секцию. */
+
 void radio_sync_build_beacon(radio_sync_t *s,
                               sync_frame_t *out_frame,
                               int64_t now_us);

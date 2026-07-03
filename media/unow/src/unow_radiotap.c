@@ -150,11 +150,16 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	}
 	payload = packet + radiotap_len + sizeof(*mgmt_header) + sizeof(*vendor_header);
 	payload_len = packet_len - radiotap_len - sizeof(*mgmt_header) - sizeof(*vendor_header);
-	/* Strip 802.11 FCS (4 bytes) if present at end of frame.
-	 * The 8192eu driver includes FCS in pcap captures. Without
-	 * stripping, 4 garbage bytes are appended to every LTS packet,
-	 * corrupting NAL data at packet boundaries. */
-	if (payload_len >= 4)
+	/* Strip 802.11 FCS (4 bytes) only for DATA / DATA_SEQ payloads.
+	 *
+	 * Some drivers append the 4-byte FCS to captured data frames, which corrupts
+	 * ULAMA payload boundaries if left in place. Control-plane vendor frames
+	 * (ACK, SYNC, DELAY_REQ) are fixed-size and their unpackers already tolerate
+	 * extra trailer bytes; blindly subtracting 4 bytes from them truncates short
+	 * frames such as DELAY_REQ (8 -> 4 bytes) and breaks join/sync. */
+	if ((vendor_header->subtype == UNOW_VENDOR_SUBTYPE_DATA ||
+	     vendor_header->subtype == UNOW_VENDOR_SUBTYPE_DATA_SEQ) &&
+	    payload_len >= 4)
 		payload_len -= 4;
 	if (payload_len > ULAMA_ESPNOW_MAX_PAYLOAD) {
 		return false;

@@ -356,14 +356,37 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 
 		/* DELAY_REQ → master records T4 */
 		if (frame.subtype == UNOW_VENDOR_SUBTYPE_DELAY_REQ) {
+			static uint32_t dreq_rx_trace_count;
 			rxd->stats.rx_delay_req++;
 			if (rxd->sync_ctx != NULL) {
 				delay_req_frame_t dreq;
 				if (delay_req_unpack(frame.payload,
-						     frame.len, &dreq)) {
+					     frame.len, &dreq)) {
+					if (dreq_rx_trace_count < 32 ||
+					    (dreq_rx_trace_count % 128U) == 0U) {
+						fprintf(stderr,
+							"sync: rx dreq ok len=%zu requester=%u target=%u seq=%u\n",
+							frame.len,
+							dreq.requester_node_id,
+							dreq.target_node_id,
+							dreq.superframe_seq);
+					}
+					dreq_rx_trace_count++;
 					radio_sync_on_delay_req_rx(
 					    (radio_sync_t *)rxd->sync_ctx,
 					    &dreq, now_us());
+				} else {
+					if (dreq_rx_trace_count < 32 ||
+					    (dreq_rx_trace_count % 128U) == 0U) {
+						fprintf(stderr,
+							"sync: rx dreq unpack FAIL len=%zu first=%02x:%02x:%02x:%02x\n",
+							frame.len,
+							frame.len > 0 ? frame.payload[0] : 0,
+							frame.len > 1 ? frame.payload[1] : 0,
+							frame.len > 2 ? frame.payload[2] : 0,
+							frame.len > 3 ? frame.payload[3] : 0);
+					}
+					dreq_rx_trace_count++;
 				}
 			}
 			continue;
@@ -431,6 +454,12 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 					  frame.src_mac, ttl, frame.rssi,
 					  relayed, now_us());
 		}
+
+		/* Any ULAMA packet from a known slave proves the slave is still alive,
+		 * even if the per-superframe DELAY_REQ for that slot was lost. */
+		if (is_ulama && rxd->sync_ctx != NULL)
+			radio_sync_on_ul_packet_rx((radio_sync_t *)rxd->sync_ctx,
+						    src_node, now_us());
 
 		/* ---- Routing decision ---- */
 

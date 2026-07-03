@@ -11,6 +11,7 @@
 #define SYNC_MISS_THRESHOLD        3
 #define SYNC_LOST_THRESHOLD        10
 #define SYNC_HOLDOVER_TX_MAX       8
+#define SYNC_SLAVE_TIMEOUT_US      300000
 #define SYNC_BOOTSTRAP_WINDOW_US   4000
 #define SYNC_BOOTSTRAP_PERIOD      8
 #define SYNC_DEDUP_WINDOW          32
@@ -100,6 +101,13 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 void radio_sync_on_delay_req_rx(radio_sync_t *s,
                 const delay_req_frame_t *dreq,
                 int64_t local_rx_us);
+
+/* Master-side liveness refresh from any ULAMA packet received from a known
+ * slave. This prevents slot eviction when a few DELAY_REQ packets are lost but
+ * user data is still flowing in the assigned UL slot. */
+void radio_sync_on_ul_packet_rx(radio_sync_t *s,
+				uint8_t src_node,
+				int64_t local_rx_us);
 
 void radio_sync_build_beacon(radio_sync_t *s,
                   sync_frame_t *out_frame,
