@@ -8,6 +8,9 @@
 #   out/lib/*  → OEM only    (/oem/usr/lib/)
 #   out/etc/*  → rootfs only (/etc/)
 #
+# Options:
+#   --no-tests, --no-test   Skip running test suites (default: run tests where available)
+#
 # Always syncs to device at the end.
 ##############################################################################
 
@@ -28,6 +31,19 @@ NC='\033[0m'
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+##############################################################################
+# Parse command line flags
+##############################################################################
+RUN_TESTS=true
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-tests|--no-test)
+            RUN_TESTS=false
+            ;;
+    esac
+done
 
 ##############################################################################
 # Stage out/ into OEM & rootfs — no duplication
@@ -155,6 +171,15 @@ for name in $RADIO_PROJECTS; do
 
     log_info "═══ $name (make) ═══"
     make -C "$dir" || { log_error "$name build FAILED"; exit 1; }
+    
+    # Run tests if available and not disabled
+    if [ "$RUN_TESTS" = true ]; then
+        if grep -q "^test:" "$dir/Makefile" 2>/dev/null; then
+            log_info "═══ $name (test) ═══"
+            make -C "$dir" test || log_warn "$name tests FAILED (continuing anyway)"
+        fi
+    fi
+    
     stage_project_out "$dir/out" "$name"
 done
 
@@ -173,6 +198,14 @@ for host_tool in "radiod" "ulama-gw"; do
 
         log_info "═══ $host_tool (host-unow) ═══"
         make -C "$tool_dir" host-unow 2>/dev/null || log_warn "host-unow $host_tool failed (libpcap-dev missing?)"
+        
+        # Run tests on host-unow build if available and not disabled
+        if [ "$RUN_TESTS" = true ]; then
+            if grep -q "^test:" "$tool_dir/Makefile" 2>/dev/null; then
+                log_info "═══ $host_tool (host-unow test) ═══"
+                make -C "$tool_dir" test 2>/dev/null || log_warn "host-unow $host_tool tests FAILED (continuing anyway)"
+            fi
+        fi
     fi
 done
 
