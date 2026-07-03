@@ -134,12 +134,10 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 		static const char *role_names[] = {"CAND", "MASTER", "SLAVE"};
 		const char *rn = st->current_role <= 2
 			? role_names[st->current_role] : "?";
-		fprintf(stderr, " sync[role=%s master=%u offset=%+lldus "
-			"rtt=%lldus tx=%u rx=%u relay=%u]",
+		fprintf(stderr, " sync[role=%s master=%u tx=%u rx=%u relay=%u dreq=%u]",
 			rn, st->current_master,
-			(long long)st->clock_offset_us,
-			(long long)st->clock_rtt_us,
-			st->sync_tx, st->sync_rx, st->sync_relay);
+			st->sync_tx, st->sync_rx, st->sync_relay,
+			st->delay_req_tx);
 	}
 
 	if (rxd != NULL && (rxd->stats.rx_sync > 0 ||
@@ -184,9 +182,6 @@ void radio_stats_update_sync(radio_stats_t *st,
 	st->sync_rx = s->sync_rx_count;
 	st->sync_relay = s->sync_relay_count;
 	st->delay_req_tx = s->delay_req_tx_count;
-	st->delay_resp_rx = s->delay_resp_rx_count;
-	st->clock_offset_us = s->clock.offset_us;
-	st->clock_rtt_us = s->clock.rtt_us;
 	st->current_role = (uint8_t)s->role;
 	st->current_master = s->current_master_id;
 }

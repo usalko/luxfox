@@ -4,41 +4,42 @@
 #include <stdint.h>
 
 #define SYNC_FRAME_MAGIC      0xBEU
-#define SYNC_FRAME_VERSION    0x01U
+#define SYNC_FRAME_VERSION    0x03U
 #define DELAY_REQ_MAGIC       0xBDU
-#define DELAY_REQ_VERSION     0x01U
+#define DELAY_REQ_VERSION     0x02U
 
 #define SYNC_MAX_SLOTS        4
-#define SYNC_MAX_DELAY_RESP   4
 
-#define SYNC_FRAME_MIN_SIZE   29
-#define SYNC_FRAME_MAX_SIZE   (29 + SYNC_MAX_DELAY_RESP * 9)
-#define DELAY_REQ_FRAME_SIZE  16
-
-typedef struct {
-    uint8_t  node_id;
-    int64_t  t4_us;
-} sync_delay_resp_t;
+/* Monotonic-only protocol (v2).
+ *
+ * TDMA scheduling runs entirely on each node's CLOCK_MONOTONIC; the slave
+ * anchors slot geometry to the local RX time of the beacon (last_sync_rx_us),
+ * so there is NO cross-node clock offset to carry on the wire. The only
+ * time value in the beacon is master_time_us — the master's CLOCK_REALTIME
+ * (gettimeofday) — which the slave uses solely to make its system/log clock
+ * human-readable. It never enters scheduling. */
+#define SYNC_FRAME_SIZE       31
+#define SYNC_FRAME_MAX_SIZE   SYNC_FRAME_SIZE
+#define DELAY_REQ_FRAME_SIZE  8
 
 typedef struct {
     uint8_t  master_node_id;
     uint8_t  sender_node_id;
     uint32_t superframe_seq;
-    int64_t  origin_time_us;
+    int64_t  master_time_us;   /* master CLOCK_REALTIME (wall), log-only */
     uint16_t dl_duration_us;
     uint16_t ul_slot_us;
     uint16_t guard_us;
     uint8_t  num_slots;
     uint8_t  relay_hops;
     uint8_t  slot_map[SYNC_MAX_SLOTS];
-    uint8_t  num_delay_resp;
-    sync_delay_resp_t delay_resp[SYNC_MAX_DELAY_RESP];
+    uint16_t bootstrap_window_us;
+    uint8_t  bootstrap_period;
 } sync_frame_t;
 
 typedef struct {
     uint8_t  requester_node_id;
     uint8_t  target_node_id;
-    int64_t  t3_us;
     uint32_t superframe_seq;
 } delay_req_frame_t;
 

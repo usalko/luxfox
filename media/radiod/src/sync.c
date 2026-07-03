@@ -1,9 +1,65 @@
 #include "radiod/sync.h"
+
 #include <stdio.h>
 #include <string.h>
 
+static int64_t compute_base_superframe_period_us(const radio_sync_t *s)
+{
+	int64_t period;
+
+	if (s == NULL)
+		return SYNC_BEACON_INTERVAL_US;
+
+	period = (int64_t)s->dl_duration_us +
+		(int64_t)s->num_slots * ((int64_t)s->ul_slot_us + s->guard_us) +
+		s->guard_us;
+	if (period <= 0)
+		period = SYNC_BEACON_INTERVAL_US;
+	return period;
+}
+
+static bool bootstrap_window_active_for_seq(const radio_sync_t *s, uint32_t seq)
+{
+	if (s == NULL || seq == 0)
+		return false;
+	if (s->bootstrap_window_us == 0 || s->bootstrap_period == 0)
+		return false;
+	return (seq % s->bootstrap_period) == 0;
+}
+
+static int64_t compute_superframe_period_us(const radio_sync_t *s, uint32_t seq)
+{
+	int64_t period = compute_base_superframe_period_us(s);
+
+	if (bootstrap_window_active_for_seq(s, seq))
+		period += s->bootstrap_window_us;
+	return period;
+}
+
+static void reset_to_candidate(radio_sync_t *s, int64_t now_us, const char *reason)
+{
+	if (s == NULL)
+		return;
+
+	s->role = RADIO_ROLE_CANDIDATE;
+	s->state = SYNC_STATE_SEARCHING;
+	s->election_deadline_us = now_us + SYNC_ELECTION_TIMEOUT_US;
+	s->current_master_id = 0;
+	s->missed_beacons = 0;
+	s->last_sync_rx_us = 0;
+	s->predicted_anchor_us = 0;
+	s->next_superframe_us = 0;
+	s->my_ul_start_us = 0;
+	s->my_ul_end_us = 0;
+	s->my_slot_index = 0xFF;
+	s->role_changes++;
+
+	if (reason != NULL)
+		fprintf(stderr, "sync: %s, back to CANDIDATE\n", reason);
+}
+
 void radio_sync_init(radio_sync_t *s, uint8_t own_node_id,
-                     uint16_t dl_us, uint16_t ul_us, uint16_t guard_us)
+			     uint16_t dl_us, uint16_t ul_us, uint16_t guard_us)
 {
 	if (s == NULL)
 		return;
@@ -14,13 +70,12 @@ void radio_sync_init(radio_sync_t *s, uint8_t own_node_id,
 	s->dl_duration_us = dl_us;
 	s->ul_slot_us = ul_us;
 	s->guard_us = guard_us;
+	s->bootstrap_window_us = SYNC_BOOTSTRAP_WINDOW_US;
+	s->bootstrap_period = SYNC_BOOTSTRAP_PERIOD;
 	s->my_slot_index = 0xFF;
+	s->superframe_period_us = compute_base_superframe_period_us(s);
 	clock_sync_init(&s->clock);
 }
-
-/* ================================================================
- * Dedup ring: prevents processing the same SYNC twice
- * ================================================================ */
 
 static bool dedup_seen(radio_sync_t *s, uint8_t master_id, uint32_t seq)
 {
@@ -41,10 +96,6 @@ static bool dedup_seen(radio_sync_t *s, uint8_t master_id, uint32_t seq)
 	return false;
 }
 
-/* ================================================================
- * Slave table helpers (master side)
- * ================================================================ */
-
 static sync_slave_info_t *find_slave(radio_sync_t *s, uint8_t node_id)
 {
 	for (uint8_t i = 0; i < SYNC_MAX_NODES; i++) {
@@ -55,14 +106,13 @@ static sync_slave_info_t *find_slave(radio_sync_t *s, uint8_t node_id)
 }
 
 static sync_slave_info_t *alloc_slave(radio_sync_t *s, uint8_t node_id,
-                                      int64_t now_us)
+				      int64_t now_us)
 {
 	for (uint8_t i = 0; i < SYNC_MAX_NODES; i++) {
 		if (!s->slaves[i].active) {
 			s->slaves[i].node_id = node_id;
 			s->slaves[i].active = true;
 			s->slaves[i].last_seen_us = now_us;
-			s->slaves[i].delay_resp_pending = false;
 			s->num_known_slaves++;
 			return &s->slaves[i];
 		}
@@ -70,28 +120,22 @@ static sync_slave_info_t *alloc_slave(radio_sync_t *s, uint8_t node_id,
 	return NULL;
 }
 
-/* ================================================================
- * Event: received SYNC frame
- * ================================================================ */
-
 bool radio_sync_on_sync_rx(radio_sync_t *s,
-                           const sync_frame_t *frame,
-                           int64_t local_rx_us,
-                           uint8_t sender_node_id)
+			   const sync_frame_t *frame,
+			   int64_t local_rx_us,
+			   uint8_t sender_node_id)
 {
+	(void)sender_node_id;
+
 	if (s == NULL || frame == NULL)
 		return false;
-
 	if (frame->master_node_id == s->own_node_id)
 		return false;
-
 	if (frame->master_node_id < s->own_node_id)
 		return false;
-
 	if (dedup_seen(s, frame->master_node_id, frame->superframe_seq))
 		return false;
 
-	/* Higher master — yield */
 	if (s->role == RADIO_ROLE_MASTER) {
 		fprintf(stderr, "sync: yielding master to node %u\n",
 			frame->master_node_id);
@@ -104,25 +148,21 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 	s->role = RADIO_ROLE_SLAVE;
 	s->state = SYNC_STATE_SYNCED;
 	s->current_master_id = frame->master_node_id;
+	s->election_deadline_us = 0;
 	s->missed_beacons = 0;
 	s->last_sync_rx_us = local_rx_us;
-
-	clock_sync_on_sync_rx(&s->clock, frame->origin_time_us,
-	                       local_rx_us, sender_node_id);
-
-	for (uint8_t i = 0; i < frame->num_delay_resp; i++) {
-		if (frame->delay_resp[i].node_id == s->own_node_id) {
-			clock_sync_on_delay_resp(&s->clock,
-			                         frame->delay_resp[i].t4_us);
-			s->delay_resp_rx_count++;
-		}
-	}
+	s->predicted_anchor_us = local_rx_us;
 
 	s->dl_duration_us = frame->dl_duration_us;
 	s->ul_slot_us = frame->ul_slot_us;
 	s->guard_us = frame->guard_us;
 	s->num_slots = frame->num_slots;
+	s->bootstrap_window_us = frame->bootstrap_window_us;
+	s->bootstrap_period = frame->bootstrap_period;
 	memcpy(s->slot_map, frame->slot_map, SYNC_MAX_SLOTS);
+	s->superframe_seq = frame->superframe_seq;
+	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
+	s->next_superframe_us = s->predicted_anchor_us + s->superframe_period_us;
 
 	s->my_slot_index = 0xFF;
 	for (uint8_t i = 0; i < s->num_slots; i++) {
@@ -132,18 +172,14 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 		}
 	}
 
-	s->superframe_seq = frame->superframe_seq;
+	(void)clock_sync_apply_master_time(&s->clock, frame->master_time_us);
 	s->sync_rx_count++;
 	return true;
 }
 
-/* ================================================================
- * Event: received DELAY_REQ (master side)
- * ================================================================ */
-
 void radio_sync_on_delay_req_rx(radio_sync_t *s,
-                                const delay_req_frame_t *dreq,
-                                int64_t local_rx_us)
+				const delay_req_frame_t *dreq,
+				int64_t local_rx_us)
 {
 	if (s == NULL || dreq == NULL)
 		return;
@@ -158,19 +194,15 @@ void radio_sync_on_delay_req_rx(radio_sync_t *s,
 	if (sl == NULL)
 		return;
 
-	sl->delay_req_t4 = local_rx_us;
-	sl->delay_resp_pending = true;
 	sl->last_seen_us = local_rx_us;
 }
 
-/* ================================================================
- * Master: build SYNC beacon
- * ================================================================ */
-
 void radio_sync_build_beacon(radio_sync_t *s,
-                              sync_frame_t *out_frame,
-                              int64_t now_us)
+			      sync_frame_t *out_frame,
+			      int64_t now_us)
 {
+	(void)now_us;
+
 	if (s == NULL || out_frame == NULL)
 		return;
 
@@ -181,33 +213,19 @@ void radio_sync_build_beacon(radio_sync_t *s,
 	out_frame->master_node_id = s->own_node_id;
 	out_frame->sender_node_id = s->own_node_id;
 	out_frame->superframe_seq = s->superframe_seq;
-	out_frame->origin_time_us = now_us;
+	out_frame->master_time_us = 0;
 	out_frame->dl_duration_us = s->dl_duration_us;
 	out_frame->ul_slot_us = s->ul_slot_us;
 	out_frame->guard_us = s->guard_us;
 	out_frame->num_slots = s->num_slots;
 	out_frame->relay_hops = 0;
 	memcpy(out_frame->slot_map, s->slot_map, SYNC_MAX_SLOTS);
-
-	out_frame->num_delay_resp = 0;
-	for (uint8_t i = 0; i < SYNC_MAX_NODES; i++) {
-		if (!s->slaves[i].active || !s->slaves[i].delay_resp_pending)
-			continue;
-		if (out_frame->num_delay_resp >= SYNC_MAX_DELAY_RESP)
-			break;
-		uint8_t n = out_frame->num_delay_resp;
-		out_frame->delay_resp[n].node_id = s->slaves[i].node_id;
-		out_frame->delay_resp[n].t4_us = s->slaves[i].delay_req_t4;
-		out_frame->num_delay_resp++;
-		s->slaves[i].delay_resp_pending = false;
-	}
+	out_frame->bootstrap_window_us = s->bootstrap_window_us;
+	out_frame->bootstrap_period = s->bootstrap_period;
+	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
 
 	s->sync_tx_count++;
 }
-
-/* ================================================================
- * Master: assign UL slots to known active slaves
- * ================================================================ */
 
 void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 {
@@ -216,11 +234,12 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 
 	uint8_t active_ids[SYNC_MAX_NODES];
 	uint8_t n_active = 0;
+	int64_t stale_threshold;
 
-	int64_t superframe_period = (int64_t)s->dl_duration_us +
-		(int64_t)s->num_slots * ((int64_t)s->ul_slot_us + s->guard_us) +
-		s->guard_us;
-	int64_t stale_threshold = superframe_period * 5;
+	s->superframe_period_us = compute_base_superframe_period_us(s);
+	if (s->bootstrap_window_us > 0)
+		s->superframe_period_us += s->bootstrap_window_us;
+	stale_threshold = s->superframe_period_us * 5;
 	if (stale_threshold < 60000)
 		stale_threshold = 60000;
 
@@ -229,14 +248,14 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 			continue;
 		if (now_us - s->slaves[i].last_seen_us > stale_threshold) {
 			s->slaves[i].active = false;
-			s->num_known_slaves--;
+			if (s->num_known_slaves > 0)
+				s->num_known_slaves--;
 			continue;
 		}
 		if (n_active < SYNC_MAX_NODES)
 			active_ids[n_active++] = s->slaves[i].node_id;
 	}
 
-	/* Insertion sort by node_id for determinism */
 	for (uint8_t i = 1; i < n_active; i++) {
 		uint8_t key = active_ids[i];
 		int j = (int)i - 1;
@@ -251,26 +270,27 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 	s->num_slots = n_active < SYNC_MAX_SLOTS ? n_active : SYNC_MAX_SLOTS;
 	for (uint8_t i = 0; i < s->num_slots; i++)
 		s->slot_map[i] = active_ids[i];
+	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
 }
-
-/* ================================================================
- * Slave: compute absolute timing boundaries from last SYNC
- * ================================================================ */
 
 void radio_sync_compute_timing(radio_sync_t *s, int64_t local_now_us)
 {
 	if (s == NULL)
 		return;
 
-	(void)local_now_us;
+	int64_t anchor = s->predicted_anchor_us;
+	if (anchor == 0)
+		anchor = s->last_sync_rx_us != 0 ? s->last_sync_rx_us : local_now_us;
 
-	s->dl_start_us = s->last_sync_rx_us;
+	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
+	s->dl_start_us = anchor;
 	s->dl_end_us = s->dl_start_us + s->dl_duration_us;
 
 	int64_t ul_base = s->dl_end_us + s->guard_us;
 
 	s->my_ul_start_us = 0;
 	s->my_ul_end_us = 0;
+	s->my_slot_index = 0xFF;
 
 	for (uint8_t i = 0; i < s->num_slots; i++) {
 		int64_t slot_start = ul_base +
@@ -282,40 +302,56 @@ void radio_sync_compute_timing(radio_sync_t *s, int64_t local_now_us)
 		}
 	}
 
-	s->next_superframe_us = ul_base +
-		(int64_t)s->num_slots * ((int64_t)s->ul_slot_us + s->guard_us) +
-		s->guard_us;
+	s->next_superframe_us = anchor + s->superframe_period_us;
 }
 
-/* ================================================================
- * Slave: build DELAY_REQ
- * ================================================================ */
-
 bool radio_sync_build_delay_req(radio_sync_t *s,
-                                 delay_req_frame_t *out,
-                                 int64_t now_us)
+				 delay_req_frame_t *out,
+				 int64_t now_us)
 {
+	(void)now_us;
+
 	if (s == NULL || out == NULL)
 		return false;
 	if (s->role != RADIO_ROLE_SLAVE)
 		return false;
-	if (s->clock.delay_req_pending)
+	if (s->current_master_id == 0)
 		return false;
 
 	memset(out, 0, sizeof(*out));
 	out->requester_node_id = s->own_node_id;
 	out->target_node_id = s->current_master_id;
-	out->t3_us = now_us;
 	out->superframe_seq = s->superframe_seq;
-
-	clock_sync_prepare_delay_req(&s->clock, now_us, s->superframe_seq);
 	s->delay_req_tx_count++;
 	return true;
 }
 
-/* ================================================================
- * Tick: advance FSM, check timeouts
- * ================================================================ */
+void radio_sync_on_beacon_timeout(radio_sync_t *s, int64_t now_us)
+{
+	if (s == NULL || s->role != RADIO_ROLE_SLAVE)
+		return;
+
+	if (s->predicted_anchor_us == 0)
+		s->predicted_anchor_us =
+			s->last_sync_rx_us != 0 ? s->last_sync_rx_us : now_us;
+
+	int64_t elapsed_period = compute_superframe_period_us(s, s->superframe_seq);
+	s->predicted_anchor_us += elapsed_period;
+	s->superframe_seq++;
+	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
+	s->next_superframe_us = s->predicted_anchor_us + s->superframe_period_us;
+	s->missed_beacons++;
+
+	if (s->missed_beacons >= SYNC_LOST_THRESHOLD) {
+		reset_to_candidate(s, now_us, "SYNC lost");
+		return;
+	}
+
+	if (s->missed_beacons <= SYNC_HOLDOVER_TX_MAX)
+		s->state = SYNC_STATE_HOLDOVER_TX;
+	else
+		s->state = SYNC_STATE_HOLDOVER_RX_ONLY;
+}
 
 radio_role_t radio_sync_tick(radio_sync_t *s, int64_t now_us)
 {
@@ -341,73 +377,34 @@ radio_role_t radio_sync_tick(radio_sync_t *s, int64_t now_us)
 	case RADIO_ROLE_MASTER:
 		break;
 
-	case RADIO_ROLE_SLAVE: {
-		if (s->last_sync_rx_us == 0)
-			break;
-
-		int64_t expected = (int64_t)s->dl_duration_us +
-			(int64_t)s->num_slots *
-			((int64_t)s->ul_slot_us + s->guard_us) +
-			s->guard_us;
-		if (expected < SYNC_BEACON_INTERVAL_US)
-			expected = SYNC_BEACON_INTERVAL_US;
-
-		int64_t elapsed = now_us - s->last_sync_rx_us;
-
-		if (elapsed > expected * SYNC_MISS_THRESHOLD) {
-			s->missed_beacons++;
-			s->last_sync_rx_us = now_us;
-
-			if (s->missed_beacons >= SYNC_LOST_THRESHOLD) {
-				s->role = RADIO_ROLE_CANDIDATE;
-				s->state = SYNC_STATE_SEARCHING;
-				s->election_deadline_us =
-					now_us + SYNC_ELECTION_TIMEOUT_US;
-				s->current_master_id = 0;
-				s->role_changes++;
-				s->missed_beacons = 0;
-				fprintf(stderr,
-					"sync: SYNC lost, back to CANDIDATE\n");
-			}
-		}
+	case RADIO_ROLE_SLAVE:
 		break;
-	}
 	}
 
 	return s->role;
 }
 
-/* ================================================================
- * Relay: prepare SYNC for retransmission
- * ================================================================ */
-
 bool radio_sync_prepare_relay(radio_sync_t *s,
-                               const sync_frame_t *rx_frame,
-                               sync_frame_t *relay_frame,
-                               int64_t local_tx_us)
+			       const sync_frame_t *rx_frame,
+			       sync_frame_t *relay_frame,
+			       int64_t local_tx_us)
 {
+	(void)local_tx_us;
+
 	if (s == NULL || rx_frame == NULL || relay_frame == NULL)
 		return false;
 	if (s->role != RADIO_ROLE_SLAVE)
 		return false;
-	if (!s->clock.synced)
+	if (!radio_sync_is_synced(s))
 		return false;
 
 	*relay_frame = *rx_frame;
-
-	relay_frame->origin_time_us =
-		clock_sync_to_master(&s->clock, local_tx_us);
 	relay_frame->sender_node_id = s->own_node_id;
 	relay_frame->relay_hops = rx_frame->relay_hops + 1;
-	relay_frame->num_delay_resp = 0;
 
 	s->sync_relay_count++;
 	return true;
 }
-
-/* ================================================================
- * Queries
- * ================================================================ */
 
 radio_role_t radio_sync_get_role(const radio_sync_t *s)
 {
@@ -420,13 +417,23 @@ bool radio_sync_is_synced(const radio_sync_t *s)
 {
 	if (s == NULL)
 		return false;
-	return s->role == RADIO_ROLE_SLAVE &&
-	       s->state == SYNC_STATE_SYNCED;
+	if (s->role != RADIO_ROLE_SLAVE)
+		return false;
+	return s->state == SYNC_STATE_SYNCED ||
+	       s->state == SYNC_STATE_HOLDOVER_TX ||
+	       s->state == SYNC_STATE_HOLDOVER_RX_ONLY;
+}
+
+bool radio_sync_should_transmit_ul(const radio_sync_t *s)
+{
+	if (!radio_sync_is_synced(s))
+		return false;
+	return s->state == SYNC_STATE_SYNCED ||
+	       s->state == SYNC_STATE_HOLDOVER_TX;
 }
 
 int64_t radio_sync_get_offset(const radio_sync_t *s)
 {
-	if (s == NULL)
-		return 0;
-	return s->clock.offset_us;
+	(void)s;
+	return 0;
 }

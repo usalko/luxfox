@@ -44,14 +44,21 @@ void radio_rx_dispatcher_set_sync(radio_rx_dispatcher_t *rxd, void *sync_ctx)
 		rxd->sync_ctx = sync_ctx;
 }
 
+void radio_rx_dispatcher_set_sync_relay_enabled(radio_rx_dispatcher_t *rxd,
+						bool enabled)
+{
+	if (rxd != NULL)
+		rxd->sync_relay_enabled = enabled;
+}
+
 #if ULAMA_WITH_UNOW
 
 static int64_t now_us(void)
 {
-	struct timeval tv;
+	struct timespec ts;
 
-	gettimeofday(&tv, NULL);
-	return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 }
 
 #endif /* ULAMA_WITH_UNOW */
@@ -269,10 +276,11 @@ static void radio_sync_relay_inject(radio_rx_dispatcher_t *rxd,
  * RX slot: main receive loop with mesh routing
  * ================================================================ */
 
-void radio_rx_slot(radio_rx_dispatcher_t *rxd,
-		   void *pcap_handle,
-		   const uint8_t own_mac[6],
-		   int64_t deadline_us)
+static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
+			      void *pcap_handle,
+			      const uint8_t own_mac[6],
+			      int64_t deadline_us,
+			      bool stop_on_sync)
 {
 	pcap_t *pcap = (pcap_t *)pcap_handle;
 	struct pcap_pkthdr *header;
@@ -336,9 +344,11 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 						    (radio_sync_t *)rxd->sync_ctx,
 						    &sf, rx_time,
 						    sf.sender_node_id);
-					if (should_relay)
+					if (should_relay && rxd->sync_relay_enabled)
 						radio_sync_relay_inject(
 						    rxd, &sf, pcap, own_mac);
+					if (stop_on_sync)
+						return;
 				}
 			}
 			continue;
@@ -465,6 +475,22 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 				    dst_node, traffic_class, ttl);
 		}
 	}
+}
+
+void radio_rx_slot(radio_rx_dispatcher_t *rxd,
+		   void *pcap_handle,
+		   const uint8_t own_mac[6],
+		   int64_t deadline_us)
+{
+	radio_rx_slot_impl(rxd, pcap_handle, own_mac, deadline_us, false);
+}
+
+void radio_rx_slot_until_sync(radio_rx_dispatcher_t *rxd,
+			      void *pcap_handle,
+			      const uint8_t own_mac[6],
+			      int64_t deadline_us)
+{
+	radio_rx_slot_impl(rxd, pcap_handle, own_mac, deadline_us, true);
 }
 
 /* ---- Async reliable TX ---- */

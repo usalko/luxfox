@@ -109,6 +109,14 @@ static void config_defaults(radiod_config_t *cfg)
 
 static int64_t now_us(void)
 {
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+}
+
+static int64_t wall_now_us(void)
+{
 	struct timeval tv;
 
 	gettimeofday(&tv, NULL);
@@ -324,6 +332,7 @@ static void sync_inject_beacon(radio_sync_t *sync,
 {
 	sync_frame_t beacon;
 	radio_sync_build_beacon(sync, &beacon, ts);
+	beacon.master_time_us = wall_now_us();
 
 	uint8_t packed[SYNC_FRAME_MAX_SIZE];
 	size_t packed_len;
@@ -383,6 +392,36 @@ static void sync_inject_null_frame(pcap_t *pcap,
 		&null_byte, 1, g_tx_rate_500kbps);
 	if (wire_len > 0U)
 		pcap_inject(pcap, wire, wire_len);
+}
+
+static bool sync_bootstrap_window_active(const radio_sync_t *sync)
+{
+	return sync != NULL &&
+		sync->bootstrap_window_us > 0 &&
+		sync->bootstrap_period > 0 &&
+		sync->superframe_seq != 0 &&
+		(sync->superframe_seq % sync->bootstrap_period) == 0;
+}
+
+static int64_t sync_bootstrap_announce_us(const radio_sync_t *sync)
+{
+	uint32_t hash;
+	int64_t window_start;
+	int64_t headroom;
+	int64_t tailroom;
+	int64_t usable;
+
+	if (!sync_bootstrap_window_active(sync) || sync->bootstrap_window_us == 0)
+		return 0;
+
+	window_start = sync->next_superframe_us - sync->bootstrap_window_us;
+	headroom = sync->bootstrap_window_us > 1200 ? 200 : 0;
+	tailroom = sync->bootstrap_window_us > 1200 ? 1000 : 1;
+	usable = sync->bootstrap_window_us - headroom - tailroom;
+	if (usable <= 0)
+		usable = 1;
+	hash = ((uint32_t)sync->own_node_id * 2654435761u) ^ sync->superframe_seq;
+	return window_start + headroom + (int64_t)(hash % (uint32_t)usable);
 }
 
 static void sleep_until(int64_t target_us)
@@ -447,25 +486,14 @@ static void master_cycle(radio_sync_t *sync,
 		usleep(sync->guard_us);
 	}
 
-	/* Join/contention window — ALWAYS listen one extra slot.
+	/* Bootstrap/contention window.
 	 *
-	 * A not-yet-slotted slave announces itself with a bootstrap DELAY_REQ in
-	 * the post-DL region, but the UL loop above only opens RX windows for
-	 * slaves that ALREADY have a slot. With num_slots==0 that loop runs zero
-	 * times, so the master would never open any RX window and could never
-	 * admit its first slave — the mirror of the slave-side bootstrap deadlock,
-	 * and exactly why the drone's video/telemetry/ACK uplink stayed dead
-	 * (tx_pkt=0, dreq=0).
-	 *
-	 * Only open it while we have NO slaves. Once at least one slave holds a
-	 * slot, that slave transmits its per-superframe DELAY_REQ at the start of
-	 * its UL slot, which the master already receives inside the UL loop above —
-	 * so the extra window is redundant there. Worse, adding it unconditionally
-	 * lengthened every superframe by one ul_slot, pushing the master's beacon
-	 * later than the slave's computed next_superframe and causing the slave to
-	 * miss beacons and flap SLAVE->CANDIDATE->MASTER once video load arrived. */
-	if (sync->num_slots == 0) {
-		int64_t join_deadline = now_us() + sync->ul_slot_us;
+	 * On configured superframes the master extends the frame with an advertised
+	 * RX-only window where unslotted slaves may send DELAY_REQ. Slotted slaves
+	 * account for the same extension in next_superframe_us, so the beacon cadence
+	 * stays self-consistent across the whole network. */
+	if (sync_bootstrap_window_active(sync)) {
+		int64_t join_deadline = now_us() + sync->bootstrap_window_us;
 		radio_rx_slot(rxd, pcap, own_mac, join_deadline);
 	}
 
@@ -483,23 +511,24 @@ static void slave_cycle(radio_sync_t *sync,
 			uint32_t ack_timeout_us,
 			uint32_t ack_max_retry)
 {
-	/* Wait for SYNC beacon.
+	/* Wait for the next beacon near the predicted superframe boundary.
 	 *
-	 * Compare next_superframe_us against NOW, not against 0. If we have fallen
-	 * behind — the predicted boundary is already in the past because the loop
-	 * was delayed while draining a burst of video TX — a `> 0` test would set a
-	 * deadline in the past, make this RX return immediately, and leave us
-	 * spinning on stale slot timing WITHOUT ever listening for the beacon. That
-	 * snowballs: we never re-hear the master, miss ~10 beacons, trip SYNC-lost,
-	 * fall back to CANDIDATE/MASTER, and degenerate into a dual-master free-for-
-	 * all that shreds video into never-completing keyframes. When late, re-open
-	 * a full beacon-interval window so we re-catch the beacon and re-anchor. */
+	 * On a miss, do NOT reset phase to now. radio_sync_on_beacon_timeout()
+	 * advances predicted_anchor_us by one whole superframe, preserving slot
+	 * geometry during bounded holdover. */
 	int64_t now = now_us();
+	int64_t anchor_before = sync->predicted_anchor_us;
+	uint32_t seq_before = sync->superframe_seq;
 	int64_t sync_deadline = (sync->next_superframe_us > now)
-		? sync->next_superframe_us + 2000
-		: now + SYNC_BEACON_INTERVAL_US + 2000;
-	radio_rx_slot(rxd, pcap, own_mac, sync_deadline);
+		? sync->next_superframe_us + SYNC_BEACON_SLACK_US
+		: now + sync->superframe_period_us + SYNC_BEACON_SLACK_US;
+	radio_rx_slot_until_sync(rxd, pcap, own_mac, sync_deadline);
 
+	if (!radio_sync_is_synced(sync))
+		return;
+	if (sync->superframe_seq == seq_before &&
+	    sync->predicted_anchor_us == anchor_before)
+		radio_sync_on_beacon_timeout(sync, now_us());
 	if (!radio_sync_is_synced(sync))
 		return;
 
@@ -510,7 +539,7 @@ static void slave_cycle(radio_sync_t *sync,
 		radio_rx_slot(rxd, pcap, own_mac, sync->dl_end_us);
 
 	/* My UL slot */
-	if (sync->my_slot_index != 0xFF) {
+	if (sync->my_slot_index != 0xFF && radio_sync_should_transmit_ul(sync)) {
 		sleep_until(sync->my_ul_start_us);
 
 		/* DELAY_REQ first */
@@ -555,18 +584,15 @@ static void slave_cycle(radio_sync_t *sync,
 
 		if (!sent_data)
 			sync_inject_null_frame(pcap, own_mac);
-	} else {
+	} else if (sync->my_slot_index == 0xFF && radio_sync_should_transmit_ul(sync)) {
 		/* Bootstrap: synced but the master has not assigned us a UL slot yet.
 		 * The master only learns about a slave from its DELAY_REQ, but the normal
 		 * path above only sends DELAY_REQ once we already HAVE a slot — a
 		 * chicken-and-egg that would otherwise keep a fresh slave invisible
-		 * forever. Announce ourselves in the post-DL guard region (idle while the
-		 * master's num_slots is still 0). Clear any stale pending flag so a lost
-		 * announce is retried next superframe, and stagger by node_id so multiple
-		 * joining slaves do not always collide. */
-		sync->clock.delay_req_pending = false;
-		int64_t announce_us = sync->dl_end_us + (int64_t)sync->guard_us
-				    + (int64_t)sync->own_node_id * 200;
+		 * forever. Announce only inside the master's advertised bootstrap window;
+		 * a seq-dependent hash spreads multiple joiners across that window so they
+		 * do not keep colliding on every retry. */
+		int64_t announce_us = sync_bootstrap_announce_us(sync);
 		if (announce_us < sync->next_superframe_us) {
 			sleep_until(announce_us);
 			sync_inject_delay_req(sync, pcap, own_mac, now_us());
@@ -814,6 +840,10 @@ int main(int argc, char **argv)
 				cfg.sync_dl_us, cfg.sync_ul_us,
 				cfg.sync_guard_us);
 		radio_rx_dispatcher_set_sync(&rxd, &sync_engine);
+		/* Current field topology is 2 nodes (host master + one drone slave).
+		 * SYNC relaying is unnecessary there and can poison clock sync if a slave
+		 * rebroadcasts a beacon with a mistranslated origin timestamp. */
+		radio_rx_dispatcher_set_sync_relay_enabled(&rxd, false);
 		fprintf(stderr,
 			"radiod: SYNC protocol enabled, node_id=%u "
 			"dl=%u ul=%u guard=%u\n",

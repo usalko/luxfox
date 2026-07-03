@@ -107,6 +107,7 @@ typedef struct {
 
 	/* Sync engine (set by radiod main, NULL if standalone) */
 	void *sync_ctx;
+	bool  sync_relay_enabled;
 
 	/* Statistics */
 	radio_rx_stats_t stats;
@@ -134,6 +135,15 @@ void radio_rx_slot(radio_rx_dispatcher_t *rxd,
 		   const uint8_t own_mac[6],
 		   int64_t deadline_us);
 
+/* Like radio_rx_slot(), but returns as soon as a SYNC beacon is received and
+ * processed. Used by slave_cycle to re-anchor on the master's actual beacon
+ * edge instead of sleeping out the whole wait window after the beacon has
+ * already arrived. */
+void radio_rx_slot_until_sync(radio_rx_dispatcher_t *rxd,
+			      void *pcap_handle,
+			      const uint8_t own_mac[6],
+			      int64_t deadline_us);
+
 int  radio_async_store(radio_rx_dispatcher_t *rxd,
 		       const uint8_t *wire_frame, size_t frame_len,
 		       uint16_t seq);
@@ -146,3 +156,5 @@ void radio_async_tick(radio_rx_dispatcher_t *rxd,
 uint16_t radio_async_next_seq(radio_rx_dispatcher_t *rxd);
 
 void radio_rx_dispatcher_set_sync(radio_rx_dispatcher_t *rxd, void *sync_ctx);
+void radio_rx_dispatcher_set_sync_relay_enabled(radio_rx_dispatcher_t *rxd,
+						bool enabled);

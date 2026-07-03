@@ -7,8 +7,12 @@
 
 #define SYNC_ELECTION_TIMEOUT_US   500000
 #define SYNC_BEACON_INTERVAL_US    12000
+#define SYNC_BEACON_SLACK_US       2000
 #define SYNC_MISS_THRESHOLD        3
 #define SYNC_LOST_THRESHOLD        10
+#define SYNC_HOLDOVER_TX_MAX       8
+#define SYNC_BOOTSTRAP_WINDOW_US   4000
+#define SYNC_BOOTSTRAP_PERIOD      8
 #define SYNC_DEDUP_WINDOW          32
 #define SYNC_MAX_NODES             5
 
@@ -21,6 +25,8 @@ typedef enum {
 typedef enum {
     SYNC_STATE_SEARCHING = 0,
     SYNC_STATE_SYNCED,
+    SYNC_STATE_HOLDOVER_TX,
+    SYNC_STATE_HOLDOVER_RX_ONLY,
     SYNC_STATE_MASTER_TX,
     SYNC_STATE_MASTER_RX,
 } sync_state_t;
@@ -29,8 +35,6 @@ typedef struct {
     uint8_t  node_id;
     int64_t  last_seen_us;
     bool     active;
-    int64_t  delay_req_t4;
-    bool     delay_resp_pending;
 } sync_slave_info_t;
 
 typedef struct {
@@ -54,6 +58,8 @@ typedef struct {
     clock_sync_t     clock;
     uint8_t          missed_beacons;
     int64_t          last_sync_rx_us;
+    int64_t          predicted_anchor_us;
+    int64_t          superframe_period_us;
     int64_t          next_superframe_us;
 
     int64_t          dl_start_us;
@@ -67,6 +73,8 @@ typedef struct {
     uint16_t         guard_us;
     uint8_t          num_slots;
     uint8_t          slot_map[SYNC_MAX_SLOTS];
+    uint16_t         bootstrap_window_us;
+    uint8_t          bootstrap_period;
 
     sync_dedup_key_t dedup_ring[SYNC_DEDUP_WINDOW];
     uint16_t         dedup_head;
@@ -76,43 +84,45 @@ typedef struct {
     uint32_t         sync_rx_count;
     uint32_t         sync_relay_count;
     uint32_t         delay_req_tx_count;
-    uint32_t         delay_resp_rx_count;
     uint32_t         elections_won;
     uint32_t         elections_lost;
     uint32_t         role_changes;
 } radio_sync_t;
 
 void radio_sync_init(radio_sync_t *s, uint8_t own_node_id,
-                     uint16_t dl_us, uint16_t ul_us, uint16_t guard_us);
+                 uint16_t dl_us, uint16_t ul_us, uint16_t guard_us);
 
 bool radio_sync_on_sync_rx(radio_sync_t *s,
-                           const sync_frame_t *frame,
-                           int64_t local_rx_us,
-                           uint8_t sender_node_id);
+               const sync_frame_t *frame,
+               int64_t local_rx_us,
+               uint8_t sender_node_id);
 
 void radio_sync_on_delay_req_rx(radio_sync_t *s,
-                                const delay_req_frame_t *dreq,
-                                int64_t local_rx_us);
+                const delay_req_frame_t *dreq,
+                int64_t local_rx_us);
 
 void radio_sync_build_beacon(radio_sync_t *s,
-                              sync_frame_t *out_frame,
-                              int64_t now_us);
+                  sync_frame_t *out_frame,
+                  int64_t now_us);
 
 void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us);
 
 void radio_sync_compute_timing(radio_sync_t *s, int64_t local_now_us);
 
 bool radio_sync_build_delay_req(radio_sync_t *s,
-                                 delay_req_frame_t *out,
-                                 int64_t now_us);
+                 delay_req_frame_t *out,
+                 int64_t now_us);
+
+void radio_sync_on_beacon_timeout(radio_sync_t *s, int64_t now_us);
 
 radio_role_t radio_sync_tick(radio_sync_t *s, int64_t now_us);
 
 bool radio_sync_prepare_relay(radio_sync_t *s,
-                               const sync_frame_t *rx_frame,
-                               sync_frame_t *relay_frame,
-                               int64_t local_tx_us);
+                   const sync_frame_t *rx_frame,
+                   sync_frame_t *relay_frame,
+                   int64_t local_tx_us);
 
 radio_role_t radio_sync_get_role(const radio_sync_t *s);
 bool radio_sync_is_synced(const radio_sync_t *s);
+bool radio_sync_should_transmit_ul(const radio_sync_t *s);
 int64_t radio_sync_get_offset(const radio_sync_t *s);

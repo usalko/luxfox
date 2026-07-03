@@ -1159,6 +1159,34 @@ inside the radio daemon is unnecessary and was removed.
 5. Fallback if anything regresses: add `--no-sync` on both radiod instances to
    restore the previous standalone quasi-TDMA behavior instantly.
 
+#### SYNC protocol hardening backlog (post-review 2026-07-02)
+
+External protocol review flagged 7 architectural weaknesses. Full analysis,
+per-item criticality and current implementation status live in
+[docs/sync-protocol-design.md](sync-protocol-design.md) §13. Compact backlog:
+
+Already landed during field debugging (§13.0):
+- [x] Bully election by `node_id` via beacons (yield-to-higher, candidate on loss)
+- [x] Bootstrap `DELAY_REQ` (slave) + master join RX window while `num_slots==0`
+- [x] Slave re-anchor on beacon edge (`radio_rx_slot_until_sync`)
+- [x] No `settimeofday` during live sync (was corrupting superframe geometry)
+- [x] Rough-offset sanity clamp >1s (`CLOCK_SYNC_ROUGH_OFFSET_MAX_US`)
+- [x] SYNC relay disabled in 2-node topology (`sync_relay_enabled=false`) — was
+      the source of `offset≈+10^10us` self-poisoning
+
+Pending, in priority order:
+- [ ] 🔴 §13.1 Announced bootstrap/contention window (fix multi-slave join; today
+      the join window only opens while `num_slots==0`, so slaves #2..4 can't
+      onboard cleanly while slave #1 is active)
+- [ ] 🟠 §13.3 ID-proportional `ElectionDelay = (MAX_ID - my_id)*K` +
+      `MASTER_TIMEOUT` to prevent simultaneous self-promotion / split-brain
+- [ ] 🟠 §13.2 `slot_map_version` + two-phase apply (safe slot churn with ≥2 drones)
+- [ ] 🟡 §13.4 Beacon HMAC (anti-spoof / clock poisoning) — raise if RF hostile
+- [ ] 🟡 §13.5 PI clock-frequency servo — LOW for now: slave re-anchors from
+      `last_sync_rx_us` every superframe, so ±20ppm over ~12ms ≈ 0.24us ≪ 300us guard
+- [ ] 🔵 §13.6 `DELAY_REQ`/`DELAY_RESP` dedup by monotonic `req_id`
+- [ ] 🔵 §13.7 Slot exhaustion / 5th-node preemption (by-design; stale reclaim exists)
+
 ---
 
 ### Phase 7: Async Reliable Send (2026-06-27)

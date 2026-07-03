@@ -215,16 +215,29 @@ static unsigned int tx_fail_count = 0;
 
 /*
  * Time-spread resend credits per frame type (extra full copies after the first
- * send, one emitted per subsequent frame ~100 ms apart). Video is UNRELIABLE
- * (the radiod reliable-ACK path caused a retransmit storm); this plain forward
- * redundancy protects against the ~25% per-fragment loss seen even at low
- * airtime / strong RSSI (external 2.4 GHz interference + driver TX-ring drops).
- * Keyframes are bigger and costlier to lose, so they get more copies. The copies
- * share the original seq; the host de-dups by (seq, frag_idx) and its ~120 ms
- * reorder hold lets a copy fill a lost original without adding latency.
+ * send, one emitted per subsequent frame ~40 ms apart at 25 fps). Video is
+ * UNRELIABLE (the radiod reliable-ACK path caused a retransmit storm), so this
+ * plain forward redundancy is our only FEC.
+ *
+ * Sizing is driven by MEASURED conditions once TDMA/SYNC is stable:
+ *   - The link drops ~15% of fragments even at RSSI ~-38 and only ~7% airtime
+ *     (rtl8192eu monitor-inject drops + 2.4 GHz interference) — this is loss,
+ *     not congestion, so it cannot be scheduled away, only masked by redundancy.
+ *   - Airtime is ~93% idle and the drone UL slot / video queue now have ample
+ *     headroom, so spending airtime on repetition is essentially free.
+ *
+ * A single-fragment P-frame sent once has ~15% loss; one broken P-frame poisons
+ * the whole GOP (the host reorder gate skips and waits for the next IDR), which
+ * is the visible ~1 s freeze/stutter. Sending each P-frame 3x (2 extra copies)
+ * drops residual loss to ~0.15^3 ~= 0.3% and lifts whole-GOP integrity from ~2%
+ * to ~92%. Copies share the original seq; the host de-dups by (seq, frag_idx)
+ * and its ~120 ms reorder hold covers the +40/+80 ms copies with margin (a 3rd
+ * copy at +120 ms would land on the hold boundary, so 2 is the max useful for
+ * P-frames without adding latency). Keyframes already arrive near-certainly with
+ * 2 copies, so they keep 2.
  */
 #define KEYFRAME_EXTRA_COPIES 2
-#define PFRAME_EXTRA_COPIES   1
+#define PFRAME_EXTRA_COPIES   2
 
 /* Pack and send one already-built ULAMA frame, tracking consecutive
  * TX failures for the main loop's transport-recovery logic. */

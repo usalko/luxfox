@@ -42,9 +42,6 @@ typedef struct {
 	uint32_t sync_rx;
 	uint32_t sync_relay;
 	uint32_t delay_req_tx;
-	uint32_t delay_resp_rx;
-	int64_t  clock_offset_us;
-	int64_t  clock_rtt_us;
 	uint8_t  current_role;
 	uint8_t  current_master;
 } radio_stats_t;

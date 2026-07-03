@@ -26,8 +26,29 @@ int radio_tx_enqueue(radio_tx_scheduler_t *sched,
 	q = &sched->queues[priority];
 
 	if (q->count >= RADIO_TX_QUEUE_SIZE) {
-		q->dropped++;
-		return -1;
+		/*
+		 * Overflow policy is priority-dependent:
+		 *
+		 *   VIDEO / BULK  → drop the OLDEST queued frame, then admit the new one.
+		 *   CTRL  / TELEM → reject the new frame (keep the queued order intact).
+		 *
+		 * For the real-time video stream the freshest frame is the valuable one:
+		 * the oldest queued fragment is already stale and, on the receiver, its
+		 * frame's sequence has usually been delivered or skipped long ago — so
+		 * discarding it rarely punches a NEW hole. The previous "reject newest"
+		 * behaviour did the opposite: under a UL burst it dropped the live frame
+		 * the ground station was actively waiting for, which tripped the gateway
+		 * reorder gate → keyframe-wait stall → the visible video stutter. CTRL is
+		 * tiny, reliable and must not be reordered, so it keeps reject-newest.
+		 */
+		if (priority == RADIO_PRIO_VIDEO || priority == RADIO_PRIO_BULK) {
+			q->tail = (uint16_t)((q->tail + 1U) % RADIO_TX_QUEUE_SIZE);
+			q->count--;
+			q->dropped++;
+		} else {
+			q->dropped++;
+			return -1;
+		}
 	}
 
 	slot = &q->slots[q->head];
