@@ -189,6 +189,20 @@ static void test_compute_timing_no_slot(void)
 	CHECK(s.my_slot_index == 0xFF);
 }
 
+static void test_adaptive_period_tracks_observed_interval(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f1 = make_sync(5, 10, 0);
+	sync_frame_t f2 = make_sync(5, 11, 0);
+	radio_sync_on_sync_rx(&s, &f1, 100000, 5);
+	CHECK(!s.period_correction_valid);
+	radio_sync_on_sync_rx(&s, &f2, 112300, 5); /* +300 us vs nominal 12000 */
+	CHECK(s.period_correction_valid);
+	CHECK(s.period_correction_us > 0);
+	CHECK(s.superframe_period_us > expected_period(2000, 0, 2000, 300));
+}
+
 static void test_bootstrap_window_extends_period(void)
 {
 	radio_sync_t s;
@@ -538,6 +552,7 @@ int main(void)
 		{"compute_timing_slot0", test_compute_timing_slot0},
 		{"compute_timing_slot2", test_compute_timing_slot2},
 		{"compute_timing_no_slot", test_compute_timing_no_slot},
+		{"adaptive_period_tracks_observed_interval", test_adaptive_period_tracks_observed_interval},
 		{"bootstrap_window_extends_period", test_bootstrap_window_extends_period},
 		{"dedup_rejects_duplicate_sync", test_dedup_rejects_duplicate_sync},
 		{"dedup_passes_new_seq", test_dedup_passes_new_seq},

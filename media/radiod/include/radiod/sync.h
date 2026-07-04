@@ -12,6 +12,8 @@
 #define SYNC_LOST_THRESHOLD        10
 #define SYNC_HOLDOVER_TX_MAX       8
 #define SYNC_SLAVE_TIMEOUT_US      300000
+#define SYNC_PERIOD_CORR_SHIFT     3
+#define SYNC_PERIOD_CORR_MAX_US    1500
 #define SYNC_BOOTSTRAP_WINDOW_US   4000
 #define SYNC_BOOTSTRAP_PERIOD      8
 #define SYNC_DEDUP_WINDOW          32
@@ -61,6 +63,8 @@ typedef struct {
     int64_t          last_sync_rx_us;
     int64_t          predicted_anchor_us;
     int64_t          superframe_period_us;
+    int64_t          period_correction_us;
+    bool             period_correction_valid;
     int64_t          next_superframe_us;
 
     int64_t          dl_start_us;

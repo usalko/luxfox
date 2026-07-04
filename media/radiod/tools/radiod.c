@@ -103,7 +103,7 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->ack_max_retry = ACK_MAX_RETRY;
 	cfg->sync_dl_us = 1500;
 	cfg->sync_ul_us = 5000;
-	cfg->sync_guard_us = 300;
+	cfg->sync_guard_us = 600;
 	cfg->sync_enabled = true;
 }
 
@@ -288,7 +288,7 @@ static void usage(const char *prog)
 		"      --no-sync         Disable SYNC; fall back to standalone quasi-TDMA\n"
 		"  -D, --dl-us US        SYNC DL slot duration (default: 2000)\n"
 		"  -U, --ul-us US        SYNC UL slot duration (default: 2000)\n"
-		"  -G, --guard-us US     SYNC guard interval (default: 300)\n"
+		"  -G, --guard-us US     SYNC guard interval (default: 600)\n"
 		"  -v, --verbose         Verbose output\n"
 		"  -h, --help            Show this help\n",
 		prog, RADIO_IPC_SOCK_PATH, TX_SLOT_SIZE, RX_SLOT_US,
