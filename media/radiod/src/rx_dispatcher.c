@@ -306,7 +306,36 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 			if (remaining_ms <= 0)
 				break;
 			struct pollfd pfd = { .fd = pcap_fd, .events = POLLIN };
+			int64_t poll_start_us = now_us();
 			poll(&pfd, 1, remaining_ms > 0 ? remaining_ms : 1);
+
+			/* Field logs show slave UL slot 0 starting several
+			 * milliseconds late with nothing sent, which can only
+			 * happen if the DL RX phase overran its deadline
+			 * upstream of the UL loop. poll() with a millisecond
+			 * timeout is the one blocking wait in that path, so
+			 * measure whether it wakes up much later than the
+			 * timeout it was given (scheduler/driver wakeup
+			 * latency on the embedded target) rather than guessing. */
+			{
+				static uint32_t poll_late_trace_count;
+				int64_t poll_elapsed_us = now_us() - poll_start_us;
+				int64_t poll_late_us = poll_elapsed_us -
+					(int64_t)remaining_ms * 1000;
+				if (poll_late_us > 2000 &&
+				    (poll_late_trace_count < 32 ||
+				     (poll_late_trace_count % 128U) == 0U)) {
+					fprintf(stderr,
+						"sync: poll() woke %lld us late "
+						"(requested=%dms elapsed=%lldus)\n",
+						(long long)poll_late_us,
+						remaining_ms,
+						(long long)poll_elapsed_us);
+					poll_late_trace_count++;
+				} else if (poll_late_us > 2000) {
+					poll_late_trace_count++;
+				}
+			}
 		}
 
 		status = pcap_next_ex(pcap, &header, &packet);
@@ -437,6 +466,15 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 			&src_node, &dst_node, &flags,
 			&traffic_class, &ulama_seq, &ttl);
 
+		/* Any syntactically valid ULAMA packet from a known slave proves the
+		 * slave is still present, even if this exact frame is a duplicate delayed
+		 * copy that will be dropped by mesh/video dedup later. Refresh liveness
+		 * before the dedup gate so time-spread video redundancy keeps the slave's
+		 * lease alive on the master. */
+		if (is_ulama && rxd->sync_ctx != NULL)
+			radio_sync_on_ul_packet_rx((radio_sync_t *)rxd->sync_ctx,
+					    src_node, now_us());
+
 		/* ULAMA-level dedup (mesh anti-loop) */
 		if (is_ulama) {
 			uint8_t frag_idx = frame.len > 9U ? frame.payload[8] : 0U;
@@ -454,12 +492,6 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 					  frame.src_mac, ttl, frame.rssi,
 					  relayed, now_us());
 		}
-
-		/* Any ULAMA packet from a known slave proves the slave is still alive,
-		 * even if the per-superframe DELAY_REQ for that slot was lost. */
-		if (is_ulama && rxd->sync_ctx != NULL)
-			radio_sync_on_ul_packet_rx((radio_sync_t *)rxd->sync_ctx,
-						    src_node, now_us());
 
 		/* ---- Routing decision ---- */
 

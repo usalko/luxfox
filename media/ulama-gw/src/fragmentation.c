@@ -141,6 +141,11 @@ void frag_reassembly_expire(frag_reassembly_ctx_t *ctx, uint64_t now_ms)
 	}
 }
 
+frag_reassembly_slot_t *frag_reassembly_find_slot(frag_reassembly_ctx_t *ctx, uint8_t src_node, uint16_t seq)
+{
+	return find_slot(ctx, src_node, seq);
+}
+
 void frag_reassembly_flush_stale_video(frag_reassembly_ctx_t *ctx,
 				       uint8_t src_node, uint16_t keyframe_seq)
 {

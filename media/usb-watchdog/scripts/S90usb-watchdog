@@ -26,9 +26,11 @@ do_usb_stable() {
     # Disable USB autosuspend to prevent hub resets under load
     echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || true
     for dev in /sys/bus/usb/devices/*/power/control; do
+        [ -e "$dev" ] || continue
         echo on > "$dev" 2>/dev/null || true
     done
     for f in /sys/bus/usb/devices/*/power/usb2_hardware_lpm; do
+        [ -e "$f" ] || continue
         echo N > "$f" 2>/dev/null || true
     done
     log "USB autosuspend disabled"

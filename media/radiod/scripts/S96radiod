@@ -155,6 +155,10 @@ parse_vcpd_args() {
 
 start() {
     export LD_LIBRARY_PATH=/oem/usr/lib
+    local RADIOD_WRAPPER=""
+    if command -v chrt >/dev/null 2>&1; then
+        RADIOD_WRAPPER="chrt -f 80"
+    fi
 
     # Rotate logs before starting
     rotate_log "$RADIOD_LOG"
@@ -170,8 +174,12 @@ start() {
         else
             mkdir -p "$(dirname "$RADIOD_LOG")"
             parse_radiod_args
-            log "starting radiod $RADIOD_ARGS"
-            "$RADIOD_BIN" $RADIOD_ARGS >>"$RADIOD_LOG" 2>&1 &
+            log "starting radiod ${RADIOD_WRAPPER:+$RADIOD_WRAPPER }$RADIOD_BIN$RADIOD_ARGS"
+            if [ -n "$RADIOD_WRAPPER" ]; then
+                nice -n -10 $RADIOD_WRAPPER "$RADIOD_BIN" $RADIOD_ARGS >>"$RADIOD_LOG" 2>&1 &
+            else
+                nice -n -10 "$RADIOD_BIN" $RADIOD_ARGS >>"$RADIOD_LOG" 2>&1 &
+            fi
             echo $! > "$RADIOD_PID"
 
             if wait_for_socket /var/run/radiod.sock 20 && is_running "$RADIOD_PID"; then

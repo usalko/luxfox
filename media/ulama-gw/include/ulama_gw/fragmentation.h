@@ -7,7 +7,7 @@
 #include "ulama/ulama_frame.h"
 
 #define FRAG_MAX_FRAGMENTS 29
-#define FRAG_MAX_SLOTS 16
+#define FRAG_MAX_SLOTS 32
 #define FRAG_TIMEOUT_MS 800
 #define FRAG_MAX_REASSEMBLED 65536   /* = VIDEO_RING_SLOT_MAX, one whole H.265 frame */
 
@@ -32,6 +32,9 @@ void frag_reassembly_init(frag_reassembly_ctx_t *ctx);
 bool frag_reassembly_insert(frag_reassembly_ctx_t *ctx, const ulama_frame_view_t *frame, uint64_t now_ms);
 bool frag_reassembly_complete(frag_reassembly_ctx_t *ctx, uint8_t src_node, uint16_t seq, uint8_t *out, size_t out_capacity, size_t *out_len);
 void frag_reassembly_expire(frag_reassembly_ctx_t *ctx, uint64_t now_ms);
+
+/* Find reassembly slot for given source and sequence for debugging */
+frag_reassembly_slot_t *frag_reassembly_find_slot(frag_reassembly_ctx_t *ctx, uint8_t src_node, uint16_t seq);
 
 /*
  * Expire all incomplete reassembly slots for src_node that are older than

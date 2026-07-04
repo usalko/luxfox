@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -103,7 +104,7 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->ack_max_retry = ACK_MAX_RETRY;
 	cfg->sync_dl_us = 1500;
 	cfg->sync_ul_us = 5000;
-	cfg->sync_guard_us = 600;
+	cfg->sync_guard_us = 2000;
 	cfg->sync_enabled = true;
 }
 
@@ -286,9 +287,9 @@ static void usage(const char *prog)
 		"      --relay           Enable mesh relay mode\n"
 		"  -S, --sync            Enable SYNC protocol (TDMA + election)  (default: ON)\n"
 		"      --no-sync         Disable SYNC; fall back to standalone quasi-TDMA\n"
-		"  -D, --dl-us US        SYNC DL slot duration (default: 2000)\n"
-		"  -U, --ul-us US        SYNC UL slot duration (default: 2000)\n"
-		"  -G, --guard-us US     SYNC guard interval (default: 600)\n"
+		"  -D, --dl-us US        SYNC DL slot duration (default: 1500)\n"
+		"  -U, --ul-us US        SYNC UL slot duration (default: 5000)\n"
+		"  -G, --guard-us US     SYNC guard interval (default: 2000)\n"
 		"  -v, --verbose         Verbose output\n"
 		"  -h, --help            Show this help\n",
 		prog, RADIO_IPC_SOCK_PATH, TX_SLOT_SIZE, RX_SLOT_US,
@@ -532,6 +533,138 @@ static void master_cycle(radio_sync_t *sync,
 		sleep_until(superframe_deadline);
 }
 
+static void slave_tx_owned_slot(radio_sync_t *sync,
+				radio_tx_scheduler_t *sched,
+				radio_rx_dispatcher_t *rxd,
+				pcap_t *pcap,
+				const uint8_t own_mac[6],
+				const uint8_t *default_dst,
+				const radio_route_table_t *rt,
+				radio_stats_t *stats,
+				uint8_t slot_index,
+				bool *keepalive_sent)
+{
+	int64_t slot_start = sync->dl_end_us + sync->guard_us +
+		(int64_t)slot_index * ((int64_t)sync->ul_slot_us + sync->guard_us);
+	int64_t ul_deadline = slot_start + sync->ul_slot_us;
+	bool sent_data = false;
+	bool sent_keepalive = false;
+
+	/* Distinguish "already late on entry" (DL RX / poll() wakeup took longer
+	 * than the DL+guard budget, upstream of this function) from "went over
+	 * budget while transmitting" (see the overrun check at the end of this
+	 * function) — the field logs so far always show used=0 at the overrun
+	 * point, which only happens if we entered this function already past
+	 * ul_deadline. This pins down which half of the cycle is actually late. */
+	{
+		static uint32_t entry_late_trace_count;
+		int64_t entry_us = now_us();
+		int64_t entry_late_us = entry_us - slot_start;
+		if (entry_late_us > 0 &&
+		    (entry_late_trace_count < 32 || (entry_late_trace_count % 128U) == 0U)) {
+			fprintf(stderr,
+				"sync: UL slot %u entered %lld us late (dl_end=%lld guard=%u)\n",
+				slot_index, (long long)entry_late_us,
+				(long long)sync->dl_end_us, sync->guard_us);
+			entry_late_trace_count++;
+		} else if (entry_late_us > 0) {
+			entry_late_trace_count++;
+		}
+	}
+
+	sleep_until(slot_start);
+
+	/* In HOLD_TX we still permit bounded uplink traffic, but only from the
+	 * first owned UL slot. Reusing every weighted video slot while we already
+	 * missed beacons increases USB/driver backlog and makes it harder to catch
+	 * the next SYNC beacon, so later owned slots fall back to a NULL presence
+	 * frame until the slave fully resynchronizes. */
+	if (sync->state == SYNC_STATE_HOLDOVER_TX &&
+	    slot_index != sync->my_slot_index) {
+		sync_inject_null_frame(pcap, own_mac);
+		return;
+	}
+
+	/* Airtime-bounded UL send.
+	 *
+	 * A 1440-byte video fragment is ~2.2 ms on air at 6 Mbps. pcap_inject only
+	 * queues a frame into the driver — the airtime elapses later on the wire —
+	 * so the old `while (now < ul_deadline)` loop kept dequeuing and injecting
+	 * several fragments that then transmitted far past the UL slot, straight
+	 * into the master's beacon/DL window where the master is transmitting and
+	 * cannot receive (half duplex). That silently dropped most video and made
+	 * every multi-fragment keyframe impossible to reassemble (kf_rx=0). Bound
+	 * the slot by ESTIMATED AIRTIME instead, dequeuing (highest priority first)
+	 * only while the next frame still fits, so nothing overruns the slot. */
+	uint64_t air_budget = (sync->ul_slot_us > sync->guard_us)
+		? (uint64_t)(sync->ul_slot_us - sync->guard_us)
+		: (uint64_t)sync->ul_slot_us;
+	uint64_t air_used = 0;
+
+	/* Once a slave already has a slot, DELAY_REQ is no longer part of the
+	 * timing protocol. Keep it only as an infrequent idle keepalive so the
+	 * master can retain a completely silent slave. Regular ULAMA traffic now
+	 * refreshes the master's lease directly.
+	 *
+	 * If the master assigns us multiple slots in one superframe, send at most
+	 * one keepalive in the first owned slot and use the rest for payload. */
+	if (!*keepalive_sent &&
+	    slot_index == sync->my_slot_index &&
+	    tx_peek_next(sched, NULL) == NULL &&
+	    (sync->superframe_seq % SYNC_DELAY_REQ_KEEPALIVE_PERIOD) == 0U) {
+		sync_inject_delay_req(sync, pcap, own_mac, now_us());
+		air_used += estimate_payload_airtime_us(DELAY_REQ_FRAME_SIZE);
+		sent_keepalive = true;
+		*keepalive_sent = true;
+	}
+	while (now_us() < ul_deadline) {
+		uint8_t prio;
+		const radio_tx_slot_t *next = tx_peek_next(sched, &prio);
+		if (next == NULL)
+			break;
+		uint64_t air = estimate_payload_airtime_us(next->len);
+		if (air_used + air > air_budget)
+			break;  /* would overrun the slot; leave it for next superframe */
+		const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
+		if (slot == NULL)
+			break;
+		radio_stats_add_tx_airtime(stats,
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
+		radio_stats_add_tx_packet(stats, prio);
+		air_used += air;
+		sent_data = true;
+	}
+
+	if (!sent_data && !sent_keepalive)
+		sync_inject_null_frame(pcap, own_mac);
+
+	/* estimate_payload_airtime_us() only models 802.11 PLCP preamble + payload
+	 * bits at the configured PHY rate. It does NOT model USB WiFi dongle
+	 * driver/firmware queuing latency, which is invisible to pcap_inject()
+	 * (fire-and-forget enqueue) but can add real delay per injected frame,
+	 * especially for a back-to-back burst like a multi-fragment keyframe.
+	 * If that pushes actual completion past the slot + guard, this slave's
+	 * receive window for the next superframe (its own beacon RX) starts late,
+	 * which shows up as sporadic HOLD_TX. Log it so the next field run can
+	 * confirm/refute that theory instead of guessing at a bigger margin. */
+	{
+		static uint32_t overrun_trace_count;
+		int64_t finish_us = now_us();
+		int64_t overrun_us = finish_us - (ul_deadline + sync->guard_us);
+		if (overrun_us > 0 &&
+		    (overrun_trace_count < 32 || (overrun_trace_count % 128U) == 0U)) {
+			fprintf(stderr,
+				"sync: UL slot %u overran by %lld us (budget=%llu used=%llu)\n",
+				slot_index, (long long)overrun_us,
+				(unsigned long long)air_budget,
+				(unsigned long long)air_used);
+			overrun_trace_count++;
+		} else if (overrun_us > 0) {
+			overrun_trace_count++;
+		}
+	}
+}
+
 static void slave_cycle(radio_sync_t *sync,
 			radio_tx_scheduler_t *sched,
 			radio_rx_dispatcher_t *rxd,
@@ -570,53 +703,20 @@ static void slave_cycle(radio_sync_t *sync,
 	if (sync->dl_end_us > now_us())
 		radio_rx_slot(rxd, pcap, own_mac, sync->dl_end_us);
 
-	/* My UL slot */
-	if (sync->my_slot_index != 0xFF && radio_sync_should_transmit_ul(sync)) {
-		sleep_until(sync->my_ul_start_us);
-
-		/* DELAY_REQ first */
-		sync_inject_delay_req(sync, pcap, own_mac, now_us());
-
-		int64_t ul_deadline = sync->my_ul_end_us;
-		bool sent_data = false;
-
-		/* Airtime-bounded UL send.
-		 *
-		 * A 1440-byte video fragment is ~2.2 ms on air at 6 Mbps. pcap_inject only
-		 * queues a frame into the driver — the airtime elapses later on the wire —
-		 * so the old `while (now < ul_deadline)` loop kept dequeuing and injecting
-		 * several fragments that then transmitted far past the UL slot, straight
-		 * into the master's beacon/DL window where the master is transmitting and
-		 * cannot receive (half duplex). That silently dropped most video and made
-		 * every multi-fragment keyframe impossible to reassemble (kf_rx=0). Bound
-		 * the slot by ESTIMATED AIRTIME instead, dequeuing (highest priority first)
-		 * only while the next frame still fits, so nothing overruns the slot. */
-		uint64_t air_budget = (sync->ul_slot_us > sync->guard_us)
-			? (uint64_t)(sync->ul_slot_us - sync->guard_us)
-			: (uint64_t)sync->ul_slot_us;
-		/* The DELAY_REQ injected just above also consumes slot airtime. */
-		uint64_t air_used = estimate_payload_airtime_us(DELAY_REQ_FRAME_SIZE);
-		while (now_us() < ul_deadline) {
-			uint8_t prio;
-			const radio_tx_slot_t *next = tx_peek_next(sched, &prio);
-			if (next == NULL)
-				break;
-			uint64_t air = estimate_payload_airtime_us(next->len);
-			if (air_used + air > air_budget)
-				break;  /* would overrun the slot; leave it for next superframe */
-			const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
-			if (slot == NULL)
-				break;
-			radio_stats_add_tx_airtime(stats,
-				tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
-			radio_stats_add_tx_packet(stats, prio);
-			air_used += air;
-			sent_data = true;
+	/* My UL slots. The slot map may contain our node_id more than once when the
+	 * master gives the video drone extra airtime inside one superframe. */
+	bool had_ul_slot = false;
+	bool keepalive_sent = false;
+	if (radio_sync_should_transmit_ul(sync)) {
+		for (uint8_t i = 0; i < sync->num_slots; i++) {
+			if (sync->slot_map[i] != sync->own_node_id)
+				continue;
+			had_ul_slot = true;
+			slave_tx_owned_slot(sync, sched, rxd, pcap, own_mac,
+				default_dst, rt, stats, i, &keepalive_sent);
 		}
-
-		if (!sent_data)
-			sync_inject_null_frame(pcap, own_mac);
-	} else if (sync->my_slot_index == 0xFF && radio_sync_should_transmit_ul(sync)) {
+	}
+	if (!had_ul_slot && radio_sync_should_transmit_ul(sync)) {
 		/* Bootstrap: synced but the master has not assigned us a UL slot yet.
 		 * The master only learns about a slave from its DELAY_REQ, but the normal
 		 * path above only sends DELAY_REQ once we already HAVE a slot — a
@@ -685,6 +785,36 @@ static void fix_system_clock(void)
 			 localtime(&build_epoch));
 		fprintf(stderr, "radiod: system clock was behind, set to "
 			"build time %s\n", buf);
+	}
+}
+
+/* radiod's TDMA cycle depends on sub-5ms scheduling: guard=2ms, UL slot=5ms.
+ * Under default SCHED_OTHER it competes for CPU with vcpd's rockit/MPP video
+ * pipeline threads on the same embedded core, and the kernel CFS scheduler
+ * gives no latency guarantee — field logs show radiod's own poll()/UL-slot
+ * timing occasionally blowing its budget by 10-20ms specifically once video
+ * streaming starts (the "sync: UL slot N overran"/"poll() woke ... late"
+ * diagnostics added to chase this), which is consistent with CPU contention
+ * rather than a constant clock-granularity offset (most cycles are on time;
+ * only occasional spikes appear, and they cluster with active encoding).
+ * SCHED_FIFO at a modest priority makes the kernel preempt normal-priority
+ * threads (including vcpd's) in favor of radiod whenever radiod is runnable,
+ * without starving anything actually real-time-critical on this system (there
+ * isn't any). Non-fatal if it fails (e.g. missing CAP_SYS_NICE) — radiod
+ * still runs, just without the latency guarantee. */
+#define RADIOD_RT_PRIORITY 20
+static void raise_scheduling_priority(void)
+{
+	struct sched_param param = { .sched_priority = RADIOD_RT_PRIORITY };
+
+	if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) {
+		fprintf(stderr, "radiod: SCHED_FIFO priority %d\n",
+			RADIOD_RT_PRIORITY);
+	} else {
+		fprintf(stderr,
+			"radiod: could not raise to SCHED_FIFO (%s); "
+			"running at normal priority, TDMA timing may jitter "
+			"under CPU load\n", strerror(errno));
 	}
 }
 
@@ -782,6 +912,8 @@ int main(int argc, char **argv)
 	fprintf(stderr, "radiod: build #%d (%s@%s) %s\n",
 		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE);
 	fprintf(stderr, "radiod: IPC listening on %s\n", cfg.sock_path);
+
+	raise_scheduling_priority();
 
 	/* ---- Wait for radio interface ---- */
 

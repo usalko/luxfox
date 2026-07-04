@@ -94,21 +94,21 @@ static void usage(const char *prog)
 }
 
 #define GW_MAX_NODES 254
-#define GW_VIDEO_REORDER_SLOTS 8
+#define GW_VIDEO_REORDER_SLOTS 32
 /*
  * Reorder hold for ordinary sequence holes (a lost P-frame): keep it short so a
  * loss only adds a little latency before we skip ahead.
  *
  * GW_VIDEO_KF_HOLD_MS is used ONLY while the missing frame is a keyframe that is
  * still being reassembled. vcpd sends delayed keyframe copies on the next couple
- * of frames (~100 ms and ~200 ms later), so with a 50 ms hold the gate always
+ * of frames (~100 ms and ~200 ms later), so with a short hold the gate always
  * skipped the keyframe BEFORE its copies arrived, wasting the redundancy and
  * causing a skip burst right after each keyframe (the visible "blinking"). Hold
  * long enough for the copies to land, but only when a keyframe is actually in
  * flight, so ordinary P-frame losses stay low-latency.
  */
-#define GW_VIDEO_REORDER_HOLD_MS 120
-#define GW_VIDEO_KF_HOLD_MS 300
+#define GW_VIDEO_REORDER_HOLD_MS 250
+#define GW_VIDEO_KF_HOLD_MS 600
 #define GW_VIDEO_DONE_WINDOW 64
 /*
  * Control refresh interval for held-stick RC state.
@@ -157,11 +157,15 @@ typedef struct {
 	uint32_t video_frames_rx;         /* fully assembled frames forwarded to cascade */
 	uint32_t video_keyframes_rx;      /* fully assembled keyframes */
 	uint32_t video_frags_rx;          /* video fragments received */
+	uint32_t video_frags_expected;    /* frag_total tallied once per frame (completed or expired) */
+	uint32_t video_frags_missing;     /* fragments never received via ANY of the redundant copies */
 	uint32_t video_frames_dropped;    /* incomplete frames that failed to reassemble */
 	uint32_t video_frames_incomplete; /* reassembly slots expired before completion */
 	uint32_t video_keyframes_lost;    /* incomplete reassembly slots flagged as keyframes */
 	uint32_t video_keyframe_flushes;  /* stale P-frame reassembly flushed on IDR */
 	uint32_t video_reorder_skips;     /* skipped seq holes after short hold timeout */
+	uint32_t video_wait_keyframe_drops; /* completed P-frames dropped while waiting for IDR */
+	uint32_t video_reorder_full_drops;  /* completed frames dropped because reorder queue was full */
 	uint32_t cascade_out_frames;
 	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
@@ -217,6 +221,9 @@ typedef struct {
 	bool has_last_ctrl;
 	gw_stats_t stats;
 } app_ctx_t;
+
+static bool slot_is_video(const frag_reassembly_slot_t *slot);
+static bool slot_has_keyframe_fragment(const frag_reassembly_slot_t *slot);
 
 static int parse_addr(const char *str, struct sockaddr_in *out)
 {
@@ -552,6 +559,216 @@ static void video_reorder_reset(video_reorder_ctx_t *vr)
 	memset(vr, 0, sizeof(*vr));
 }
 
+static uint8_t frag_slot_received_count(const frag_reassembly_slot_t *slot)
+{
+	uint8_t count = 0;
+
+	if (slot == NULL || !slot->active)
+		return 0;
+
+	for (uint8_t i = 0; i < slot->frag_total; i++) {
+		if (slot->received_mask & (1u << i))
+			count++;
+	}
+
+	return count;
+}
+
+static void frag_slot_missing_list(const frag_reassembly_slot_t *slot,
+				   char *buf, size_t buf_size)
+{
+	size_t used = 0;
+
+	if (buf == NULL || buf_size == 0)
+		return;
+	buf[0] = '\0';
+	if (slot == NULL || !slot->active)
+		return;
+
+	for (uint8_t i = 0; i < slot->frag_total; i++) {
+		if (slot->received_mask & (1u << i))
+			continue;
+		int written = snprintf(buf + used, buf_size - used,
+			used == 0 ? "%u" : ",%u", i);
+		if (written < 0 || (size_t)written >= buf_size - used)
+			break;
+		used += (size_t)written;
+	}
+}
+
+static unsigned int video_reorder_active_count(const video_reorder_ctx_t *vr)
+{
+	unsigned int active = 0;
+
+	if (vr == NULL)
+		return 0;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		if (vr->slots[i].active)
+			active++;
+	}
+
+	return active;
+}
+
+/* Compute simple checksum for debugging packet loss */
+static uint32_t compute_frag_checksum(const uint8_t *data, size_t len)
+{
+	uint32_t checksum = 0;
+	for (size_t i = 0; i < len; i++)
+		checksum = (checksum * 31 + data[i]) & 0xFFFFFFFFU;
+	return checksum;
+}
+
+static void log_video_frag_received(uint8_t src_node, uint16_t seq, uint8_t frag_idx,
+				    uint8_t frag_total, const uint8_t *payload,
+				    size_t payload_len, uint32_t received_mask)
+{
+	static uint32_t trace_count;
+	uint32_t checksum = compute_frag_checksum(payload, payload_len);
+	char recv_mask_str[64];
+	int pos = 0;
+
+	/* Only log every Nth fragment to avoid spam */
+	if (!(trace_count < 8 || (trace_count % 256U) == 0U)) {
+		trace_count++;
+		return;
+	}
+
+	/* Build received fragment mask string */
+	recv_mask_str[0] = '\0';
+	for (int i = 0; i < frag_total && i < 32; i++) {
+		if (received_mask & (1u << i)) {
+			pos += sprintf(recv_mask_str + pos, "%d,", i);
+		}
+	}
+	if (pos > 0)
+		recv_mask_str[pos - 1] = '\0';
+
+	fprintf(stderr,
+		"gw: video frag rx src=%u seq=%u frag=%u/%u checksum=0x%08x payload_len=%zu received=[%s]\n",
+		src_node, seq, frag_idx, frag_total, checksum, payload_len, recv_mask_str);
+	trace_count++;
+}
+
+static void log_video_frag_missing(const frag_reassembly_slot_t *slot,
+				   uint64_t now_ms)
+{
+	static uint32_t trace_count;
+	char missing[128];
+	char received[128];
+	int recv_pos = 0;
+
+	if (slot == NULL)
+		return;
+
+	if (!(trace_count < 16 || (trace_count % 256U) == 0U)) {
+		trace_count++;
+		return;
+	}
+
+	/* List missing fragments */
+	frag_slot_missing_list(slot, missing, sizeof(missing));
+
+	/* List received fragments with their checksums */
+	received[0] = '\0';
+	for (int i = 0; i < slot->frag_total && i < 32; i++) {
+		if (slot->received_mask & (1u << i)) {
+			uint32_t cs = compute_frag_checksum(
+				slot->fragments[i].payload,
+				slot->fragments[i].payload_len);
+			recv_pos += sprintf(received + recv_pos, "%u:0x%04x,", i, cs & 0xFFFFU);
+		}
+	}
+	if (recv_pos > 0)
+		received[recv_pos - 1] = '\0';
+
+	fprintf(stderr,
+		"gw: video frag missing src=%u seq=%u age=%llums recv=%u/%u missing=[%s] checksums=[%s] keyframe=%u\n",
+		slot->src_node, slot->seq,
+		(unsigned long long)(now_ms - slot->first_ts_ms),
+		(unsigned)frag_slot_received_count(slot),
+		(unsigned)slot->frag_total,
+		missing,
+		received,
+		slot_has_keyframe_fragment(slot) ? 1U : 0U);
+	trace_count++;
+}
+
+static void log_video_reassembly_expire(const frag_reassembly_slot_t *slot,
+					uint64_t now_ms)
+{
+	static uint32_t trace_count;
+	char missing[128];
+
+	if (slot == NULL)
+		return;
+	if (!(trace_count < 32 || (trace_count % 128U) == 0U)) {
+		trace_count++;
+		return;
+	}
+
+	frag_slot_missing_list(slot, missing, sizeof(missing));
+	fprintf(stderr,
+		"gw: video reassembly expire src=%u seq=%u age=%llums recv=%u/%u missing=[%s] keyframe=%u\n",
+		slot->src_node,
+		slot->seq,
+		(unsigned long long)(now_ms - slot->first_ts_ms),
+		(unsigned)frag_slot_received_count(slot),
+		(unsigned)slot->frag_total,
+		missing,
+		slot_has_keyframe_fragment(slot) ? 1U : 0U);
+	trace_count++;
+}
+
+static void log_video_reorder_skip(const app_ctx_t *ctx,
+				   uint16_t expected_seq,
+				   uint16_t next_ready_seq,
+				   uint32_t hold_ms,
+				   bool pending_keyframe,
+				   uint64_t wait_ms)
+{
+	static uint32_t trace_count;
+
+	if (!(trace_count < 32 || (trace_count % 128U) == 0U)) {
+		trace_count++;
+		return;
+	}
+
+	fprintf(stderr,
+		"gw: video reorder skip src=%u expect=%u have=%u hold=%u waited=%llums pending_kf=%u active=%u\n",
+		(unsigned)gw_addr_u16_to_u8(&ctx->gw, ctx->video_reorder.src_u16),
+		expected_seq,
+		next_ready_seq,
+		hold_ms,
+		(unsigned long long)wait_ms,
+		pending_keyframe ? 1U : 0U,
+		video_reorder_active_count(&ctx->video_reorder));
+	trace_count++;
+}
+
+static void log_video_reorder_full(const app_ctx_t *ctx,
+				   uint16_t seq,
+				   bool keyframe)
+{
+	static uint32_t trace_count;
+
+	if (!(trace_count < 32 || (trace_count % 128U) == 0U)) {
+		trace_count++;
+		return;
+	}
+
+	fprintf(stderr,
+		"gw: video reorder full src=%u seq=%u keyframe=%u next=%u active=%u wait_kf=%u\n",
+		(unsigned)gw_addr_u16_to_u8(&ctx->gw, ctx->video_reorder.src_u16),
+		seq,
+		keyframe ? 1U : 0U,
+		ctx->video_reorder.next_seq,
+		video_reorder_active_count(&ctx->video_reorder),
+		ctx->wait_for_keyframe ? 1U : 0U);
+	trace_count++;
+}
+
 static video_reorder_slot_t *video_reorder_find(video_reorder_ctx_t *vr, uint16_t seq)
 {
 	if (vr == NULL)
@@ -599,6 +816,24 @@ static video_reorder_slot_t *video_reorder_alloc(video_reorder_ctx_t *vr)
 	return NULL;
 }
 
+static video_reorder_slot_t *video_reorder_reclaim_for_keyframe(video_reorder_ctx_t *vr)
+{
+	video_reorder_slot_t *best = NULL;
+
+	if (vr == NULL)
+		return NULL;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		video_reorder_slot_t *slot = &vr->slots[i];
+		if (!slot->active || slot->keyframe)
+			continue;
+		if (best == NULL || slot->ready_ms < best->ready_ms)
+			best = slot;
+	}
+
+	return best;
+}
+
 static bool slot_is_video(const frag_reassembly_slot_t *slot)
 {
 	if (slot == NULL || !slot->active)
@@ -641,6 +876,17 @@ static void expire_reassembly_slots(app_ctx_t *ctx, uint64_t now_ms)
 			ctx->stats.video_frames_incomplete++;
 			if (slot_has_keyframe_fragment(slot))
 				ctx->stats.video_keyframes_lost++;
+			/* Log missing fragments with checksums of received ones */
+			log_video_frag_missing(slot, now_ms);
+			log_video_reassembly_expire(slot, now_ms);
+
+			/* This frame never completed: tally how many of its
+			 * fragments never arrived via ANY of the ~3 redundant
+			 * transmission attempts, for a real (not assumed) per-
+			 * fragment loss rate — see video_frags_missing in [stats]. */
+			ctx->stats.video_frags_expected += slot->frag_total;
+			ctx->stats.video_frags_missing +=
+				(uint32_t)(slot->frag_total - frag_slot_received_count(slot));
 		}
 
 		slot->active = false;
@@ -660,6 +906,7 @@ static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
 		 * blink until the next IDR. Hold P-frames back and resume only on a fresh
 		 * keyframe.
 		 */
+		ctx->stats.video_wait_keyframe_drops++;
 		return;
 	}
 
@@ -728,13 +975,17 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 		 * short hold to keep latency low.
 		 */
 		uint8_t src_node = gw_addr_u16_to_u8(&ctx->gw, vr->src_u16);
-		uint32_t hold = reassembly_has_pending_keyframe(&ctx->reassembly,
-								 src_node, vr->next_seq)
+		bool pending_keyframe = reassembly_has_pending_keyframe(&ctx->reassembly,
+							    src_node, vr->next_seq);
+		uint32_t hold = pending_keyframe
 				? GW_VIDEO_KF_HOLD_MS : GW_VIDEO_REORDER_HOLD_MS;
 		if ((now_ms - slot->ready_ms) < hold)
 			return;
 
 		if (seq_delta(slot->seq, vr->next_seq) > 0) {
+			log_video_reorder_skip(ctx, vr->next_seq, slot->seq,
+					       hold, pending_keyframe,
+					       now_ms - slot->ready_ms);
 			ctx->stats.video_reorder_skips += (uint16_t)(slot->seq - vr->next_seq);
 			ctx->wait_for_keyframe = true;
 			if (!ctx->idr_request_in_flight) {
@@ -793,8 +1044,12 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 		return;
 
 	video_reorder_slot_t *slot = video_reorder_alloc(vr);
+	if (slot == NULL && keyframe)
+		slot = video_reorder_reclaim_for_keyframe(vr);
 	if (slot == NULL) {
 		ctx->stats.video_frames_dropped++;
+		ctx->stats.video_reorder_full_drops++;
+		log_video_reorder_full(ctx, seq, keyframe);
 		return;
 	}
 
@@ -865,8 +1120,19 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			continue;
 
 		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, now_ms());
-		if (uf.traffic_class == ULAMA_CLASS_VIDEO)
+		if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 			ctx->stats.video_frags_rx++;
+			/* Log fragment reception with checksum for debugging */
+			if (ctx->verbose) {
+				frag_reassembly_slot_t *slot = 
+					frag_reassembly_find_slot(&ctx->reassembly, uf.src_node, uf.seq);
+				if (slot) {
+					log_video_frag_received(uf.src_node, uf.seq, uf.frag_idx,
+							       uf.frag_total, uf.payload, uf.payload_len,
+							       slot->received_mask);
+				}
+			}
+		}
 
 		if (complete) {
 			static uint8_t reassembled[FRAG_MAX_REASSEMBLED];
@@ -883,6 +1149,10 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 			if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 				bool kf = (uf.flags & ULAMA_FLAG_VIDEO_KEYFRAME) ||
 					  video_is_keyframe(reassembled, reassembled_len);
+
+				/* All frag_total fragments arrived (that's what "complete"
+				 * means), so this frame contributes 0 to video_frags_missing. */
+				ctx->stats.video_frags_expected += uf.frag_total;
 
 				video_done_add(ctx, uf.src_node, uf.seq);
 
@@ -1117,6 +1387,15 @@ int main(int argc, char *argv[])
 		/* Second pass: catch any cascade frames that arrived during RX */
 		handle_cascade_rx(&ctx);
 		maybe_send_ctrl_keepalive(&ctx, ts);
+
+		/* Refresh: handle_ulama_rx() just stamped slot->ready_ms/first_ts_ms
+		 * via its own now_ms() calls while draining up to 128 packets, which
+		 * can already read later than the loop-top ts (millisecond clock
+		 * granularity makes even a single call land 1ms ahead). Comparing
+		 * those against the stale ts underflows the unsigned "elapsed" math
+		 * below to ~2^64, which showed up as insane age/waited values in the
+		 * reorder-skip and reassembly-expire logs. */
+		ts = now_ms();
 		flush_video_reorder(&ctx, ts);
 
 		/* Print stats every 5 seconds */
@@ -1125,14 +1404,27 @@ int main(int argc, char *argv[])
 			uint64_t dt = ts - s->last_print_ms;
 			uint32_t vbps = (uint32_t)(s->video_bytes_out * 8000 / (dt > 0 ? dt : 1));
 			int avg_rssi = s->rssi_count > 0 ? (int)(s->rssi_sum / (int32_t)s->rssi_count) : 0;
+			/* Real end-to-end per-fragment loss: fragments never received via
+			 * ANY of the ~3 redundant transmission attempts, over all fragments
+			 * the sender declared (frag_total) across completed+expired frames.
+			 * One decimal place of percent (permille/10) — enough to tell 0.1%
+			 * from 1% from 20% apart without floating point. */
+			uint32_t frag_loss_x10 = s->video_frags_expected > 0
+				? (uint32_t)(((uint64_t)s->video_frags_missing * 1000)
+					     / s->video_frags_expected)
+				: 0;
 			char _ts[9]; { time_t _t = time(NULL); strftime(_ts, sizeof(_ts), "%H:%M:%S", localtime(&_t)); }
 			fprintf(stderr, "%s [stats] video_rx=%u telem_rx=%u ctrl_rx=%u ctrl_tx=%u | "
-				"video frames_rx=%u kf_rx=%u frags_rx=%u dropped=%u incomplete=%u kf_lost=%u kf_flushes=%u reorder_skip=%u | "
+				"video frames_rx=%u kf_rx=%u frags_rx=%u dropped=%u incomplete=%u kf_lost=%u kf_flushes=%u reorder_skip=%u wait_kf_drop=%u rfull=%u "
+				"frag_loss=%u.%u%%(%u/%u) | "
 				"video_out=%u Kbit/s | rssi=%d\n",
 				_ts, s->ulama_rx_video, s->ulama_rx_telem, s->ulama_rx_ctrl, s->ctrl_tx,
 				s->video_frames_rx, s->video_keyframes_rx, s->video_frags_rx, s->video_frames_dropped,
 				s->video_frames_incomplete, s->video_keyframes_lost,
 				s->video_keyframe_flushes, s->video_reorder_skips,
+				s->video_wait_keyframe_drops, s->video_reorder_full_drops,
+				frag_loss_x10 / 10, frag_loss_x10 % 10,
+				s->video_frags_missing, s->video_frags_expected,
 				vbps / 1000, avg_rssi);
 			/* Per-node summary */
 			bool any_node = false;

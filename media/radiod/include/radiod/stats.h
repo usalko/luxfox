@@ -48,6 +48,12 @@ typedef struct {
 	uint8_t  num_slots;
 	uint8_t  my_slot_index;
 	uint8_t  num_known_slaves;
+	uint8_t  sync_phase_valid;
+	int64_t  sync_phase_last_us;
+	int64_t  sync_phase_max_abs_us;
+	uint8_t  sync_pll_valid;
+	int64_t  sync_pll_filtered_us;
+	int64_t  sync_pll_corr_us;
 } radio_stats_t;
 
 void radio_stats_init(radio_stats_t *st, int64_t now_us);

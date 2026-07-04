@@ -103,13 +103,15 @@ static void test_two_node_join_and_promote(void)
 	bool promoted = false;
 	for (int i = 0; i < 3 * SYNC_BOOTSTRAP_PERIOD && !promoted; i++) {
 		run_superframe(&master, &slave, &t, false);
-		if (master.num_slots == 1 && slave.my_slot_index != 0xFF)
+		if (slave.my_slot_index != 0xFF)
 			promoted = true;
 	}
 
 	CHECK(promoted);
 	CHECK(master.num_known_slaves == 1);
+	CHECK(master.num_slots == 2);
 	CHECK(master.slot_map[0] == 1);
+	CHECK(master.slot_map[1] == 1);
 	CHECK(slave.current_master_id == 254);
 	CHECK(radio_sync_should_transmit_ul(&slave));
 }
@@ -138,7 +140,7 @@ static void test_bootstrap_gap_survives_realistic_cycle_overhead(void)
 	radio_sync_on_delay_req_rx(&master, &dreq, t);
 	radio_sync_update_slot_map(&master, t);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 
 	/* Advance through a full bootstrap_period's worth of superframes
 	 * with NO further heartbeat from the slave — the worst case for a
@@ -147,7 +149,7 @@ static void test_bootstrap_gap_survives_realistic_cycle_overhead(void)
 		t += real_step_us(&master);
 		radio_sync_update_slot_map(&master, t);
 		CHECK(master.num_known_slaves == 1);
-		CHECK(master.num_slots == 1);
+		CHECK(master.num_slots == 2);
 	}
 }
 
@@ -168,7 +170,7 @@ static void test_slotted_slave_tolerates_one_dropped_delay_req(void)
 	bool promoted = false;
 	for (int i = 0; i < 3 * SYNC_BOOTSTRAP_PERIOD && !promoted; i++) {
 		run_superframe(&master, &slave, &t, false);
-		if (master.num_slots == 1 && slave.my_slot_index != 0xFF)
+		if (slave.my_slot_index != 0xFF)
 			promoted = true;
 	}
 	CHECK(promoted);
@@ -176,11 +178,11 @@ static void test_slotted_slave_tolerates_one_dropped_delay_req(void)
 	/* Drop exactly one DELAY_REQ, then resume normal heartbeats. */
 	run_superframe(&master, &slave, &t, true);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 
 	run_superframe(&master, &slave, &t, false);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 	CHECK(slave.my_slot_index != 0xFF);
 }
 
@@ -203,7 +205,7 @@ static void test_long_run_no_flapping_after_promotion(void)
 		run_superframe(&master, &slave, &t, false);
 
 		if (!promoted) {
-			if (master.num_slots == 1 && slave.my_slot_index != 0xFF) {
+			if (slave.my_slot_index != 0xFF) {
 				promoted = true;
 				promote_cycle = i;
 			}
@@ -213,8 +215,9 @@ static void test_long_run_no_flapping_after_promotion(void)
 		/* Once promoted, this must never regress for the rest of
 		 * the run: no spurious staleness purge, no slot churn. */
 		CHECK(master.num_known_slaves == 1);
-		CHECK(master.num_slots == 1);
+		CHECK(master.num_slots == 2);
 		CHECK(master.slot_map[0] == 1);
+		CHECK(master.slot_map[1] == 1);
 		CHECK(slave.my_slot_index == 0);
 		CHECK(master.role == RADIO_ROLE_MASTER);
 		CHECK(slave.role == RADIO_ROLE_SLAVE);
@@ -266,14 +269,19 @@ static void test_multi_slave_cold_start(void)
 	}
 
 	CHECK(master.num_known_slaves == 3);
-	CHECK(master.num_slots == 3);
+	CHECK(master.num_slots == 4);
 	CHECK(master.slot_map[0] == 1);
-	CHECK(master.slot_map[1] == 2);
-	CHECK(master.slot_map[2] == 3);
+	CHECK(master.slot_map[2] == 1);
+	CHECK((master.slot_map[1] == 2 && master.slot_map[3] == 3) ||
+	      (master.slot_map[1] == 3 && master.slot_map[3] == 2));
 	for (int i = 0; i < 3; i++) {
 		CHECK(slaves[i].current_master_id == 254);
-		CHECK(slaves[i].my_slot_index == (uint8_t)i);
 	}
+	CHECK(slaves[0].my_slot_index == 0);
+	CHECK(slaves[1].my_slot_index != 0xFF);
+	CHECK(slaves[2].my_slot_index != 0xFF);
+	CHECK(master.slot_map[slaves[1].my_slot_index] == 2);
+	CHECK(master.slot_map[slaves[2].my_slot_index] == 3);
 }
 
 int main(void)

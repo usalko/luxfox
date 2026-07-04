@@ -2,6 +2,7 @@
 #include "radiod/sync.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -139,7 +140,7 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 			? role_names[st->current_role] : "?";
 		const char *sn = st->sync_state <= 5 ? state_names[st->sync_state] : "?";
 		fprintf(stderr,
-			" sync[role=%s state=%s master=%u tx=%u rx=%u relay=%u dreq=%u slots=%u my=%u known=%u]",
+			" sync[role=%s state=%s master=%u tx=%u rx=%u relay=%u dreq=%u slots=%u my=%u known=%u",
 			rn, sn,
 			st->current_master,
 			st->sync_tx, st->sync_rx, st->sync_relay,
@@ -147,6 +148,17 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 			st->num_slots,
 			st->my_slot_index,
 			st->num_known_slaves);
+		if (st->sync_phase_valid) {
+			fprintf(stderr, " phase[last=%+lld max=%lld]",
+				(long long)st->sync_phase_last_us,
+				(long long)st->sync_phase_max_abs_us);
+		}
+		if (st->sync_pll_valid) {
+			fprintf(stderr, " pll[filt=%+lld corr=%+lld]",
+				(long long)st->sync_pll_filtered_us,
+				(long long)st->sync_pll_corr_us);
+		}
+		fprintf(stderr, "]");
 	}
 
 	if (rxd != NULL && (rxd->stats.rx_sync > 0 ||
@@ -197,4 +209,16 @@ void radio_stats_update_sync(radio_stats_t *st,
 	st->num_slots = s->num_slots;
 	st->my_slot_index = s->my_slot_index;
 	st->num_known_slaves = s->num_known_slaves;
+	if (s->last_beacon_phase_error_valid) {
+		int64_t abs_phase = llabs(s->last_beacon_phase_error_us);
+		st->sync_phase_valid = 1;
+		st->sync_phase_last_us = s->last_beacon_phase_error_us;
+		if (abs_phase > st->sync_phase_max_abs_us)
+			st->sync_phase_max_abs_us = abs_phase;
+	}
+	if (s->period_correction_valid) {
+		st->sync_pll_valid = 1;
+		st->sync_pll_filtered_us = s->filtered_phase_error_us;
+		st->sync_pll_corr_us = s->period_correction_us;
+	}
 }

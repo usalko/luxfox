@@ -1177,6 +1177,12 @@ memset(slot_map, 0, sizeof(slot_map))
 num_slots = min(n_active, SYNC_MAX_SLOTS)
 for i = 0..num_slots-1:
     slot_map[i] = active_ids[i]
+
+// Текущая policy для целевой topology 1 master + 4 slaves:
+// если активен video-slave с node_id=1, мастер дублирует его в двух
+// UL-слотах одного суперкадра. Остальные слейвы получают по одному слоту,
+// а порядок второстепенных слотов может ротироваться между суперкадрами
+// ради fairness при нехватке 4 слотов на всех одновременно.
 ```
 
 **`radio_sync_compute_timing(s, local_now_us)`**:
@@ -1247,7 +1253,7 @@ return true
 6. `test_master_yields_to_higher` — мастер (5) получает SYNC(10) → SLAVE
 7. `test_slave_miss_threshold` — 3 пропущенных SYNC → CANDIDATE
 8. `test_slave_lost_threshold` — 10 пропущенных → перевыборы
-9. `test_slot_map_assignment` — 3 active slaves → slot_map = [1,2,3,0]
+9. `test_slot_map_assignment` — 3 active slaves c priority node=1 → slot_map = [1,2,1,3]
 10. `test_compute_timing_slot0` — проверить my_ul_start для slot 0
 11. `test_compute_timing_slot2` — проверить my_ul_start для slot 2
 12. `test_compute_timing_no_slot` — own не в slot_map → my_slot_index=0xFF
@@ -1258,6 +1264,7 @@ return true
 17. `test_relay_prepare` — origin_time пересчитан, hops++, sender=own
 18. `test_role_change_counter` — каждая смена роли инкрементирует
 19. `test_cold_start_5_nodes` — симуляция 5 узлов, проверить что node_id=5 побеждает
+20. `test_priority_slot_rotation_with_four_slaves` — у priority node два UL-слота, остальные ротируются
 20. `test_master_loss_and_reelection` — node5 пропал, node4 становится мастером
 
 ---

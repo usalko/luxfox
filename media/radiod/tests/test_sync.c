@@ -132,12 +132,12 @@ static void test_slot_map_assignment(void)
 		now += 100;
 	}
 	radio_sync_update_slot_map(&s, now);
-	CHECK(s.num_slots == 3);
+	CHECK(s.num_slots == 4);
 	CHECK(s.slot_map[0] == 1);
 	CHECK(s.slot_map[1] == 2);
-	CHECK(s.slot_map[2] == 3);
-	CHECK(s.slot_map[3] == 0);
-	CHECK(s.superframe_period_us == expected_period(2000, 3, 2000, 300));
+	CHECK(s.slot_map[2] == 1);
+	CHECK(s.slot_map[3] == 3);
+	CHECK(s.superframe_period_us == expected_period(2000, 4, 2000, 300));
 }
 
 static void test_compute_timing_slot0(void)
@@ -199,8 +199,86 @@ static void test_adaptive_period_tracks_observed_interval(void)
 	CHECK(!s.period_correction_valid);
 	radio_sync_on_sync_rx(&s, &f2, 112300, 5); /* +300 us vs nominal 12000 */
 	CHECK(s.period_correction_valid);
-	CHECK(s.period_correction_us > 0);
+	CHECK(s.filtered_phase_error_us == 300);
+	CHECK(s.period_correction_us == 2);
 	CHECK(s.superframe_period_us > expected_period(2000, 0, 2000, 300));
+}
+
+static void test_beacon_phase_error_tracks_prediction(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f1 = make_sync(5, 10, 0);
+	sync_frame_t f2 = make_sync(5, 11, 0);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f1, 100000, 5));
+	CHECK(!s.last_beacon_phase_error_valid);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f2, 112300, 5));
+	CHECK(s.last_beacon_phase_error_valid);
+	CHECK(s.last_beacon_phase_error_us == 300);
+	CHECK(s.predicted_anchor_us == s.last_sync_rx_us);
+	CHECK(s.predicted_anchor_us == 112300);
+	CHECK(s.filtered_phase_error_us == 300);
+	CHECK(s.period_correction_us == 2);
+}
+
+static void test_pll_ignores_large_phase_jump(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f1 = make_sync(5, 10, 0);
+	sync_frame_t f2 = make_sync(5, 11, 0);
+	sync_frame_t f3 = make_sync(5, 12, 0);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f1, 100000, 5));
+	CHECK(radio_sync_on_sync_rx(&s, &f2, 112300, 5));
+	CHECK(s.filtered_phase_error_us == 300);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f3, 136000, 5)); /* big positive jump */
+	CHECK(s.last_beacon_phase_error_valid);
+	CHECK(s.last_beacon_phase_error_us > SYNC_PLL_PHASE_GATE_US);
+	CHECK(s.filtered_phase_error_us == 300);
+	CHECK(s.period_correction_us == 2);
+}
+
+static void test_pll_ignores_resync_after_miss(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f1 = make_sync(5, 10, 0);
+	sync_frame_t f2 = make_sync(5, 11, 0);
+	sync_frame_t f3 = make_sync(5, 13, 0);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f1, 100000, 5));
+	CHECK(radio_sync_on_sync_rx(&s, &f2, 112300, 5));
+	CHECK(s.filtered_phase_error_us == 300);
+
+	radio_sync_on_beacon_timeout(&s, 124300);
+	CHECK(s.missed_beacons == 1);
+	CHECK(radio_sync_on_sync_rx(&s, &f3, 136600, 5));
+	CHECK(s.filtered_phase_error_us == 300);
+	CHECK(s.period_correction_us == 2);
+}
+
+static void test_pll_correction_slew_limited(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f1 = make_sync(5, 10, 0);
+	sync_frame_t f2 = make_sync(5, 11, 0);
+	sync_frame_t f3 = make_sync(5, 12, 0);
+
+	CHECK(radio_sync_on_sync_rx(&s, &f1, 100000, 5));
+	CHECK(radio_sync_on_sync_rx(&s, &f2, 112300, 5));
+
+	s.filtered_phase_error_us = 1600;
+	s.period_correction_us = 0;
+	s.period_correction_valid = true;
+
+	CHECK(radio_sync_on_sync_rx(&s, &f3, 125902, 5)); /* +1600 us */
+	CHECK(s.filtered_phase_error_us == 1600);
+	CHECK(s.period_correction_us == SYNC_PLL_CORR_STEP_MAX_US);
 }
 
 static void test_bootstrap_window_extends_period(void)
@@ -261,6 +339,28 @@ static void test_delay_req_generation(void)
 	CHECK(s.delay_req_tx_count == 2);
 }
 
+static void test_slotted_delay_req_keepalive_periodic(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 1, 2000, 2000, 300);
+	sync_frame_t f = make_sync(5, 8, 0);
+	f.num_slots = 1;
+	f.slot_map[0] = 1;
+	radio_sync_on_sync_rx(&s, &f, 500, 5);
+	delay_req_frame_t dreq;
+	CHECK(radio_sync_build_delay_req(&s, &dreq, 1000));
+	CHECK(dreq.superframe_seq == 8);
+
+	f.superframe_seq = 9;
+	radio_sync_on_sync_rx(&s, &f, 12500, 5);
+	CHECK(!radio_sync_build_delay_req(&s, &dreq, 13000));
+
+	f.superframe_seq = 16;
+	radio_sync_on_sync_rx(&s, &f, 25000, 5);
+	CHECK(radio_sync_build_delay_req(&s, &dreq, 25500));
+	CHECK(dreq.superframe_seq == 16);
+}
+
 static void test_beacon_contains_slot_map_and_no_delay_resp(void)
 {
 	radio_sync_t s;
@@ -276,8 +376,9 @@ static void test_beacon_contains_slot_map_and_no_delay_resp(void)
 	radio_sync_update_slot_map(&s, 100600);
 	sync_frame_t beacon;
 	radio_sync_build_beacon(&s, &beacon, 101000);
-	CHECK(beacon.num_slots == 1);
+	CHECK(beacon.num_slots == 2);
 	CHECK(beacon.slot_map[0] == 1);
+	CHECK(beacon.slot_map[1] == 1);
 	CHECK(beacon.relay_hops == 0);
 	CHECK(beacon.master_node_id == 5);
 	CHECK(beacon.sender_node_id == 5);
@@ -318,14 +419,16 @@ static void test_bootstrap_join_promotes_slave_to_slotted(void)
 	radio_sync_on_delay_req_rx(&master, &dreq,
 		beacon1.superframe_seq * 1000 + 100);
 	radio_sync_update_slot_map(&master, beacon1.superframe_seq * 1000 + 200);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 	CHECK(master.slot_map[0] == 1);
+	CHECK(master.slot_map[1] == 1);
 
 	sync_frame_t beacon2;
 	radio_sync_build_beacon(&master, &beacon2, 2000);
 	CHECK(beacon2.superframe_seq == SYNC_BOOTSTRAP_PERIOD + 1);
-	CHECK(beacon2.num_slots == 1);
+	CHECK(beacon2.num_slots == 2);
 	CHECK(beacon2.slot_map[0] == 1);
+	CHECK(beacon2.slot_map[1] == 1);
 
 	CHECK(radio_sync_on_sync_rx(&slave, &beacon2, 17000, 254));
 	CHECK(slave.my_slot_index == 0);
@@ -365,15 +468,50 @@ static void test_master_ul_packet_refreshes_known_slave(void)
 	radio_sync_on_delay_req_rx(&master, &dreq, 100000);
 	radio_sync_update_slot_map(&master, 100100);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 
-	/* Without a fresh DELAY_REQ the node would age out around 112ms.
-	 * A normal ULAMA packet must refresh liveness too. */
+	/* A normal ULAMA packet must refresh liveness too. */
 	radio_sync_on_ul_packet_rx(&master, 1, 180000);
 	radio_sync_update_slot_map(&master, 230000);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 1);
+	CHECK(master.num_slots == 2);
 	CHECK(master.slot_map[0] == 1);
+	CHECK(master.slot_map[1] == 1);
+}
+
+static void test_priority_slot_rotation_with_four_slaves(void)
+{
+	radio_sync_t s;
+	radio_sync_init(&s, 254, 2000, 2000, 300);
+	radio_sync_tick(&s, 0);
+	radio_sync_tick(&s, SYNC_ELECTION_TIMEOUT_US);
+
+	int64_t now = SYNC_ELECTION_TIMEOUT_US + 1000;
+	const uint8_t ids[] = {1, 3, 4, 5};
+	for (size_t i = 0; i < sizeof(ids); i++) {
+		delay_req_frame_t dreq = {
+			.requester_node_id = ids[i],
+			.target_node_id = 254,
+			.superframe_seq = 1,
+		};
+		radio_sync_on_delay_req_rx(&s, &dreq, now);
+		now += 100;
+	}
+
+	s.superframe_seq = 0;
+	radio_sync_update_slot_map(&s, now);
+	CHECK(s.num_slots == 4);
+	CHECK(s.slot_map[0] == 1);
+	CHECK(s.slot_map[1] == 3);
+	CHECK(s.slot_map[2] == 1);
+	CHECK(s.slot_map[3] == 4);
+
+	s.superframe_seq = 1;
+	radio_sync_update_slot_map(&s, now + 1000);
+	CHECK(s.slot_map[0] == 1);
+	CHECK(s.slot_map[1] == 4);
+	CHECK(s.slot_map[2] == 1);
+	CHECK(s.slot_map[3] == 5);
 }
 
 static void test_master_ul_packet_does_not_add_unknown_slave(void)
@@ -491,16 +629,18 @@ static void test_master_loss_and_reelection(void)
 	radio_sync_on_sync_rx(&node4, &f5, now + 500, 5);
 	CHECK(node1.role == RADIO_ROLE_SLAVE);
 	CHECK(node4.role == RADIO_ROLE_SLAVE);
+	int64_t last_timeout_us = 0;
 	for (int i = 0; i < SYNC_LOST_THRESHOLD; i++) {
-		radio_sync_on_beacon_timeout(&node1, now + 1000 + i * 5000);
-		radio_sync_on_beacon_timeout(&node4, now + 1000 + i * 5000);
+		last_timeout_us = now + 1000 + i * 5000;
+		radio_sync_on_beacon_timeout(&node1, last_timeout_us);
+		radio_sync_on_beacon_timeout(&node4, last_timeout_us);
 	}
 	CHECK(node1.role == RADIO_ROLE_CANDIDATE);
 	CHECK(node4.role == RADIO_ROLE_CANDIDATE);
-	radio_sync_tick(&node1, now + 60000);
-	radio_sync_tick(&node4, now + 60000);
-	radio_sync_tick(&node1, now + 60000 + SYNC_ELECTION_TIMEOUT_US);
-	radio_sync_tick(&node4, now + 60000 + SYNC_ELECTION_TIMEOUT_US);
+	radio_sync_tick(&node1, last_timeout_us + 60000);
+	radio_sync_tick(&node4, last_timeout_us + 60000);
+	radio_sync_tick(&node1, last_timeout_us + 60000 + SYNC_ELECTION_TIMEOUT_US);
+	radio_sync_tick(&node4, last_timeout_us + 60000 + SYNC_ELECTION_TIMEOUT_US);
 	CHECK(node4.role == RADIO_ROLE_MASTER);
 	CHECK(node1.role == RADIO_ROLE_MASTER);
 	sync_frame_t f4 = make_sync(4, 1, 0);
@@ -553,15 +693,21 @@ int main(void)
 		{"compute_timing_slot2", test_compute_timing_slot2},
 		{"compute_timing_no_slot", test_compute_timing_no_slot},
 		{"adaptive_period_tracks_observed_interval", test_adaptive_period_tracks_observed_interval},
+		{"beacon_phase_error_tracks_prediction", test_beacon_phase_error_tracks_prediction},
+		{"pll_ignores_large_phase_jump", test_pll_ignores_large_phase_jump},
+		{"pll_ignores_resync_after_miss", test_pll_ignores_resync_after_miss},
+		{"pll_correction_slew_limited", test_pll_correction_slew_limited},
 		{"bootstrap_window_extends_period", test_bootstrap_window_extends_period},
 		{"dedup_rejects_duplicate_sync", test_dedup_rejects_duplicate_sync},
 		{"dedup_passes_new_seq", test_dedup_passes_new_seq},
 		{"delay_req_generation", test_delay_req_generation},
+		{"slotted_delay_req_keepalive_periodic", test_slotted_delay_req_keepalive_periodic},
 		{"beacon_contains_slot_map_and_no_delay_resp", test_beacon_contains_slot_map_and_no_delay_resp},
 		{"bootstrap_join_promotes_slave_to_slotted", test_bootstrap_join_promotes_slave_to_slotted},
 		{"relay_prepare", test_relay_prepare},
 		{"master_ul_packet_refreshes_known_slave", test_master_ul_packet_refreshes_known_slave},
 		{"master_ul_packet_does_not_add_unknown_slave", test_master_ul_packet_does_not_add_unknown_slave},
+		{"priority_slot_rotation_with_four_slaves", test_priority_slot_rotation_with_four_slaves},
 		{"holdover_tx_then_rx_only_then_candidate", test_holdover_tx_then_rx_only_then_candidate},
 		{"resync_exits_holdover", test_resync_exits_holdover},
 		{"role_change_counter", test_role_change_counter},

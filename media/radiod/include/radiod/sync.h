@@ -7,17 +7,34 @@
 
 #define SYNC_ELECTION_TIMEOUT_US   500000
 #define SYNC_BEACON_INTERVAL_US    12000
-#define SYNC_BEACON_SLACK_US       2000
+#define SYNC_BEACON_SLACK_US       4000
 #define SYNC_MISS_THRESHOLD        3
-#define SYNC_LOST_THRESHOLD        10
+#define SYNC_LOST_THRESHOLD        20
 #define SYNC_HOLDOVER_TX_MAX       8
-#define SYNC_SLAVE_TIMEOUT_US      300000
-#define SYNC_PERIOD_CORR_SHIFT     3
+#define SYNC_DELAY_REQ_KEEPALIVE_PERIOD 8
+/* Once slotted, a slave's ONLY scheduled heartbeat (when its TX queue is
+ * otherwise empty) is a DELAY_REQ every SYNC_DELAY_REQ_KEEPALIVE_PERIOD
+ * superframes. With the production defaults (dl=1500 ul=5000 guard=2000,
+ * 2 slots for the priority node) a superframe is ~17.5ms, so that keepalive
+ * lands roughly every 140ms. A timeout of 300000us left under 2.2 keepalive
+ * intervals of margin — one lost keepalive during the noisy first seconds
+ * after radio-up (build #401 field log: repeated "timed out"/"joined"
+ * pairs for ~25s before the link settled) was enough to evict a slave that
+ * never actually left. 450000us restores ~3 intervals of margin against
+ * that specific cold-start jitter while still detecting a genuinely
+ * departed slave in well under a second. */
+#define SYNC_SLAVE_TIMEOUT_US      450000
+#define SYNC_PLL_ERROR_EMA_SHIFT   5
+#define SYNC_PLL_CORR_SHIFT        7
+#define SYNC_PLL_CORR_STEP_MAX_US  5
 #define SYNC_PERIOD_CORR_MAX_US    1500
+#define SYNC_PLL_PHASE_GATE_US     2000
 #define SYNC_BOOTSTRAP_WINDOW_US   4000
 #define SYNC_BOOTSTRAP_PERIOD      8
 #define SYNC_DEDUP_WINDOW          32
 #define SYNC_MAX_NODES             5
+#define SYNC_PRIORITY_NODE_ID      1
+#define SYNC_PRIORITY_SLOT_WEIGHT  2
 
 typedef enum {
     RADIO_ROLE_CANDIDATE = 0,
@@ -61,6 +78,9 @@ typedef struct {
     clock_sync_t     clock;
     uint8_t          missed_beacons;
     int64_t          last_sync_rx_us;
+    int64_t          last_beacon_phase_error_us;
+    bool             last_beacon_phase_error_valid;
+    int64_t          filtered_phase_error_us;
     int64_t          predicted_anchor_us;
     int64_t          superframe_period_us;
     int64_t          period_correction_us;

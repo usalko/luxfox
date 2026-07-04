@@ -45,6 +45,19 @@ static int64_t clamp_period_correction(int64_t correction_us)
 	return correction_us;
 }
 
+static int64_t limit_period_correction_step(int64_t prev_correction_us,
+					     int64_t target_correction_us)
+{
+	int64_t delta = target_correction_us - prev_correction_us;
+
+	if (delta > SYNC_PLL_CORR_STEP_MAX_US)
+		delta = SYNC_PLL_CORR_STEP_MAX_US;
+	else if (delta < -SYNC_PLL_CORR_STEP_MAX_US)
+		delta = -SYNC_PLL_CORR_STEP_MAX_US;
+
+	return prev_correction_us + delta;
+}
+
 static int64_t compute_slave_superframe_period_us(const radio_sync_t *s, uint32_t seq)
 {
 	int64_t period = compute_superframe_period_us(s, seq);
@@ -60,34 +73,55 @@ static int64_t compute_slave_superframe_period_us(const radio_sync_t *s, uint32_
 	return period;
 }
 
-static void update_slave_period_correction(radio_sync_t *s,
-					   uint32_t prev_seq,
-					   int64_t prev_rx_us,
-					   uint32_t new_seq,
-					   int64_t new_rx_us)
+static void update_slave_phase_pll(radio_sync_t *s, int64_t raw_phase_error_us)
 {
+	int64_t prev_correction_us;
+	int64_t target_correction_us;
+
 	if (s == NULL)
 		return;
-	if (prev_rx_us == 0)
-		return;
-	if (new_seq != prev_seq + 1U)
-		return;
 
-	int64_t observed = new_rx_us - prev_rx_us;
-	int64_t expected = compute_superframe_period_us(s, prev_seq);
-	int64_t error = observed - expected;
-
-	if (error > SYNC_PERIOD_CORR_MAX_US || error < -SYNC_PERIOD_CORR_MAX_US)
-		return;
+	prev_correction_us = s->period_correction_valid
+		? s->period_correction_us : 0;
 
 	if (!s->period_correction_valid) {
-		s->period_correction_us = error;
+		s->filtered_phase_error_us = raw_phase_error_us;
 		s->period_correction_valid = true;
 	} else {
-		s->period_correction_us +=
-			(error - s->period_correction_us) >> SYNC_PERIOD_CORR_SHIFT;
+		s->filtered_phase_error_us +=
+			(raw_phase_error_us - s->filtered_phase_error_us) >> SYNC_PLL_ERROR_EMA_SHIFT;
 	}
-	s->period_correction_us = clamp_period_correction(s->period_correction_us);
+	target_correction_us = clamp_period_correction(
+		s->filtered_phase_error_us >> SYNC_PLL_CORR_SHIFT);
+	s->period_correction_us = limit_period_correction_step(prev_correction_us,
+		target_correction_us);
+}
+
+static bool should_update_slave_phase_pll(const radio_sync_t *s,
+					      int64_t phase_error_us,
+					      const sync_frame_t *frame,
+					      uint32_t prev_seq)
+{
+	if (s == NULL || frame == NULL)
+		return false;
+	if (s->missed_beacons != 0)
+		return false;
+	if (frame->superframe_seq != prev_seq + 1U)
+		return false;
+	if (frame->dl_duration_us != s->dl_duration_us)
+		return false;
+	if (frame->ul_slot_us != s->ul_slot_us)
+		return false;
+	if (frame->guard_us != s->guard_us)
+		return false;
+	if (frame->num_slots != s->num_slots)
+		return false;
+	if (memcmp(frame->slot_map, s->slot_map, SYNC_MAX_SLOTS) != 0)
+		return false;
+	if (phase_error_us > SYNC_PLL_PHASE_GATE_US ||
+	    phase_error_us < -SYNC_PLL_PHASE_GATE_US)
+		return false;
+	return true;
 }
 
 static void reset_to_candidate(radio_sync_t *s, int64_t now_us, const char *reason)
@@ -101,7 +135,13 @@ static void reset_to_candidate(radio_sync_t *s, int64_t now_us, const char *reas
 	s->current_master_id = 0;
 	s->missed_beacons = 0;
 	s->last_sync_rx_us = 0;
+	s->last_beacon_phase_error_us = 0;
+	s->last_beacon_phase_error_valid = false;
+	s->filtered_phase_error_us = 0;
 	s->predicted_anchor_us = 0;
+	s->superframe_period_us = 0;
+	s->period_correction_us = 0;
+	s->period_correction_valid = false;
 	s->next_superframe_us = 0;
 	s->my_ul_start_us = 0;
 	s->my_ul_end_us = 0;
@@ -176,13 +216,86 @@ static sync_slave_info_t *alloc_slave(radio_sync_t *s, uint8_t node_id,
 	return NULL;
 }
 
+static void update_slot_map_entries(radio_sync_t *s,
+				    const uint8_t *active_ids,
+				    uint8_t n_active)
+{
+	uint8_t other_ids[SYNC_MAX_NODES];
+	uint8_t n_others = 0;
+	uint8_t priority_id = 0;
+	bool priority_present = false;
+
+	memset(s->slot_map, 0, sizeof(s->slot_map));
+	if (n_active == 0) {
+		s->num_slots = 0;
+		return;
+	}
+
+	for (uint8_t i = 0; i < n_active; i++) {
+		if (!priority_present && active_ids[i] == SYNC_PRIORITY_NODE_ID) {
+			priority_id = active_ids[i];
+			priority_present = true;
+			continue;
+		}
+		other_ids[n_others++] = active_ids[i];
+	}
+
+	if (!priority_present || SYNC_PRIORITY_SLOT_WEIGHT <= 1U) {
+		s->num_slots = n_active < SYNC_MAX_SLOTS ? n_active : SYNC_MAX_SLOTS;
+		for (uint8_t i = 0; i < s->num_slots; i++)
+			s->slot_map[i] = active_ids[i];
+		return;
+	}
+
+	s->num_slots = (uint8_t)(n_active + (SYNC_PRIORITY_SLOT_WEIGHT - 1U));
+	if (s->num_slots > SYNC_MAX_SLOTS)
+		s->num_slots = SYNC_MAX_SLOTS;
+
+	uint8_t priority_left = SYNC_PRIORITY_SLOT_WEIGHT;
+	uint8_t others_emitted = 0;
+	uint8_t other_start = n_others > 0
+		? (uint8_t)(s->superframe_seq % n_others)
+		: 0;
+	bool priority_turn = true;
+
+	for (uint8_t slot = 0; slot < s->num_slots; ) {
+		if (priority_turn && priority_left > 0) {
+			s->slot_map[slot++] = priority_id;
+			priority_left--;
+			priority_turn = false;
+			continue;
+		}
+		if (n_others > 0 && others_emitted < n_others) {
+			s->slot_map[slot++] =
+				other_ids[(other_start + others_emitted) % n_others];
+			others_emitted++;
+			priority_turn = true;
+			continue;
+		}
+		if (priority_left > 0) {
+			s->slot_map[slot++] = priority_id;
+			priority_left--;
+			continue;
+		}
+		if (n_others > 0) {
+			s->slot_map[slot++] =
+				other_ids[(other_start + (others_emitted % n_others)) % n_others];
+			others_emitted++;
+			continue;
+		}
+		break;
+	}
+}
+
 bool radio_sync_on_sync_rx(radio_sync_t *s,
 			   const sync_frame_t *frame,
 			   int64_t local_rx_us,
 			   uint8_t sender_node_id)
 {
 	uint32_t prev_seq;
-	int64_t prev_rx_us;
+	bool had_prediction;
+	bool allow_pll_update = false;
+	int64_t phase_error_us = 0;
 
 	(void)sender_node_id;
 
@@ -205,7 +318,11 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 	}
 
 	prev_seq = s->superframe_seq;
-	prev_rx_us = s->last_sync_rx_us;
+	had_prediction = (s->role == RADIO_ROLE_SLAVE) && (s->next_superframe_us != 0);
+	if (had_prediction)
+		phase_error_us = local_rx_us - s->next_superframe_us;
+	allow_pll_update = had_prediction &&
+		should_update_slave_phase_pll(s, phase_error_us, frame, prev_seq);
 
 	s->role = RADIO_ROLE_SLAVE;
 	s->state = SYNC_STATE_SYNCED;
@@ -213,7 +330,12 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 	s->election_deadline_us = 0;
 	s->missed_beacons = 0;
 	s->last_sync_rx_us = local_rx_us;
-	s->predicted_anchor_us = local_rx_us;
+	s->last_beacon_phase_error_us = phase_error_us;
+	s->last_beacon_phase_error_valid = had_prediction;
+	/* Hard phase correction: every accepted master beacon becomes the new
+	 * superframe anchor immediately. The PLL only adjusts the period used for
+	 * predicting the NEXT beacon; it does not preserve a stale phase offset. */
+	s->predicted_anchor_us = s->last_sync_rx_us;
 
 	s->dl_duration_us = frame->dl_duration_us;
 	s->ul_slot_us = frame->ul_slot_us;
@@ -223,8 +345,8 @@ bool radio_sync_on_sync_rx(radio_sync_t *s,
 	s->bootstrap_period = frame->bootstrap_period;
 	memcpy(s->slot_map, frame->slot_map, SYNC_MAX_SLOTS);
 	s->superframe_seq = frame->superframe_seq;
-	update_slave_period_correction(s, prev_seq, prev_rx_us,
-					      s->superframe_seq, local_rx_us);
+	if (allow_pll_update)
+		update_slave_phase_pll(s, phase_error_us);
 	s->superframe_period_us = compute_slave_superframe_period_us(s,
 						      s->superframe_seq);
 	s->next_superframe_us = s->predicted_anchor_us + s->superframe_period_us;
@@ -409,10 +531,7 @@ void radio_sync_update_slot_map(radio_sync_t *s, int64_t now_us)
 		active_ids[j + 1] = key;
 	}
 
-	memset(s->slot_map, 0, sizeof(s->slot_map));
-	s->num_slots = n_active < SYNC_MAX_SLOTS ? n_active : SYNC_MAX_SLOTS;
-	for (uint8_t i = 0; i < s->num_slots; i++)
-		s->slot_map[i] = active_ids[i];
+	update_slot_map_entries(s, active_ids, n_active);
 	s->superframe_period_us = compute_superframe_period_us(s, s->superframe_seq);
 }
 
@@ -443,6 +562,7 @@ void radio_sync_compute_timing(radio_sync_t *s, int64_t local_now_us)
 			s->my_ul_start_us = slot_start;
 			s->my_ul_end_us = slot_start + s->ul_slot_us;
 			s->my_slot_index = i;
+			break;
 		}
 	}
 
@@ -460,6 +580,9 @@ bool radio_sync_build_delay_req(radio_sync_t *s,
 	if (s->role != RADIO_ROLE_SLAVE)
 		return false;
 	if (s->current_master_id == 0)
+		return false;
+	if (s->my_slot_index != 0xFF &&
+	    (s->superframe_seq % SYNC_DELAY_REQ_KEEPALIVE_PERIOD) != 0U)
 		return false;
 
 	memset(out, 0, sizeof(*out));
@@ -479,8 +602,10 @@ void radio_sync_on_beacon_timeout(radio_sync_t *s, int64_t now_us)
 		s->predicted_anchor_us =
 			s->last_sync_rx_us != 0 ? s->last_sync_rx_us : now_us;
 
+	/* Holdover advances using the current PLL-corrected period estimate so a
+	 * few missed beacons do not instantly throw the slave off cadence. */
 	int64_t elapsed_period = compute_slave_superframe_period_us(s,
-						     s->superframe_seq);
+					     s->superframe_seq);
 	s->predicted_anchor_us += elapsed_period;
 	s->superframe_seq++;
 	s->superframe_period_us = compute_slave_superframe_period_us(s,
