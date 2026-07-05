@@ -173,11 +173,11 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 
 	/* Reset for next period but preserve queue-drop snapshots. */
 	int64_t saved_start = now_us;
-	uint32_t saved_qdrop[4] = {0, 0, 0, 0};
+	uint32_t saved_qdrop[RADIO_PRIO_COUNT] = {0};
 	uint32_t saved_ipc_tx_ok = 0;
 	uint32_t saved_ipc_tx_fail = 0;
 	if (sched != NULL) {
-		for (int p = 0; p < 4; p++)
+		for (int p = 0; p < RADIO_PRIO_COUNT; p++)
 			saved_qdrop[p] = sched->queues[p].dropped;
 	}
 	if (ipc != NULL) {
@@ -186,7 +186,7 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	}
 	memset(st, 0, sizeof(*st));
 	st->period_start_us = saved_start;
-	for (int p = 0; p < 4; p++)
+	for (int p = 0; p < RADIO_PRIO_COUNT; p++)
 		st->queue_drop_snap[p] = saved_qdrop[p];
 	st->ipc_tx_ok_snap = saved_ipc_tx_ok;
 	st->ipc_tx_fail_snap = saved_ipc_tx_fail;

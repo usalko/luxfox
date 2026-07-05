@@ -164,6 +164,7 @@ int radio_ipc_drain(radio_ipc_server_t *srv,
 
 int radio_ipc_broadcast_rx(radio_ipc_server_t *srv,
 			   int8_t rssi, const uint8_t src_mac[6],
+			   uint8_t tx_phase,
 			   const uint8_t *payload, size_t payload_len)
 {
 	uint8_t buf[sizeof(radio_rx_frame_t) + RADIO_IPC_MAX_DGRAM];
@@ -178,6 +179,7 @@ int radio_ipc_broadcast_rx(radio_ipc_server_t *srv,
 
 	frame->msg_type = RADIO_MSG_RX_FRAME;
 	frame->rssi = rssi;
+	frame->tx_phase = tx_phase;
 	if (src_mac != NULL)
 		memcpy(frame->src_mac, src_mac, 6);
 	else

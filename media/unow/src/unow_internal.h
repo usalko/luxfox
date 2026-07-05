@@ -85,5 +85,6 @@ bool unow_mac_is_broadcast(const uint8_t mac[6]);
 
 size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps);
 size_t unow_build_action_frame_ex(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps, uint8_t subtype);
+size_t unow_build_action_frame_phased(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps, uint8_t subtype, uint8_t tx_phase);
 bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag_frame_t *frame);
 bool unow_radiotap_parse_dbm_signal(const uint8_t *packet, size_t packet_len, int8_t *out_rssi);

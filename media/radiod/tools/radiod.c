@@ -8,6 +8,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <sched.h>
 #include <signal.h>
@@ -196,12 +197,21 @@ static const radio_tx_slot_t *tx_peek_next(const radio_tx_scheduler_t *sched,
 	return NULL;
 }
 
+/* tx_phase: decile (0-9) of the current UL slot's air budget already used at
+ * the moment this fragment is injected, or RADIO_TX_PHASE_NA when not
+ * applicable (DL/master/standalone/relay paths, or non-UL-budgeted traffic).
+ * Stamped into the 802.11 vendor wrapper (not the ULAMA/CRC payload) purely
+ * as a diagnostic so the far end can correlate fragment loss with position
+ * in the TX window — see UNOW_TX_PHASE_NA in unow_wire.h. */
+#define RADIO_TX_PHASE_NA UNOW_TX_PHASE_NA
+
 static uint64_t tx_inject_slot(const radio_tx_slot_t *slot,
 			       pcap_t *pcap,
 			       const uint8_t own_mac[6],
 			       const uint8_t default_dst[6],
 			       radio_rx_dispatcher_t *rxd,
-			       const radio_route_table_t *rt)
+			       const radio_route_table_t *rt,
+			       uint8_t tx_phase)
 {
 	/* Choose destination MAC:
 	 * 1. Slot has explicit dst_mac (relay packet with known route) → use it
@@ -230,12 +240,13 @@ static uint64_t tx_inject_slot(const radio_tx_slot_t *slot,
 			     sizeof(struct unow_dot11_mgmt_header) +
 			     sizeof(struct unow_action_vendor_header) +
 			     2U + RADIO_TX_MAX_FRAME];
-		size_t wire_len = unow_build_action_frame_ex(
+		size_t wire_len = unow_build_action_frame_phased(
 			wire, sizeof(wire),
 			own_mac, dst_mac,
 			seq_payload, slot->len + 2U,
 			g_tx_rate_500kbps,
-			UNOW_VENDOR_SUBTYPE_DATA_SEQ);
+			UNOW_VENDOR_SUBTYPE_DATA_SEQ,
+			tx_phase);
 
 		if (wire_len > 0U) {
 			pcap_inject(pcap, wire, wire_len);
@@ -247,11 +258,13 @@ static uint64_t tx_inject_slot(const radio_tx_slot_t *slot,
 			     sizeof(struct unow_dot11_mgmt_header) +
 			     sizeof(struct unow_action_vendor_header) +
 			     RADIO_TX_MAX_FRAME];
-		size_t wire_len = unow_build_action_frame(
+		size_t wire_len = unow_build_action_frame_phased(
 			wire, sizeof(wire),
 			own_mac, dst_mac,
 			slot->data, slot->len,
-			g_tx_rate_500kbps);
+			g_tx_rate_500kbps,
+			UNOW_VENDOR_SUBTYPE_DATA,
+			tx_phase);
 
 		if (wire_len > 0U) {
 			pcap_inject(pcap, wire, wire_len);
@@ -487,7 +500,7 @@ static void master_cycle(radio_sync_t *sync,
 		if (slot == NULL)
 			break;
 		radio_stats_add_tx_airtime(stats,
-			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt, RADIO_TX_PHASE_NA));
 		radio_stats_add_tx_packet(stats, prio);
 	}
 
@@ -498,7 +511,7 @@ static void master_cycle(radio_sync_t *sync,
 		if (slot == NULL)
 			break;
 		radio_stats_add_tx_airtime(stats,
-			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt, RADIO_TX_PHASE_NA));
 		radio_stats_add_tx_packet(stats, prio);
 	}
 	sleep_until(dl_deadline);
@@ -617,6 +630,13 @@ static void slave_tx_owned_slot(radio_sync_t *sync,
 		sent_keepalive = true;
 		*keepalive_sent = true;
 	}
+
+	/* Airtime-bounded dequeue loop, priority order (CTRL, TELEM, VIDEO,
+	 * BULK). No redundancy at this layer: two prior attempts to bias or
+	 * replay copies here (a separate copy priority queue, and replaying the
+	 * tail of the previous interval) both made field frag_loss worse than
+	 * this plain loop — see vcpd's send_video_frame() for where redundancy,
+	 * if wanted, now lives (off by default; --redundancy to enable). */
 	while (now_us() < ul_deadline) {
 		uint8_t prio;
 		const radio_tx_slot_t *next = tx_peek_next(sched, &prio);
@@ -628,8 +648,15 @@ static void slave_tx_owned_slot(radio_sync_t *sync,
 		const radio_tx_slot_t *slot = radio_tx_dequeue(sched, &prio);
 		if (slot == NULL)
 			break;
+		/* Diagnostic only (see RADIO_TX_PHASE_NA comment): which decile of
+		 * this UL slot's air budget was already spent when this fragment
+		 * went out, so the far end can correlate loss with position in
+		 * the TX window instead of guessing from field logs. */
+		uint8_t tx_phase = (uint8_t)((air_used * 10U) / (air_budget > 0 ? air_budget : 1U));
+		if (tx_phase > 9U)
+			tx_phase = 9U;
 		radio_stats_add_tx_airtime(stats,
-			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt));
+			tx_inject_slot(slot, pcap, own_mac, default_dst, rxd, rt, tx_phase));
 		radio_stats_add_tx_packet(stats, prio);
 		air_used += air;
 		sent_data = true;
@@ -818,6 +845,42 @@ static void raise_scheduling_priority(void)
 	}
 }
 
+/* Even at SCHED_FIFO, a CPU that goes idle between poll()/usleep() calls
+ * (radiod is almost always I/O-bound, so it does) can drop into a deep C-
+ * state, and waking back up out of one costs several ms — enough to blow a
+ * 2-5 ms TDMA slot on its own, with NO relation to what else is runnable.
+ * This matches what "poll() woke ... late"/"UL slot overran" showed in the
+ * field: sparse, occasional (not every cycle) 10-20ms spikes, present even
+ * on the plain x86 host build that never runs vcpd's video pipeline — ruling
+ * out userspace CPU contention as the sole cause and pointing at the idle
+ * governor instead. Holding a low-latency PM QoS request open for the
+ * process's lifetime keeps the CPU in shallow, fast-to-exit idle states
+ * (the standard technique used by JACK/cyclictest and other soft-realtime
+ * userspace daemons). Requires no special privilege beyond write access to
+ * the device node; non-fatal if unavailable (older/minimal kernel configs
+ * may not expose it). The fd is intentionally leaked to process exit — the
+ * kernel releases the QoS request when it's closed. */
+static void hold_cpu_low_latency(void)
+{
+	int fd = open("/dev/cpu_dma_latency", O_WRONLY);
+	if (fd < 0) {
+		fprintf(stderr,
+			"radiod: could not open /dev/cpu_dma_latency (%s); "
+			"CPU idle-state exit latency may still cause occasional "
+			"TDMA slot jitter\n", strerror(errno));
+		return;
+	}
+
+	int32_t max_latency_us = 0;
+	if (write(fd, &max_latency_us, sizeof(max_latency_us)) != (ssize_t)sizeof(max_latency_us)) {
+		fprintf(stderr, "radiod: cpu_dma_latency write failed (%s)\n", strerror(errno));
+		close(fd);
+		return;
+	}
+
+	fprintf(stderr, "radiod: holding CPU at low idle-exit latency (PM QoS)\n");
+}
+
 int main(int argc, char **argv)
 {
 	radiod_config_t cfg;
@@ -914,6 +977,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, "radiod: IPC listening on %s\n", cfg.sock_path);
 
 	raise_scheduling_priority();
+	hold_cpu_low_latency();
 
 	/* ---- Wait for radio interface ---- */
 
@@ -1134,7 +1198,7 @@ int main(int argc, char **argv)
 
 				radio_stats_add_tx_airtime(&stats,
 					tx_inject_slot(slot, pcap_handle, iface_info.mac,
-					       default_dst, &rxd, &routes));
+					       default_dst, &rxd, &routes, RADIO_TX_PHASE_NA));
 				radio_stats_add_tx_packet(&stats, prio);
 			}
 
@@ -1148,7 +1212,7 @@ int main(int argc, char **argv)
 
 				radio_stats_add_tx_airtime(&stats,
 					tx_inject_slot(slot, pcap_handle, iface_info.mac,
-					       default_dst, &rxd, &routes));
+					       default_dst, &rxd, &routes, RADIO_TX_PHASE_NA));
 				radio_stats_add_tx_packet(&stats, prio);
 
 				/*

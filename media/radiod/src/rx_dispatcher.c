@@ -525,7 +525,7 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 		/* Dispatch to local IPC clients */
 		if (deliver_local && rxd->ipc != NULL) {
 			radio_ipc_broadcast_rx(rxd->ipc, frame.rssi,
-					       frame.src_mac,
+					       frame.src_mac, frame.tx_phase,
 					       frame.payload, frame.len);
 			rxd->stats.rx_dispatched++;
 		}

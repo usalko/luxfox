@@ -91,7 +91,7 @@ static void test_reassembly(void)
 			.payload_len = frag_sizes[i],
 		};
 
-		bool complete = frag_reassembly_insert(&ctx, &fv, 1000);
+		bool complete = frag_reassembly_insert(&ctx, &fv, 0xFF, 1000);
 		if (i < n - 1)
 			expect_true(!complete, "should not be complete before last fragment");
 		else
@@ -138,7 +138,7 @@ static void test_29_fragments_64kb(void)
 			.payload_len = frag_sizes[i],
 		};
 
-		bool complete = frag_reassembly_insert(&ctx, &fv, 1000);
+		bool complete = frag_reassembly_insert(&ctx, &fv, 0xFF, 1000);
 		/* Fragment 28 (the last, idx >= 8) must be tracked correctly —
 		 * this is exactly what the uint8_t->uint32_t received_mask fix covers. */
 		if (i < n - 1)
@@ -180,7 +180,7 @@ static void test_flush_stale_video(void)
 		.payload = payload,
 		.payload_len = sizeof(payload),
 	};
-	bool complete = frag_reassembly_insert(&ctx, &stale, 1000);
+	bool complete = frag_reassembly_insert(&ctx, &stale, 0xFF, 1000);
 	expect_true(!complete, "stale P-frame slot should be incomplete (1/2 fragments)");
 
 	/* A newer keyframe (seq=20) completes — flush the stale slot. */
@@ -188,7 +188,7 @@ static void test_flush_stale_video(void)
 
 	/* Re-inserting fragment 0 for seq=10 should now allocate a fresh slot
 	 * (the old one was deactivated), not be rejected as a duplicate. */
-	complete = frag_reassembly_insert(&ctx, &stale, 2000);
+	complete = frag_reassembly_insert(&ctx, &stale, 0xFF, 2000);
 	expect_true(!complete, "flushed slot should accept seq=10 fragment 0 again as fresh");
 }
 

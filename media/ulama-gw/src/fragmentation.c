@@ -71,7 +71,7 @@ static frag_reassembly_slot_t *alloc_slot(frag_reassembly_ctx_t *ctx, uint8_t sr
 	return s;
 }
 
-bool frag_reassembly_insert(frag_reassembly_ctx_t *ctx, const ulama_frame_view_t *frame, uint64_t now_ms)
+bool frag_reassembly_insert(frag_reassembly_ctx_t *ctx, const ulama_frame_view_t *frame, uint8_t tx_phase, uint64_t now_ms)
 {
 	if (!ctx || !frame)
 		return false;
@@ -94,6 +94,7 @@ bool frag_reassembly_insert(frag_reassembly_ctx_t *ctx, const ulama_frame_view_t
 	slot->fragments[frame->frag_idx] = *frame;
 	slot->fragments[frame->frag_idx].payload = slot->payload_bufs[frame->frag_idx];
 	slot->fragments[frame->frag_idx].payload_len = copy_len;
+	slot->tx_phase[frame->frag_idx] = tx_phase;
 	slot->received_mask |= (1u << frame->frag_idx);
 
 	uint32_t expected_mask = (frame->frag_total == 32)

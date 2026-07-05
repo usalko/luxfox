@@ -80,6 +80,7 @@ static void usage(const char *prog)
 		"  --test-pattern           Use color bars instead of camera\n"
 		"  --ack-timeout US         UNOW ACK timeout in us                 (default 8000)\n"
 		"  --ack-retry   N          UNOW ACK max retries                   (adaptive: 3-5)\n"
+		"  --redundancy  N          Extra delayed copies per frame          (default 0=off)\n"
 		"  --benchmark   KBPS       Benchmark mode: send synthetic data     (default 0=off)\n"
 		"  --verbose                Verbose logging\n"
 		"  --help                   Show this help\n",
@@ -145,9 +146,6 @@ static int run_test_capture(video_source_t *video, const char *outpath, int max_
 	return 0;
 }
 
-/* Number of time-spread resend slots (in-flight frames awaiting delayed copies). */
-#define VCPD_RESEND_SLOTS 6
-
 typedef struct {
 	video_source_t video;
 	uvcp_session_t uvcp_sess;
@@ -174,13 +172,22 @@ typedef struct {
 	int benchmark_kbps;
 
 	/*
-	 * Time-spread redundancy ring. Every frame is stashed with a small number of
-	 * "resend credits"; on each SUBSEQUENT frame one credit is spent to resend a
-	 * full copy. Spacing the copies ~1 frame (~100 ms) apart — instead of
-	 * bursting them — defeats correlated losses (driver TX-ring burst drop / CTRL
-	 * collisions). Keyframes get more credits than P-frames. The copies share the
-	 * original seq, so the host de-dups them by (seq, frag_idx) and its ~120 ms
-	 * reorder hold lets a copy fill a lost original without added latency.
+	 * Redundancy: number of extra delayed copies to send per frame. 0 = off
+	 * (default — every fragment goes out exactly once). Set via --redundancy
+	 * or "redundancy=" in the config file. See send_video_frame() below.
+	 */
+	int redundancy_copies;
+
+	/*
+	 * Time-spread redundancy ring, used only when redundancy_copies > 0.
+	 * Every frame is stashed with redundancy_copies "resend credits"; on each
+	 * SUBSEQUENT frame one credit is spent to resend a full copy. Spacing the
+	 * copies ~1 frame (~100 ms) apart — instead of bursting them — defeats
+	 * correlated losses (driver TX-ring burst drop / CTRL collisions). The
+	 * copies share the original seq, so the host de-dups them by (seq,
+	 * frag_idx) and its ~120 ms reorder hold lets a copy fill a lost original
+	 * without added latency. Costs extra airtime proportional to
+	 * redundancy_copies — keep off unless field data shows RF-limited loss.
 	 */
 	struct vcpd_resend_slot {
 		uint8_t  buf[16 * 1024];
@@ -189,8 +196,11 @@ typedef struct {
 		uint8_t  kf_flag;
 		int      credits;
 		bool     active;
-	} resend[VCPD_RESEND_SLOTS];
+	} resend[6];
 } vcpd_ctx_t;
+
+/* Number of time-spread resend slots (in-flight frames awaiting delayed copies). */
+#define VCPD_RESEND_SLOTS 6
 
 static unsigned int tx_fail_count = 0;
 #define TX_FAIL_THRESHOLD 10
@@ -212,32 +222,6 @@ static unsigned int tx_fail_count = 0;
  * single fragment while a ~4.5 KB IDR still splits into ~4 fragments that pass.
  */
 #define VIDEO_FRAG_MTU 1440
-
-/*
- * Time-spread resend credits per frame type (extra full copies after the first
- * send, one emitted per subsequent frame ~40 ms apart at 25 fps). Video is
- * UNRELIABLE (the radiod reliable-ACK path caused a retransmit storm), so this
- * plain forward redundancy is our only FEC.
- *
- * Sizing is driven by MEASURED conditions once TDMA/SYNC is stable:
- *   - The link drops ~15% of fragments even at RSSI ~-38 and only ~7% airtime
- *     (rtl8192eu monitor-inject drops + 2.4 GHz interference) — this is loss,
- *     not congestion, so it cannot be scheduled away, only masked by redundancy.
- *   - Airtime is ~93% idle and the drone UL slot / video queue now have ample
- *     headroom, so spending airtime on repetition is essentially free.
- *
- * A single-fragment P-frame sent once has ~15% loss; one broken P-frame poisons
- * the whole GOP (the host reorder gate skips and waits for the next IDR), which
- * is the visible ~1 s freeze/stutter. Sending each P-frame 3x (2 extra copies)
- * drops residual loss to ~0.15^3 ~= 0.3% and lifts whole-GOP integrity from ~2%
- * to ~92%. Copies share the original seq; the host de-dups by (seq, frag_idx)
- * and its ~120 ms reorder hold covers the +40/+80 ms copies with margin (a 3rd
- * copy at +120 ms would land on the hold boundary, so 2 is the max useful for
- * P-frames without adding latency). Keyframes already arrive near-certainly with
- * 2 copies, so they keep 2.
- */
-#define KEYFRAME_EXTRA_COPIES 2
-#define PFRAME_EXTRA_COPIES   2
 
 /* Pack and send one already-built ULAMA frame, tracking consecutive
  * TX failures for the main loop's transport-recovery logic. */
@@ -370,13 +354,15 @@ static void tx_video_frame_pass(vcpd_ctx_t *ctx, const uint8_t *data, size_t len
 /*
  * Fragment a complete H.265 frame (one ring slot) into ULAMA frames and send.
  *
- * Every frame gets TIME-SPREAD forward redundancy: the current frame is sent
- * once, then queued in the resend ring with a few credits. On each SUBSEQUENT
- * frame one credit per in-flight frame is spent to resend a full copy, so the
- * copies land ~100/200 ms after the original and fill losses within the host's
- * ~120 ms reorder hold (no added latency). Keyframes get more credits than
- * P-frames. Spreading copies across frames — not bursting — defeats correlated
- * losses (driver TX-ring burst drop / CTRL collisions).
+ * With ctx->redundancy_copies == 0 (default) every fragment goes out exactly
+ * once. When > 0, this also drains and refills the time-spread resend ring
+ * (see vcpd_resend_slot comment): each call resends up to one delayed copy
+ * per in-flight frame, then stashes the current frame with redundancy_copies
+ * credits for its own future copies. Two prior heuristics that tried to be
+ * "smarter" about *where* to place copies (a radiod-side priority queue for
+ * copies, and radiod replaying only the last TX'd fragment pair) both made
+ * field frag_loss worse than this plain scheme, so this is the baseline to
+ * build on — don't reintroduce that cleverness without new field data.
  */
 static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 {
@@ -400,7 +386,8 @@ static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 	/* 1. Send the current frame once, fresh. */
 	tx_video_frame_pass(ctx, data, len, seq, kf_flag);
 
-	/* 2. Spend one credit per in-flight frame: resend delayed copies now. */
+	/* 2. Spend one credit per in-flight frame: resend delayed copies now.
+	 * No-op when redundancy is off, since nothing ever gets stashed below. */
 	for (int i = 0; i < VCPD_RESEND_SLOTS; i++) {
 		struct vcpd_resend_slot *s = &ctx->resend[i];
 		if (!s->active || s->credits <= 0)
@@ -410,30 +397,22 @@ static void send_video_frame(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 			s->active = false;
 	}
 
-	/* 3. Stash the current frame for its own future delayed copies. */
-	int credits = keyframe ? KEYFRAME_EXTRA_COPIES : PFRAME_EXTRA_COPIES;
+	/* 3. Stash the current frame for its own future delayed copies —
+	 * only when redundancy is enabled (--redundancy / config "redundancy"). */
+	int credits = ctx->redundancy_copies;
 	if (credits > 0 && len <= sizeof(ctx->resend[0].buf)) {
 		struct vcpd_resend_slot *dst = NULL;
 		for (int i = 0; i < VCPD_RESEND_SLOTS; i++) {
-			if (!ctx->resend[i].active) {
-				dst = &ctx->resend[i];
-				break;
-			}
+			if (!ctx->resend[i].active) { dst = &ctx->resend[i]; break; }
 		}
-		/* Ring full (bursty losses stalled draining): reuse the slot with the
-		 * fewest remaining credits so keyframes are least likely to be evicted. */
 		if (dst == NULL) {
 			dst = &ctx->resend[0];
 			for (int i = 1; i < VCPD_RESEND_SLOTS; i++)
-				if (ctx->resend[i].credits < dst->credits)
-					dst = &ctx->resend[i];
+				if (ctx->resend[i].credits < dst->credits) dst = &ctx->resend[i];
 		}
 		memcpy(dst->buf, data, len);
-		dst->len = len;
-		dst->seq = seq;
-		dst->kf_flag = kf_flag;
-		dst->credits = credits;
-		dst->active = true;
+		dst->len = len; dst->seq = seq; dst->kf_flag = kf_flag;
+		dst->credits = credits; dst->active = true;
 	}
 }
 
@@ -601,6 +580,7 @@ static void vcpd_load_config(vcpd_ctx_t *ctx, const char *path)
 		else if (!strcmp(key, "listen"))             strncpy(ctx->listen_addr, val, sizeof(ctx->listen_addr) - 1);
 		else if (!strcmp(key, "ack_timeout_us"))     ctx->ack_timeout_us = (uint32_t)atoi(val);
 		else if (!strcmp(key, "ack_retry"))          ctx->ack_max_retry = (uint32_t)atoi(val);
+		else if (!strcmp(key, "redundancy"))         ctx->redundancy_copies = atoi(val);
 		else if (!strcmp(key, "autostart"))          ctx->autostart = !strcmp(val, "true");
 		else if (!strcmp(key, "verbose"))            ctx->verbose = !strcmp(val, "true");
 	}
@@ -657,6 +637,7 @@ int main(int argc, char *argv[])
 		{"test-frames",  required_argument, NULL, 'F'},
 		{"ack-timeout",          required_argument, NULL, 'K'},
 		{"ack-retry",            required_argument, NULL, 'Y'},
+		{"redundancy",           required_argument, NULL, 'R'},
 		{"benchmark",            required_argument, NULL, 'B'},
 		{"config",               required_argument, NULL, 'C'},
 		{"version",              no_argument,       NULL, 'V'},
@@ -681,7 +662,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:g:I:t:p:l:i:n:d:S:m:AJT:P:F:K:Y:B:C:Vvh", long_opts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "s:c:b:W:H:f:g:I:t:p:l:i:n:d:S:m:AJT:P:F:K:Y:R:B:C:Vvh", long_opts, NULL)) != -1) {
 		switch (opt) {
 		case 's': strncpy(ctx.video.device, optarg, sizeof(ctx.video.device) - 1); break;
 #ifndef VCPD_WITH_MPP
@@ -710,6 +691,7 @@ int main(int argc, char *argv[])
 		case 'F': ctx.test_frames = atoi(optarg); break;
 		case 'K': ctx.ack_timeout_us = (uint32_t)atoi(optarg); break;
 		case 'Y': ctx.ack_max_retry = (uint32_t)atoi(optarg); break;
+		case 'R': ctx.redundancy_copies = atoi(optarg); break;
 		case 'B': ctx.benchmark_kbps = atoi(optarg); break;
 		case 'C': break; /* already handled in pre-scan above */
 		case 'V':
@@ -823,6 +805,7 @@ int main(int argc, char *argv[])
 		"vcpd:   keyframe   = force_idr_every=%u ms\n"
 		"vcpd:   transport  = %s  node=%u → dst=%u  stream=%u\n"
 		"vcpd:   ack        = %u us / %u retry\n"
+		"vcpd:   redundancy = %s (%d extra %s per frame)\n"
 		"vcpd:   autostart  = %s\n"
 		"vcpd: ---------------\n",
 		ULAMA_BUILD_NUMBER, ULAMA_GIT_BRANCH, ULAMA_GIT_HASH, ULAMA_BUILD_DATE,
@@ -832,6 +815,8 @@ int main(int argc, char *argv[])
 		ctx.idr_interval_ms,
 		ulama_transport_kind_name(tk), ctx.node_id, ctx.dst_node, ctx.stream_id,
 		ctx.ack_timeout_us, ctx.ack_max_retry,
+		ctx.redundancy_copies > 0 ? "on" : "off", ctx.redundancy_copies,
+		ctx.redundancy_copies == 1 ? "copy" : "copies",
 		ctx.autostart ? "true" : "false");
 
 	if (ctx.benchmark_kbps > 0) {

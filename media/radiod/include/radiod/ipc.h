@@ -55,6 +55,8 @@ typedef struct {
 	uint8_t  msg_type;     /* RADIO_MSG_RX_FRAME                    */
 	int8_t   rssi;
 	uint8_t  src_mac[6];
+	uint8_t  tx_phase;     /* TX-side slot-phase decile (0-9) or 0xFF=N/A;
+				 * see UNOW_TX_PHASE_NA / RADIO_TX_PHASE_NA  */
 	uint16_t payload_len;
 	uint8_t  payload[];    /* packed ULAMA frame                    */
 } __attribute__((packed)) radio_rx_frame_t;
@@ -106,6 +108,7 @@ int  radio_ipc_drain(radio_ipc_server_t *srv,
 /* Broadcast an RX frame to all registered clients. */
 int  radio_ipc_broadcast_rx(radio_ipc_server_t *srv,
 			    int8_t rssi, const uint8_t src_mac[6],
+			    uint8_t tx_phase,
 			    const uint8_t *payload, size_t payload_len);
 
 /* ---- Client API (for vcpd / ulamad) ---- */

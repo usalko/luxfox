@@ -58,6 +58,7 @@ size_t unow_build_action_frame_ex(uint8_t *buffer, size_t buffer_size, const uin
 	vendor_header->category = UNOW_VENDOR_CATEGORY;
 	memcpy(vendor_header->oui, k_unow_oui, sizeof(vendor_header->oui));
 	vendor_header->subtype = subtype;
+	vendor_header->tx_phase = UNOW_TX_PHASE_NA;
 
 	memcpy(buffer + sizeof(*rt_header) + sizeof(*mgmt_header) + sizeof(*vendor_header), payload, payload_len);
 	return required_len;
@@ -66,6 +67,21 @@ size_t unow_build_action_frame_ex(uint8_t *buffer, size_t buffer_size, const uin
 size_t unow_build_action_frame(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps)
 {
 	return unow_build_action_frame_ex(buffer, buffer_size, src_mac, dst_mac, payload, payload_len, rate_500kbps, UNOW_VENDOR_SUBTYPE_DATA);
+}
+
+size_t unow_build_action_frame_phased(uint8_t *buffer, size_t buffer_size, const uint8_t src_mac[6], const uint8_t dst_mac[6], const uint8_t *payload, size_t payload_len, uint8_t rate_500kbps, uint8_t subtype, uint8_t tx_phase)
+{
+	size_t len = unow_build_action_frame_ex(buffer, buffer_size, src_mac, dst_mac,
+						payload, payload_len, rate_500kbps, subtype);
+	if (len == 0U)
+		return 0U;
+
+	struct unow_action_vendor_header *vendor_header =
+		(struct unow_action_vendor_header *)(buffer +
+			sizeof(struct unow_radiotap_tx_header) +
+			sizeof(struct unow_dot11_mgmt_header));
+	vendor_header->tx_phase = tx_phase;
+	return len;
 }
 
 bool unow_radiotap_parse_dbm_signal(const uint8_t *packet, size_t packet_len, int8_t *out_rssi)
@@ -170,6 +186,7 @@ bool unow_parse_action_frame(const uint8_t *packet, size_t packet_len, unow_diag
 	memcpy(frame->payload, payload, payload_len);
 	frame->len = payload_len;
 	frame->subtype = vendor_header->subtype;
+	frame->tx_phase = vendor_header->tx_phase;
 	if (unow_radiotap_parse_dbm_signal(packet, packet_len, &rssi)) {
 		frame->rssi = rssi;
 	}

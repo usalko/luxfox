@@ -255,10 +255,16 @@ static ssize_t radiod_tx_send(int fd, const uint8_t *data, size_t len,
 	return (ssize_t)len;
 }
 
+/* Wire layout matches radio_rx_frame_t (radiod/include/radiod/ipc.h), parsed
+ * by hand here to avoid this file depending on radiod's headers:
+ *   [0]=msg_type [1]=rssi [2..7]=src_mac [8]=tx_phase [9..10]=payload_len(LE) [11..]=payload */
+#define RADIOD_RX_FRAME_HDR_LEN 11
+
 static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
-			      int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
+			      int timeout_ms, uint8_t src_mac[6], int8_t *rssi,
+			      uint8_t *tx_phase)
 {
-	uint8_t buf[10 + 2400];
+	uint8_t buf[RADIOD_RX_FRAME_HDR_LEN + 2400];
 	ssize_t n;
 
 	struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -269,13 +275,13 @@ static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 		return 0;
 
 	n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
-	if (n < 10)
+	if (n < RADIOD_RX_FRAME_HDR_LEN)
 		return 0;
 	if (buf[0] != RADIOD_MSG_RX_FRAME)
 		return 0;
 
-	uint16_t payload_len = (uint16_t)buf[8] | ((uint16_t)buf[9] << 8);
-	if ((size_t)n < 10U + payload_len)
+	uint16_t payload_len = (uint16_t)buf[9] | ((uint16_t)buf[10] << 8);
+	if ((size_t)n < (size_t)RADIOD_RX_FRAME_HDR_LEN + payload_len)
 		return 0;
 	if (payload_len > capacity) {
 		errno = EMSGSIZE;
@@ -286,7 +292,9 @@ static ssize_t radiod_rx_recv(int fd, uint8_t *data, size_t capacity,
 		*rssi = (int8_t)buf[1];
 	if (src_mac != NULL)
 		memcpy(src_mac, buf + 2, 6);
-	memcpy(data, buf + 10, payload_len);
+	if (tx_phase != NULL)
+		*tx_phase = buf[8];
+	memcpy(data, buf + RADIOD_RX_FRAME_HDR_LEN, payload_len);
 	return (ssize_t)payload_len;
 }
 
@@ -549,7 +557,7 @@ int ulama_transport_rx_init_unow(ulama_rx_transport_t *transport, uint8_t node_i
 	#endif
 }
 
-ssize_t ulama_transport_rx_recv(ulama_rx_transport_t *transport, uint8_t *data, size_t capacity, int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
+ssize_t ulama_transport_rx_recv_ex(ulama_rx_transport_t *transport, uint8_t *data, size_t capacity, int timeout_ms, uint8_t src_mac[6], int8_t *rssi, uint8_t *tx_phase)
 {
 	if (transport == NULL || data == NULL || capacity == 0U) {
 		errno = EINVAL;
@@ -568,6 +576,8 @@ ssize_t ulama_transport_rx_recv(ulama_rx_transport_t *transport, uint8_t *data, 
 		if (poll_rc == 0) {
 			return 0;
 		}
+		if (tx_phase != NULL)
+			*tx_phase = ULAMA_TX_PHASE_NA;
 		return recvfrom(transport->fd, data, capacity, 0, NULL, NULL);
 	}
 	case ULAMA_TRANSPORT_KIND_UNOW: {
@@ -592,21 +602,31 @@ ssize_t ulama_transport_rx_recv(ulama_rx_transport_t *transport, uint8_t *data, 
 		if (rssi != NULL) {
 			*rssi = frame.rssi;
 		}
+		if (tx_phase != NULL) {
+			*tx_phase = frame.tx_phase;
+		}
 		return (ssize_t)frame.len;
 		#else
 		(void)src_mac;
 		(void)rssi;
+		if (tx_phase != NULL)
+			*tx_phase = ULAMA_TX_PHASE_NA;
 		errno = ENOTSUP;
 		return -1;
 		#endif
 	}
 	case ULAMA_TRANSPORT_KIND_RADIOD:
 		return radiod_rx_recv(transport->fd, data, capacity,
-				      timeout_ms, src_mac, rssi);
+				      timeout_ms, src_mac, rssi, tx_phase);
 	default:
 		errno = EINVAL;
 		return -1;
 	}
+}
+
+ssize_t ulama_transport_rx_recv(ulama_rx_transport_t *transport, uint8_t *data, size_t capacity, int timeout_ms, uint8_t src_mac[6], int8_t *rssi)
+{
+	return ulama_transport_rx_recv_ex(transport, data, capacity, timeout_ms, src_mac, rssi, NULL);
 }
 
 uint16_t ulama_transport_rx_udp_port(const ulama_rx_transport_t *transport)

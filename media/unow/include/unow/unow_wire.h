@@ -51,8 +51,18 @@ struct unow_dot11_mgmt_header {
 	uint16_t seq_ctrl;
 } __attribute__((packed));
 
+/* tx_phase: TX-side diagnostic only, not part of the ULAMA frame/CRC (that
+ * starts in the payload right after this header) — pure 802.11-wrapper
+ * metadata. radiod stamps it (0-9 = decile of the UL slot's air budget
+ * already used when this fragment was injected, 0xFF = not applicable /
+ * unknown) so the receiving radiod can pass it through IPC to the gateway
+ * alongside rssi, for correlating fragment loss with position in the TX
+ * window. See unow_build_action_frame_phased(). */
+#define UNOW_TX_PHASE_NA 0xFFU
+
 struct unow_action_vendor_header {
 	uint8_t category;
 	uint8_t oui[UNOW_OUI_LEN];
 	uint8_t subtype;
+	uint8_t tx_phase;
 } __attribute__((packed));

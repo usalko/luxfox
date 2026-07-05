@@ -21,6 +21,7 @@ typedef struct {
 	size_t len;
 	int8_t rssi;
 	uint8_t subtype;
+	uint8_t tx_phase; /* see UNOW_TX_PHASE_NA in unow_wire.h */
 } unow_diag_frame_t;
 
 void unow_diag_set_level(unow_log_level_t level);

@@ -88,6 +88,7 @@ static void usage(const char *prog)
 		"  --tx-rate-mbps N        Legacy radiotap TX rate for UNOW uplink (default 6)\n"
 		"  --node        ID         Gateway node ID (1-253)           (default 254)\n"
 		"  --dst-mac     MAC        Destination MAC for UNOW TX       (broadcast if omitted)\n"
+		"  --phase-stats            Enable loss-vs-TX-window-decile [phase] histogram (default off, adds per-frame cost)\n"
 		"  --verbose                Enable verbose logging\n"
 		"  --help                   Show this help\n",
 		prog);
@@ -167,6 +168,19 @@ typedef struct {
 	uint32_t video_wait_keyframe_drops; /* completed P-frames dropped while waiting for IDR */
 	uint32_t video_reorder_full_drops;  /* completed frames dropped because reorder queue was full */
 	uint32_t cascade_out_frames;
+	/*
+	 * Loss-vs-TX-window-position histogram. Decile 0 = fragment injected
+	 * at the very start of its sender's TX slot, decile 9 = right at the
+	 * end. video_phase_seen counts fragments that arrived; video_phase_missing
+	 * counts fragments that never did, credited to the decile of the nearest
+	 * received fragment of the same frame (see tally_video_phase_histogram) —
+	 * the missing fragment's own phase can't be known since it never arrived.
+	 * A rising loss-rate curve toward decile 9 confirms the "loss concentrates
+	 * near the end of the TX window" hypothesis quantitatively instead of by
+	 * eyeballing field logs.
+	 */
+	uint32_t video_phase_seen[10];
+	uint32_t video_phase_missing[10];
 	gw_node_stats_t nodes[GW_MAX_NODES];
 } gw_stats_t;
 
@@ -199,6 +213,12 @@ typedef struct {
 	char peer_addr[64];
 	char dst_mac_str[32];
 	bool verbose;
+	/* Loss-vs-TX-window-position histogram (tally_video_phase_histogram,
+	 * [phase] stats line). Off by default: requesting tx_phase and walking
+	 * frag_total fragments at every frame completion/expiry is extra work
+	 * on the hot video path that's only worth paying for while actively
+	 * diagnosing loss patterns. Enable with --phase-stats. */
+	bool phase_stats;
 	int channel;
 	uint8_t tx_rate_500kbps;
 	uint16_t seq_counter;
@@ -596,6 +616,46 @@ static void frag_slot_missing_list(const frag_reassembly_slot_t *slot,
 	}
 }
 
+/*
+ * Credit every fragment of `slot` (whether it completed or expired with
+ * holes) into the loss-vs-TX-window-position histogram. Present fragments
+ * carry their own tx_phase, stamped by radiod at injection time. A missing
+ * fragment never arrived, so it has none — estimate one from the nearest
+ * present fragment of the SAME frame (fragments of one frame are injected in
+ * increasing frag_idx order within their sender's TX slot, so frag_idx
+ * adjacency is a reasonable proxy for TX-time adjacency). If neither
+ * neighbor is present (the whole frame vanished), there's no anchor to
+ * interpolate from and that fragment is skipped rather than guessed.
+ */
+static void tally_video_phase_histogram(app_ctx_t *ctx, const frag_reassembly_slot_t *slot)
+{
+	for (uint8_t i = 0; i < slot->frag_total; i++) {
+		uint8_t phase;
+
+		if (slot->received_mask & (1u << i)) {
+			phase = slot->tx_phase[i];
+			if (phase <= 9U)
+				ctx->stats.video_phase_seen[phase]++;
+			continue;
+		}
+
+		int lo = -1, hi = -1;
+		for (int j = (int)i - 1; j >= 0; j--) {
+			if (slot->received_mask & (1u << j)) { lo = j; break; }
+		}
+		for (int j = (int)i + 1; j < slot->frag_total; j++) {
+			if (slot->received_mask & (1u << j)) { hi = j; break; }
+		}
+		int src = (lo >= 0 && hi >= 0) ? ((i - lo <= hi - i) ? lo : hi)
+			  : (lo >= 0 ? lo : hi);
+		if (src < 0)
+			continue;
+		phase = slot->tx_phase[src];
+		if (phase <= 9U)
+			ctx->stats.video_phase_missing[phase]++;
+	}
+}
+
 static unsigned int video_reorder_active_count(const video_reorder_ctx_t *vr)
 {
 	unsigned int active = 0;
@@ -887,6 +947,8 @@ static void expire_reassembly_slots(app_ctx_t *ctx, uint64_t now_ms)
 			ctx->stats.video_frags_expected += slot->frag_total;
 			ctx->stats.video_frags_missing +=
 				(uint32_t)(slot->frag_total - frag_slot_received_count(slot));
+			if (ctx->phase_stats)
+				tally_video_phase_histogram(ctx, slot);
 		}
 
 		slot->active = false;
@@ -1071,8 +1133,9 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 	uint8_t buf[ULAMA_FRAME_HEADER_SIZE + ULAMA_FRAME_MAX_PAYLOAD + 64];
 	uint8_t src_mac[6] = {0};
 	int8_t rssi = 0;
+	uint8_t tx_phase = ULAMA_TX_PHASE_NA;
 
-	ssize_t n = ulama_transport_rx_recv(&ctx->ulama_rx, buf, sizeof(buf), 0, src_mac, &rssi);
+	ssize_t n = ulama_transport_rx_recv_ex(&ctx->ulama_rx, buf, sizeof(buf), 0, src_mac, &rssi, &tx_phase);
 	if (n <= 0)
 		return;
 
@@ -1119,18 +1182,23 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 		    video_done_contains(ctx, uf.src_node, uf.seq))
 			continue;
 
-		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, now_ms());
+		bool complete = frag_reassembly_insert(&ctx->reassembly, &uf, tx_phase, now_ms());
+		/* Only look the slot back up when something will actually use it —
+		 * verbose per-fragment logging, or the (opt-in) phase histogram at
+		 * completion — instead of unconditionally on every fragment, which
+		 * added a linear slot scan to the hot video-RX path for everyone. */
+		bool need_slot = (uf.traffic_class == ULAMA_CLASS_VIDEO) &&
+				  (ctx->verbose || (complete && ctx->phase_stats));
+		frag_reassembly_slot_t *cur_slot = need_slot
+			? frag_reassembly_find_slot(&ctx->reassembly, uf.src_node, uf.seq)
+			: NULL;
 		if (uf.traffic_class == ULAMA_CLASS_VIDEO) {
 			ctx->stats.video_frags_rx++;
 			/* Log fragment reception with checksum for debugging */
-			if (ctx->verbose) {
-				frag_reassembly_slot_t *slot = 
-					frag_reassembly_find_slot(&ctx->reassembly, uf.src_node, uf.seq);
-				if (slot) {
-					log_video_frag_received(uf.src_node, uf.seq, uf.frag_idx,
-							       uf.frag_total, uf.payload, uf.payload_len,
-							       slot->received_mask);
-				}
+			if (ctx->verbose && cur_slot) {
+				log_video_frag_received(uf.src_node, uf.seq, uf.frag_idx,
+						       uf.frag_total, uf.payload, uf.payload_len,
+						       cur_slot->received_mask);
 			}
 		}
 
@@ -1153,6 +1221,8 @@ static void handle_ulama_rx(app_ctx_t *ctx)
 				/* All frag_total fragments arrived (that's what "complete"
 				 * means), so this frame contributes 0 to video_frags_missing. */
 				ctx->stats.video_frags_expected += uf.frag_total;
+				if (ctx->phase_stats && cur_slot)
+					tally_video_phase_histogram(ctx, cur_slot);
 
 				video_done_add(ctx, uf.src_node, uf.seq);
 
@@ -1232,6 +1302,7 @@ int main(int argc, char *argv[])
 		{"iface",       required_argument, NULL, 'i'},
 		{"channel",     required_argument, NULL, 'c'},
 		{"tx-rate-mbps", required_argument, NULL, 1000},
+		{"phase-stats", no_argument,       NULL, 1001},
 		{"node",        required_argument, NULL, 'n'},
 		{"dst-mac",       required_argument, NULL, 'm'},
 		{"version",       no_argument,       NULL, 'V'},
@@ -1256,6 +1327,7 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
+		case 1001: ctx.phase_stats = true; break;
 		case 'n': ctx.gw.node_id = (uint8_t)atoi(optarg); break;
 		case 'm': strncpy(ctx.dst_mac_str, optarg, sizeof(ctx.dst_mac_str) - 1); break;
 		case 'V':
@@ -1426,6 +1498,25 @@ int main(int argc, char *argv[])
 				frag_loss_x10 / 10, frag_loss_x10 % 10,
 				s->video_frags_missing, s->video_frags_expected,
 				vbps / 1000, avg_rssi);
+
+			/* Loss-vs-TX-window-position: per-decile loss%, decile 0 = start
+			 * of sender's TX slot, decile 9 = end. See tally_video_phase_histogram.
+			 * Off by default (--phase-stats to enable) — skip building/printing
+			 * when disabled, not just skip tallying. */
+			if (ctx.phase_stats) {
+				char phase_buf[160];
+				int pos = 0;
+				for (int d = 0; d < 10 && pos < (int)sizeof(phase_buf) - 16; d++) {
+					uint32_t seen = s->video_phase_seen[d];
+					uint32_t missing = s->video_phase_missing[d];
+					uint32_t total = seen + missing;
+					uint32_t loss_x10 = total > 0 ? (uint32_t)(((uint64_t)missing * 1000) / total) : 0;
+					pos += snprintf(phase_buf + pos, sizeof(phase_buf) - pos,
+							"%s%d:%u.%u", d == 0 ? "" : " ",
+							d, loss_x10 / 10, loss_x10 % 10);
+				}
+				fprintf(stderr, "%s [phase] loss%%_by_tx_window_decile=[%s]\n", _ts, phase_buf);
+			}
 			/* Per-node summary */
 			bool any_node = false;
 			for (int ni = 0; ni < GW_MAX_NODES; ni++) {
