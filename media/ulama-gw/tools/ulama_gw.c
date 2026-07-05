@@ -579,6 +579,21 @@ static void video_reorder_reset(video_reorder_ctx_t *vr)
 	memset(vr, 0, sizeof(*vr));
 }
 
+static void video_reorder_drop_older_than(video_reorder_ctx_t *vr, uint16_t seq)
+{
+	if (vr == NULL || !vr->primed)
+		return;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		video_reorder_slot_t *slot = &vr->slots[i];
+
+		if (!slot->active || slot->src_u16 != vr->src_u16)
+			continue;
+		if (seq_delta(slot->seq, seq) < 0)
+			slot->active = false;
+	}
+}
+
 static uint8_t frag_slot_received_count(const frag_reassembly_slot_t *slot)
 {
 	uint8_t count = 0;
@@ -1056,6 +1071,7 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 			}
 		}
 		vr->next_seq = slot->seq;
+		video_reorder_drop_older_than(vr, vr->next_seq);
 	}
 }
 
@@ -1067,6 +1083,13 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 
 	if (len > CASCADE_FRAME_MAX_PAYLOAD) {
 		ctx->stats.video_frames_dropped++;
+		return;
+	}
+
+	if (ctx->wait_for_keyframe && !keyframe) {
+		/* Once we have skipped a hole, dependent P-frames can never decode.
+		 * Drop them before they occupy reorder slots and starve the next IDR. */
+		ctx->stats.video_wait_keyframe_drops++;
 		return;
 	}
 
@@ -1086,6 +1109,7 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 			vr->next_seq = seq;
 		} else if (seq_delta(seq, vr->next_seq) >= 0) {
 			vr->next_seq = seq;
+			video_reorder_drop_older_than(vr, vr->next_seq);
 		} else {
 			return; /* stale late keyframe — drop, wait for the next fresh one */
 		}
