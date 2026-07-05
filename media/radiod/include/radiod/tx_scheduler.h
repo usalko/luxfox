@@ -30,6 +30,12 @@ typedef struct {
 	uint8_t  reliability;  /* 0=fire-and-forget, 1=ACK+retry */
 	bool     has_dst_mac;  /* true = use dst_mac instead of default */
 	uint8_t  dst_mac[6];   /* next-hop MAC for relay packets      */
+	/* ULAMA fragment identity, peeked once at enqueue time so the
+	 * overflow policy can tell fragments of the SAME frame apart —
+	 * see the frame-atomic eviction comment in radio_tx_enqueue(). */
+	bool     is_fragment;
+	uint16_t frame_seq;
+	bool     is_last_fragment;
 } radio_tx_slot_t;
 
 /* ---- Per-priority ring buffer ---- */
@@ -41,6 +47,12 @@ typedef struct {
 	uint16_t count;
 	uint32_t enqueued;
 	uint32_t dropped;
+	/* Tracks whether a fragmented frame is currently "in flight": at
+	 * least one of its fragments has already been dequeued (possibly
+	 * already on the air) while others are still queued. Such a frame
+	 * must never be partially evicted — see radio_tx_enqueue(). */
+	bool     dirty_active;
+	uint16_t dirty_frame_seq;
 } radio_tx_queue_t;
 
 /* ---- TX Scheduler context ---- */
