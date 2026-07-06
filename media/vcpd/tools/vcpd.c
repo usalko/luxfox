@@ -157,6 +157,23 @@ typedef struct {
 	uint8_t dst_node;
 	uint8_t stream_id;
 	uint16_t ulama_seq;
+	/*
+	 * Separate seq space for send_ulama_video() (UVCP PONG replies + benchmark
+	 * mode), which tags its frames ULAMA_CLASS_VIDEO but is NOT part of the
+	 * real video frame stream. It used to share ulama_seq with
+	 * send_video_frame(): every PONG sent in response to an operator PING (in
+	 * handle_uvcp_rx(), on the same poll loop as real video) consumed one
+	 * value from the SAME counter, leaving a hole in the video-only sequence
+	 * numbers. ulama-gw's reorder buffer tracks video seq continuity purely
+	 * numerically and can't tell "PONG stole this number" from "a video frame
+	 * was lost here" — so every PONG produced a false gap, which sets
+	 * wait_for_keyframe and blanks every subsequent frame until the next
+	 * keyframe. Field logs (2026-07-06) show exactly this: "reorder skip"
+	 * firing several times a second with frag_loss=0% and no matching
+	 * "frag missing"/"reassembly expire" log for that seq — i.e. the seq was
+	 * never a video frame to begin with.
+	 */
+	uint16_t misc_seq;
 	bool verbose;
 	bool autostart;
 	char test_output[256];
@@ -269,7 +286,7 @@ static bool send_ulama_video(vcpd_ctx_t *ctx, const uint8_t *data, size_t len)
 		.dst_node = ctx->dst_node,
 		.flags = ULAMA_FLAG_DUP_ALLOWED,
 		.traffic_class = ULAMA_CLASS_VIDEO,
-		.seq = ctx->ulama_seq++,
+		.seq = ctx->misc_seq++,
 		.frag_idx = 0,
 		.frag_total = 1,
 		.ttl = ULAMA_FRAME_DEFAULT_TTL,

@@ -97,23 +97,26 @@ static void usage(const char *prog)
 #define GW_VIDEO_REORDER_SLOTS 32
 /*
  * Reorder hold for a sequence hole where NOTHING is in flight for that seq at
- * all (no fragment of it ever arrived) — genuinely nothing to wait for, so
- * keep it short: a real loss should only add a little latency before we skip
- * ahead.
+ * all (no fragment of it ever arrived) — genuinely nothing to wait for.
  *
- * Was 250ms, then 400ms (field logs 2026-07-06 showed "reorder skip
- * ... waited=250-253ms" firing constantly at frag_loss=0% — the frame wasn't
- * lost, it just hadn't arrived when the gate gave up). But ANY fixed hold
- * shorter than frag_reassembly's own FRAG_TIMEOUT_MS (800ms) has the same
- * problem for a frame that IS still actively reassembling: the reorder gate
- * declares a gap before reassembly itself would give up. See
- * reassembly_has_pending_frame() below — while a frame is still in flight we
- * wait out its actual reassembly timeout instead of this fixed hold. Every
- * false gap sets wait_for_keyframe and blanks every frame until the next
- * keyframe (up to ~1s at gop=25/1000ms IDR), which was the real cause of the
- * choppiness, not the underlying RF loss.
+ * Went 250ms -> 400ms trying to reduce false gaps (a frame that just hadn't
+ * arrived yet, not lost — field logs 2026-07-06 showed "reorder skip
+ * ... waited=250-253ms" firing constantly at frag_loss=0%). That helped
+ * correctness but not the actual symptom: at this link's throughput ceiling
+ * (~1 fragment per UL slot), a frame can sit completely unsent in radiod's
+ * own TX queue for hundreds of ms before its first fragment even leaves the
+ * drone — reassembly_has_pending_frame() sees nothing, because nothing has
+ * arrived yet, no matter how long we wait. Any hold here was fighting a
+ * losing battle against a queueing delay it can't observe.
+ *
+ * Now that frame delivery no longer blanks everything until the next
+ * keyframe (see deliver_video_frame()), a short hold is the right choice for
+ * a REALTIME feed: don't sit on a completed, deliverable frame waiting for a
+ * gap that may be a queueing delay of unknown length — move on immediately
+ * and let the picture self-correct over the next frame or two. 2ms is
+ * essentially "check once more very briefly, then go."
  */
-#define GW_VIDEO_REORDER_HOLD_MS 400
+#define GW_VIDEO_REORDER_HOLD_MS 2
 #define GW_VIDEO_DONE_WINDOW 64
 /*
  * Control refresh interval for held-stick RC state.
@@ -917,18 +920,20 @@ static void expire_reassembly_slots(app_ctx_t *ctx, uint64_t now_ms)
 static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
 				size_t len, uint16_t src_u16, bool keyframe)
 {
+	/*
+	 * Previously held every P-frame back after a sequence gap until the next
+	 * keyframe, to hide the visible gray/corrupt blink from a broken IPPP
+	 * reference chain. In practice that turned one missing/late fragment into
+	 * up to ~1s of frozen video (see video_wait_keyframe_drops history) — for
+	 * a realtime FPV feed, a pilot's eye tracks motion far better through a
+	 * brief glitch than through a freeze, and the picture usually
+	 * self-corrects within a frame or two anyway. Always forward what
+	 * reassembled correctly; only bookkeeping (wait_for_keyframe as a
+	 * diagnostic marker, IDR re-request) survives from the old gate.
+	 */
 	if (keyframe) {
 		ctx->wait_for_keyframe = false;
 		ctx->idr_request_in_flight = false;
-	} else if (ctx->wait_for_keyframe) {
-		/*
-		 * A sequence gap means at least one reference frame is gone. Feeding the
-		 * browser dependent P-frames after that produces the visible gray/corrupt
-		 * blink until the next IDR. Hold P-frames back and resume only on a fresh
-		 * keyframe.
-		 */
-		ctx->stats.video_wait_keyframe_drops++;
-		return;
 	}
 
 	cascade_frame_view_t cf = {
@@ -948,35 +953,6 @@ static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
 	} else {
 		ctx->stats.video_frames_dropped++;
 	}
-}
-
-/*
- * True when ANY frame for (src_node, seq) is currently mid-reassembly: at
- * least one of its fragments has arrived but the frame is not complete yet.
- *
- * Originally this only checked keyframes (to give vcpd's delayed keyframe
- * copies time to land). But frag_reassembly_expire() itself doesn't give up
- * on a frame until FRAG_TIMEOUT_MS (800ms) — so an ordinary P-frame that's
- * still legitimately reassembling past GW_VIDEO_REORDER_HOLD_MS (400ms) was
- * being declared a "gap" by flush_video_reorder() 400ms BEFORE reassembly
- * itself would give up. That's not a real loss, just a frame that hasn't
- * finished arriving yet — but the false gap still sets wait_for_keyframe and
- * blanks every subsequent frame until the next keyframe (up to ~1s at
- * gop=25/1000ms IDR), which is what actually produced the choppiness despite
- * frag_loss=0% in the field logs. Checking for ANY pending frame (not just
- * keyframes) and holding it out to the reassembly timeout fixes this: we only
- * declare a gap once the frame is actually gone, never while it's still
- * legitimately in flight.
- */
-static bool reassembly_has_pending_frame(const frag_reassembly_ctx_t *rc,
-					 uint8_t src_node, uint16_t seq)
-{
-	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
-		const frag_reassembly_slot_t *slot = &rc->slots[i];
-		if (slot->active && slot->src_node == src_node && slot->seq == seq)
-			return true;
-	}
-	return false;
 }
 
 static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
@@ -1001,23 +977,20 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 			return;
 
 		/*
-		 * Wait longer for the missing frame while it's still actively
-		 * reassembling (regardless of keyframe/P-frame), so we never declare a
-		 * gap before frag_reassembly_expire() itself would give up
-		 * (FRAG_TIMEOUT_MS). Only use the short hold when nothing is in flight
-		 * for this seq at all — genuinely nothing to wait for.
+		 * Whether the missing frame is still actively reassembling or has
+		 * nothing at all, we no longer hold a READY, decodable frame hostage
+		 * waiting for it — see deliver_video_frame(): showing frames out of
+		 * order (or with a stale reference) is a brief visual glitch now, not
+		 * a ~1s freeze, so there's no payoff to waiting long. GW_VIDEO_REORDER_HOLD_MS
+		 * is just a "check once more, then go" debounce, not a real wait.
 		 */
-		uint8_t src_node = gw_addr_u16_to_u8(&ctx->gw, vr->src_u16);
-		bool pending = reassembly_has_pending_frame(&ctx->reassembly,
-							    src_node, vr->next_seq);
-		uint32_t hold = pending
-				? (FRAG_TIMEOUT_MS + 50U) : GW_VIDEO_REORDER_HOLD_MS;
+		uint32_t hold = GW_VIDEO_REORDER_HOLD_MS;
 		if ((now_ms - slot->ready_ms) < hold)
 			return;
 
 		if (seq_delta(slot->seq, vr->next_seq) > 0) {
 			log_video_reorder_skip(ctx, vr->next_seq, slot->seq,
-					       hold, pending,
+					       hold, false,
 					       now_ms - slot->ready_ms);
 			ctx->stats.video_reorder_skips += (uint16_t)(slot->seq - vr->next_seq);
 			ctx->wait_for_keyframe = true;
@@ -1027,7 +1000,6 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 			}
 		}
 		vr->next_seq = slot->seq;
-		video_reorder_drop_older_than(vr, vr->next_seq);
 	}
 }
 
@@ -1041,10 +1013,8 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 		ctx->stats.video_frames_dropped++;
 		return;
 	}
-	if (ctx->wait_for_keyframe && !keyframe) {
-		ctx->stats.video_wait_keyframe_drops++;
-		return;
-	}
+	/* No more wait_for_keyframe gate here — see deliver_video_frame(). Every
+	 * successfully reassembled frame gets queued for delivery. */
 
 	if (keyframe) {
 		/*
