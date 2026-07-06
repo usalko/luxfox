@@ -212,6 +212,10 @@ start_ulama_gw() {
     # radiod owns the monitor interface and handles SYNC/TDMA scheduling
     # ulama-gw only needs cascade endpoints and transport=radiod
     # (it inherits channel/node-id config from radiod via IPC)
+
+    sudo ip link set wlan0 down
+    sudo ip link set wlan0 up
+    sudo iw dev wlan0 set channel 6
     
     sudo "$ULAMA_GW_BIN" \
         --cascade-in "$CASCADE_IN" \
