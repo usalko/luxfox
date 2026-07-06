@@ -376,9 +376,8 @@ static void test_beacon_contains_slot_map_and_no_delay_resp(void)
 	radio_sync_update_slot_map(&s, 100600);
 	sync_frame_t beacon;
 	radio_sync_build_beacon(&s, &beacon, 101000);
-	CHECK(beacon.num_slots == 2);
+	CHECK(beacon.num_slots == 1);
 	CHECK(beacon.slot_map[0] == 1);
-	CHECK(beacon.slot_map[1] == 1);
 	CHECK(beacon.relay_hops == 0);
 	CHECK(beacon.master_node_id == 5);
 	CHECK(beacon.sender_node_id == 5);
@@ -419,16 +418,14 @@ static void test_bootstrap_join_promotes_slave_to_slotted(void)
 	radio_sync_on_delay_req_rx(&master, &dreq,
 		beacon1.superframe_seq * 1000 + 100);
 	radio_sync_update_slot_map(&master, beacon1.superframe_seq * 1000 + 200);
-	CHECK(master.num_slots == 2);
+	CHECK(master.num_slots == 1);
 	CHECK(master.slot_map[0] == 1);
-	CHECK(master.slot_map[1] == 1);
 
 	sync_frame_t beacon2;
 	radio_sync_build_beacon(&master, &beacon2, 2000);
 	CHECK(beacon2.superframe_seq == SYNC_BOOTSTRAP_PERIOD + 1);
-	CHECK(beacon2.num_slots == 2);
+	CHECK(beacon2.num_slots == 1);
 	CHECK(beacon2.slot_map[0] == 1);
-	CHECK(beacon2.slot_map[1] == 1);
 
 	CHECK(radio_sync_on_sync_rx(&slave, &beacon2, 17000, 254));
 	CHECK(slave.my_slot_index == 0);
@@ -468,15 +465,14 @@ static void test_master_ul_packet_refreshes_known_slave(void)
 	radio_sync_on_delay_req_rx(&master, &dreq, 100000);
 	radio_sync_update_slot_map(&master, 100100);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 2);
+	CHECK(master.num_slots == 1);
 
 	/* A normal ULAMA packet must refresh liveness too. */
 	radio_sync_on_ul_packet_rx(&master, 1, 180000);
 	radio_sync_update_slot_map(&master, 230000);
 	CHECK(master.num_known_slaves == 1);
-	CHECK(master.num_slots == 2);
+	CHECK(master.num_slots == 1);
 	CHECK(master.slot_map[0] == 1);
-	CHECK(master.slot_map[1] == 1);
 }
 
 static void test_priority_slot_rotation_with_four_slaves(void)

@@ -236,8 +236,8 @@ static unsigned int tx_fail_count = 0;
  * P-frames without adding latency). Keyframes already arrive near-certainly with
  * 2 copies, so they keep 2.
  */
-#define KEYFRAME_EXTRA_COPIES 2
-#define PFRAME_EXTRA_COPIES   2
+#define KEYFRAME_EXTRA_COPIES 1
+#define PFRAME_EXTRA_COPIES   0
 
 /* Pack and send one already-built ULAMA frame, tracking consecutive
  * TX failures for the main loop's transport-recovery logic. */

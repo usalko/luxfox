@@ -34,6 +34,7 @@ typedef struct {
 	/* Per-priority TX counts */
 	uint32_t tx_by_prio[4];
 	uint32_t queue_drop_snap[4];
+	uint32_t rx_self_dropped_snap;
 	uint32_t ipc_tx_ok_snap;
 	uint32_t ipc_tx_fail_snap;
 

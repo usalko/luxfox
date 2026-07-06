@@ -240,7 +240,11 @@ static void update_slot_map_entries(radio_sync_t *s,
 		other_ids[n_others++] = active_ids[i];
 	}
 
-	if (!priority_present || SYNC_PRIORITY_SLOT_WEIGHT <= 1U) {
+	/* Give the video-priority node a second UL slot only when there is at least
+	 * one OTHER active slave to separate the copies. With a single active slave,
+	 * duplicating its slot back-to-back only stretches every superframe while
+	 * giving no spacing benefit. */
+	if (!priority_present || SYNC_PRIORITY_SLOT_WEIGHT <= 1U || n_others == 0U) {
 		s->num_slots = n_active < SYNC_MAX_SLOTS ? n_active : SYNC_MAX_SLOTS;
 		for (uint8_t i = 0; i < s->num_slots; i++)
 			s->slot_map[i] = active_ids[i];

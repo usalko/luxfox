@@ -56,6 +56,7 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	int64_t elapsed_us;
 	double elapsed_s;
 	double tx_pct, air_pct, rx_pct;
+	uint32_t rx_self_dropped = 0;
 
 	if (st == NULL)
 		return 0;
@@ -97,12 +98,15 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	}
 
 	if (rxd != NULL) {
-		fprintf(stderr, "ack[ok=%u to=%u retx=%u] dedup=%u/%u",
+		rx_self_dropped = rxd->stats.rx_self_dropped -
+			st->rx_self_dropped_snap;
+		fprintf(stderr, "ack[ok=%u to=%u retx=%u] dedup=%u/%u self=%u",
 			rxd->stats.tx_ack_ok,
 			rxd->stats.tx_ack_timeout,
 			rxd->stats.tx_retries,
 			rxd->stats.rx_dedup_dropped,
-			rxd->stats.rx_ulama_dedup_dropped);
+			rxd->stats.rx_ulama_dedup_dropped,
+			rx_self_dropped);
 
 		if (rxd->stats.relay_forwarded > 0 ||
 		    rxd->stats.relay_dropped_ttl > 0) {
@@ -174,12 +178,15 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	/* Reset for next period but preserve queue-drop snapshots. */
 	int64_t saved_start = now_us;
 	uint32_t saved_qdrop[4] = {0, 0, 0, 0};
+	uint32_t saved_rx_self_dropped = 0;
 	uint32_t saved_ipc_tx_ok = 0;
 	uint32_t saved_ipc_tx_fail = 0;
 	if (sched != NULL) {
 		for (int p = 0; p < 4; p++)
 			saved_qdrop[p] = sched->queues[p].dropped;
 	}
+	if (rxd != NULL)
+		saved_rx_self_dropped = rxd->stats.rx_self_dropped;
 	if (ipc != NULL) {
 		saved_ipc_tx_ok = ipc->tx_ok;
 		saved_ipc_tx_fail = ipc->tx_fail;
@@ -188,6 +195,7 @@ int radio_stats_report(radio_stats_t *st, int64_t now_us,
 	st->period_start_us = saved_start;
 	for (int p = 0; p < 4; p++)
 		st->queue_drop_snap[p] = saved_qdrop[p];
+	st->rx_self_dropped_snap = saved_rx_self_dropped;
 	st->ipc_tx_ok_snap = saved_ipc_tx_ok;
 	st->ipc_tx_fail_snap = saved_ipc_tx_fail;
 	return 1;

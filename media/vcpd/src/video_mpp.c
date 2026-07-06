@@ -937,6 +937,22 @@ static void task_decode(mpp_ctx_t *ctx)
 		if (ret != RK_SUCCESS) break;
 		mpp_diag_inc_vdec_frame(ctx);
 
+		/*
+		 * Hue-swap compensation: yellow renders green and blue renders
+		 * pink/magenta on this board — the textbook symptom of the Cb/Cr
+		 * (U/V) chroma planes being transposed. init_vdec()/init_venc()
+		 * both declare RK_FMT_YUV420SP (NV12, U-before-V) and agree with
+		 * each other and with Rockchip's own sample, so this isn't a
+		 * mismatch in vcpd's own format declarations — it's the RV1106
+		 * VDEC's actual JPEG-decode chroma byte order not matching what
+		 * it declares. The bytes VDEC wrote aren't touched; only how VENC
+		 * is told to interpret them, which corrects the swap without
+		 * needing to know why the hardware does this. If this ever gets
+		 * fixed upstream (or doesn't reproduce on other board revisions),
+		 * this is the one line to remove.
+		 */
+		frame.stVFrame.enPixelFormat = RK_FMT_YUV420SP_VU;
+
 		uint64_t vs = mono_us();
 		RK_S32 sr = RK_MPI_VENC_SendFrame(VENC_CHN_ID, &frame, VENC_SEND_TIMEOUT_MS);
 		mpp_diag_note_venc_submit_latency(ctx, mono_us() - vs);

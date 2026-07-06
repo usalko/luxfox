@@ -96,19 +96,24 @@ static void usage(const char *prog)
 #define GW_MAX_NODES 254
 #define GW_VIDEO_REORDER_SLOTS 32
 /*
- * Reorder hold for ordinary sequence holes (a lost P-frame): keep it short so a
- * loss only adds a little latency before we skip ahead.
+ * Reorder hold for a sequence hole where NOTHING is in flight for that seq at
+ * all (no fragment of it ever arrived) — genuinely nothing to wait for, so
+ * keep it short: a real loss should only add a little latency before we skip
+ * ahead.
  *
- * GW_VIDEO_KF_HOLD_MS is used ONLY while the missing frame is a keyframe that is
- * still being reassembled. vcpd sends delayed keyframe copies on the next couple
- * of frames (~100 ms and ~200 ms later), so with a short hold the gate always
- * skipped the keyframe BEFORE its copies arrived, wasting the redundancy and
- * causing a skip burst right after each keyframe (the visible "blinking"). Hold
- * long enough for the copies to land, but only when a keyframe is actually in
- * flight, so ordinary P-frame losses stay low-latency.
+ * Was 250ms, then 400ms (field logs 2026-07-06 showed "reorder skip
+ * ... waited=250-253ms" firing constantly at frag_loss=0% — the frame wasn't
+ * lost, it just hadn't arrived when the gate gave up). But ANY fixed hold
+ * shorter than frag_reassembly's own FRAG_TIMEOUT_MS (800ms) has the same
+ * problem for a frame that IS still actively reassembling: the reorder gate
+ * declares a gap before reassembly itself would give up. See
+ * reassembly_has_pending_frame() below — while a frame is still in flight we
+ * wait out its actual reassembly timeout instead of this fixed hold. Every
+ * false gap sets wait_for_keyframe and blanks every frame until the next
+ * keyframe (up to ~1s at gop=25/1000ms IDR), which was the real cause of the
+ * choppiness, not the underlying RF loss.
  */
-#define GW_VIDEO_REORDER_HOLD_MS 250
-#define GW_VIDEO_KF_HOLD_MS 600
+#define GW_VIDEO_REORDER_HOLD_MS 400
 #define GW_VIDEO_DONE_WINDOW 64
 /*
  * Control refresh interval for held-stick RC state.
@@ -559,6 +564,22 @@ static void video_reorder_reset(video_reorder_ctx_t *vr)
 	memset(vr, 0, sizeof(*vr));
 }
 
+static void video_reorder_drop_older_than(video_reorder_ctx_t *vr,
+					  uint16_t min_seq)
+{
+	if (vr == NULL || !vr->primed)
+		return;
+
+	for (int i = 0; i < GW_VIDEO_REORDER_SLOTS; i++) {
+		video_reorder_slot_t *slot = &vr->slots[i];
+
+		if (!slot->active || slot->src_u16 != vr->src_u16)
+			continue;
+		if (seq_delta(slot->seq, min_seq) < 0)
+			slot->active = false;
+	}
+}
+
 static uint8_t frag_slot_received_count(const frag_reassembly_slot_t *slot)
 {
 	uint8_t count = 0;
@@ -725,7 +746,7 @@ static void log_video_reorder_skip(const app_ctx_t *ctx,
 				   uint16_t expected_seq,
 				   uint16_t next_ready_seq,
 				   uint32_t hold_ms,
-				   bool pending_keyframe,
+				   bool pending,
 				   uint64_t wait_ms)
 {
 	static uint32_t trace_count;
@@ -736,13 +757,13 @@ static void log_video_reorder_skip(const app_ctx_t *ctx,
 	}
 
 	fprintf(stderr,
-		"gw: video reorder skip src=%u expect=%u have=%u hold=%u waited=%llums pending_kf=%u active=%u\n",
+		"gw: video reorder skip src=%u expect=%u have=%u hold=%u waited=%llums pending=%u active=%u\n",
 		(unsigned)gw_addr_u16_to_u8(&ctx->gw, ctx->video_reorder.src_u16),
 		expected_seq,
 		next_ready_seq,
 		hold_ms,
 		(unsigned long long)wait_ms,
-		pending_keyframe ? 1U : 0U,
+		pending ? 1U : 0U,
 		video_reorder_active_count(&ctx->video_reorder));
 	trace_count++;
 }
@@ -930,18 +951,29 @@ static void deliver_video_frame(app_ctx_t *ctx, const uint8_t *data,
 }
 
 /*
- * True when a keyframe for (src_node, seq) is currently mid-reassembly: at least
- * one keyframe-flagged fragment has arrived but the frame is not complete yet.
- * Used to hold the reorder gate longer for a keyframe that delayed copies will
- * finish, without adding latency to ordinary P-frame holes.
+ * True when ANY frame for (src_node, seq) is currently mid-reassembly: at
+ * least one of its fragments has arrived but the frame is not complete yet.
+ *
+ * Originally this only checked keyframes (to give vcpd's delayed keyframe
+ * copies time to land). But frag_reassembly_expire() itself doesn't give up
+ * on a frame until FRAG_TIMEOUT_MS (800ms) — so an ordinary P-frame that's
+ * still legitimately reassembling past GW_VIDEO_REORDER_HOLD_MS (400ms) was
+ * being declared a "gap" by flush_video_reorder() 400ms BEFORE reassembly
+ * itself would give up. That's not a real loss, just a frame that hasn't
+ * finished arriving yet — but the false gap still sets wait_for_keyframe and
+ * blanks every subsequent frame until the next keyframe (up to ~1s at
+ * gop=25/1000ms IDR), which is what actually produced the choppiness despite
+ * frag_loss=0% in the field logs. Checking for ANY pending frame (not just
+ * keyframes) and holding it out to the reassembly timeout fixes this: we only
+ * declare a gap once the frame is actually gone, never while it's still
+ * legitimately in flight.
  */
-static bool reassembly_has_pending_keyframe(const frag_reassembly_ctx_t *rc,
-					    uint8_t src_node, uint16_t seq)
+static bool reassembly_has_pending_frame(const frag_reassembly_ctx_t *rc,
+					 uint8_t src_node, uint16_t seq)
 {
 	for (int i = 0; i < FRAG_MAX_SLOTS; i++) {
 		const frag_reassembly_slot_t *slot = &rc->slots[i];
-		if (slot->active && slot->src_node == src_node && slot->seq == seq &&
-		    slot_has_keyframe_fragment(slot))
+		if (slot->active && slot->src_node == src_node && slot->seq == seq)
 			return true;
 	}
 	return false;
@@ -969,22 +1001,23 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 			return;
 
 		/*
-		 * Wait longer for the missing frame only when it is a keyframe that is
-		 * still being reassembled, so vcpd's delayed keyframe copies (~100 and
-		 * ~200 ms later) can complete it before we skip. Ordinary holes use the
-		 * short hold to keep latency low.
+		 * Wait longer for the missing frame while it's still actively
+		 * reassembling (regardless of keyframe/P-frame), so we never declare a
+		 * gap before frag_reassembly_expire() itself would give up
+		 * (FRAG_TIMEOUT_MS). Only use the short hold when nothing is in flight
+		 * for this seq at all — genuinely nothing to wait for.
 		 */
 		uint8_t src_node = gw_addr_u16_to_u8(&ctx->gw, vr->src_u16);
-		bool pending_keyframe = reassembly_has_pending_keyframe(&ctx->reassembly,
+		bool pending = reassembly_has_pending_frame(&ctx->reassembly,
 							    src_node, vr->next_seq);
-		uint32_t hold = pending_keyframe
-				? GW_VIDEO_KF_HOLD_MS : GW_VIDEO_REORDER_HOLD_MS;
+		uint32_t hold = pending
+				? (FRAG_TIMEOUT_MS + 50U) : GW_VIDEO_REORDER_HOLD_MS;
 		if ((now_ms - slot->ready_ms) < hold)
 			return;
 
 		if (seq_delta(slot->seq, vr->next_seq) > 0) {
 			log_video_reorder_skip(ctx, vr->next_seq, slot->seq,
-					       hold, pending_keyframe,
+					       hold, pending,
 					       now_ms - slot->ready_ms);
 			ctx->stats.video_reorder_skips += (uint16_t)(slot->seq - vr->next_seq);
 			ctx->wait_for_keyframe = true;
@@ -994,6 +1027,7 @@ static void flush_video_reorder(app_ctx_t *ctx, uint64_t now_ms)
 			}
 		}
 		vr->next_seq = slot->seq;
+		video_reorder_drop_older_than(vr, vr->next_seq);
 	}
 }
 
@@ -1005,6 +1039,10 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 
 	if (len > CASCADE_FRAME_MAX_PAYLOAD) {
 		ctx->stats.video_frames_dropped++;
+		return;
+	}
+	if (ctx->wait_for_keyframe && !keyframe) {
+		ctx->stats.video_wait_keyframe_drops++;
 		return;
 	}
 
@@ -1027,6 +1065,7 @@ static void queue_video_frame(app_ctx_t *ctx, const uint8_t *data,
 		} else {
 			return; /* stale late keyframe — drop, wait for the next fresh one */
 		}
+		video_reorder_drop_older_than(vr, vr->next_seq);
 	} else if (!vr->primed || vr->src_u16 != src_u16) {
 		/* Not yet primed: prime on the FIRST frame from this source, even if it
 		 * is not a keyframe. Hard-gating on keyframes stalls the whole pipeline

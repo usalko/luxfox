@@ -104,6 +104,14 @@ static void config_defaults(radiod_config_t *cfg)
 	cfg->ack_max_retry = ACK_MAX_RETRY;
 	cfg->sync_dl_us = 1500;
 	cfg->sync_ul_us = 5000;
+	/*
+	 * 300us was tried and made things much worse in the field (build #427):
+	 * measured scheduling/USB jitter on this board regularly runs into the
+	 * low tens of milliseconds even under SCHED_FIFO, so a 300us guard was
+	 * blown almost every cycle — "UL slot entered 14-36ms late", "overran by
+	 * 9-31ms", constant master/slave resync, CTRL not getting through. 2000us
+	 * is the value from the last field test that actually worked well.
+	 */
 	cfg->sync_guard_us = 2000;
 	cfg->sync_enabled = true;
 }
@@ -451,9 +459,30 @@ static int64_t sync_bootstrap_announce_us(const radio_sync_t *sync)
 
 static void sleep_until(int64_t target_us)
 {
+	struct timespec ts;
 	int64_t remain = target_us - now_us();
-	if (remain > 0)
-		usleep((useconds_t)remain);
+
+	if (remain <= 0)
+		return;
+
+	/*
+	 * A prior version busy-spun ("while (now_us() < target_us) ;") for the
+	 * final <=2ms of every sleep_until() call, to dodge usleep()'s relative-
+	 * time overshoot. On this board that pegged one CPU core at 100% under
+	 * SCHED_FIFO priority 20 — a real-time thread that spins never yields,
+	 * so it starved everything else on that core (video encode, USB IRQ
+	 * bottom halves, vcpd/ulamad). The result was WORSE timing, not better:
+	 * UL slots entering 14-36ms late and overrunning by 9-31ms (see field
+	 * logs from build #427), constant master/slave resync, and CTRL frames
+	 * not getting through at all. clock_nanosleep(TIMER_ABSTIME) already
+	 * sleeps on an absolute CLOCK_MONOTONIC deadline via an hrtimer — it
+	 * does not have usleep()'s relative-time drift, so there is nothing for
+	 * a spin to fix here. Never spin; let the scheduler do its job.
+	 */
+	ts.tv_sec = (time_t)(target_us / 1000000LL);
+	ts.tv_nsec = (long)((target_us % 1000000LL) * 1000LL);
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
+		;
 }
 
 static void master_cycle(radio_sync_t *sync,
@@ -503,14 +532,21 @@ static void master_cycle(radio_sync_t *sync,
 	}
 	sleep_until(dl_deadline);
 
-	/* Guard */
-	usleep(sync->guard_us);
+	/* Guard and UL windows must stay aligned to the beacon we just sent.
+	 * Relative usleep() jitter here directly shifts the master's advertised UL
+	 * receive windows away from the slave's computed slot geometry. */
+	int64_t ul_phase_start = dl_deadline + sync->guard_us;
+	if (ul_phase_start > now_us())
+		sleep_until(ul_phase_start);
 
 	/* UL slots: receive from each slave */
 	for (uint8_t i = 0; i < sync->num_slots; i++) {
-		int64_t ul_deadline = now_us() + sync->ul_slot_us;
+		int64_t ul_start = ul_phase_start +
+			(int64_t)i * ((int64_t)sync->ul_slot_us + sync->guard_us);
+		int64_t ul_deadline = ul_start + sync->ul_slot_us;
+		if (ul_start > now_us())
+			sleep_until(ul_start);
 		radio_rx_slot(rxd, pcap, own_mac, ul_deadline);
-		usleep(sync->guard_us);
 	}
 
 	/* Bootstrap/contention window.

@@ -302,9 +302,26 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 	while (now_us() < deadline_us) {
 		/* Sleep until packet arrives or deadline */
 		if (pcap_fd >= 0) {
-			int remaining_ms = (int)((deadline_us - now_us()) / 1000);
-			if (remaining_ms <= 0)
+			int64_t remaining_us = deadline_us - now_us();
+			if (remaining_us <= 0)
 				break;
+
+			/*
+			 * A prior version skipped poll() entirely whenever remaining_us
+			 * was under 20ms — which covers EVERY SYNC-critical RX window
+			 * (beacon hunt ~16ms, UL slot 5ms, DL slot 1.5ms) — and fell
+			 * through to a bare nonblocking pcap_next_ex() loop instead, i.e.
+			 * an unconditional busy-spin for virtually the entire RX phase.
+			 * That's exactly the 100%-CPU failure mode the comment right
+			 * above this block already warns about. Under SCHED_FIFO
+			 * priority 20 that starves everything else on the core (video
+			 * encode, USB IRQ bottom halves, vcpd/ulamad), and field logs
+			 * (build #427) show it made timing WORSE, not better: UL slots
+			 * entering 14-36ms late, overruns of 9-31ms, constant
+			 * master/slave resync, CTRL not getting through at all. Always
+			 * poll(); never skip it based on window size.
+			 */
+			int remaining_ms = (int)(remaining_us / 1000);
 			struct pollfd pfd = { .fd = pcap_fd, .events = POLLIN };
 			int64_t poll_start_us = now_us();
 			poll(&pfd, 1, remaining_ms > 0 ? remaining_ms : 1);
@@ -346,6 +363,15 @@ static void radio_rx_slot_impl(radio_rx_dispatcher_t *rxd,
 			rxd->stats.rx_pcap_error++;
 			break;
 		}
+
+		/* A hard RX deadline matters more than draining one more packet. Without
+		 * a working BPF, userspace may chew through unrelated monitor traffic for
+		 * long enough to steal the slave's whole guard/UL start. If we reached the
+		 * deadline by the time pcap handed us a frame, stop here and let the next
+		 * phase start on time. The sync-beacon wait is the exception: there we
+		 * still must process the packet that woke us so the slave can re-anchor. */
+		if (!stop_on_sync && now_us() >= deadline_us)
+			break;
 
 		rxd->stats.rx_total++;
 
