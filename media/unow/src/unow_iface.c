@@ -44,7 +44,8 @@ int unow_iface_apply_filter(pcap_t *handle, char *error_buf, size_t error_buf_le
 	}
 	snprintf(filter_expr,
 		 sizeof(filter_expr),
-		 "wlan type mgt subtype action and wlan addr3 %02x:%02x:%02x:%02x:%02x:%02x and wlan[24] = %u and wlan[25] = 0x%02x and wlan[26] = 0x%02x and wlan[27] = 0x%02x",
+		 "wlan type mgt and wlan[0] = 0x%02x and wlan addr3 %02x:%02x:%02x:%02x:%02x:%02x and wlan[24] = %u and wlan[25] = 0x%02x and wlan[26] = 0x%02x and wlan[27] = 0x%02x",
+		 (unsigned int)(UNOW_DOT11_FC_ACTION & 0x00FFU),
 		 k_unow_bssid[0],
 		 k_unow_bssid[1],
 		 k_unow_bssid[2],
