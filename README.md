@@ -1,3 +1,5 @@
+# STALLED
+
 ![luxfox](assets/mascot.png)
 # Luxfox Pico SDK
 [中文版](./README_CN.md)
